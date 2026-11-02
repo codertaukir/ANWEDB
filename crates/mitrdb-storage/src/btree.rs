@@ -1091,7 +1091,13 @@ impl BPlusTree {
         }
         let total_bytes = *prefix_bytes.last().unwrap_or(&0);
         let mut mid = total_len / 2;
-        for cand_mid in std::iter::once(total_len / 2).chain(1..total_len) {
+        // Rightmost leaf: split near the end so sequential appends leave full leaves.
+        let first_try = if left_leaf.next_leaf_page_id == INVALID_PAGE_ID {
+            total_len.saturating_sub(1)
+        } else {
+            total_len / 2
+        };
+        for cand_mid in std::iter::once(first_try).chain(1..total_len) {
             if cand_mid == 0 || cand_mid >= total_len {
                 continue;
             }
@@ -2101,6 +2107,39 @@ mod tests {
         tree.insert(b"k20", b"updated20").unwrap();
         assert_eq!(tree.get(b"k20").unwrap(), Some(b"updated20".to_vec()));
 
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_btree_sequential_append_leaf_fill() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("mitrdb_btree_fill_{}", std::process::id()));
+        let db_path = temp_dir.join("test.db");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+
+        let disk = Arc::new(DiskManager::open_or_create(db_path.as_path()).unwrap());
+        let bpm = Arc::new(BufferPoolManager::new(disk.clone(), 64));
+        let tree = BPlusTree::create(bpm.clone(), None, 64).unwrap();
+
+        for i in 0..1000u32 {
+            let k = format!("key_{:04}", i);
+            tree.insert(k.as_bytes(), b"val").unwrap();
+        }
+
+        let mut leaf = tree.find_leftmost_leaf(tree.root_page_id()).unwrap();
+        let mut leaf_count = 1usize;
+        while leaf.next_leaf_page_id != INVALID_PAGE_ID {
+            leaf = tree.read_node(leaf.next_leaf_page_id).unwrap();
+            leaf_count += 1;
+        }
+        eprintln!("sequential 1000 keys, max_keys=64: leaf_count={}", leaf_count);
+        // 50/50 split gives ~31 leaves; append-split should give ~16.
+        assert!(leaf_count <= 20, "leaf_count={}", leaf_count);
+
+        for i in 0..1000u32 {
+            let k = format!("key_{:04}", i);
+            assert_eq!(tree.get(k.as_bytes()).unwrap(), Some(b"val".to_vec()));
+        }
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
