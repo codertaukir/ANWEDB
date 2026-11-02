@@ -559,6 +559,8 @@ pub struct WalManager {
     #[cfg(target_os = "linux")]
     #[allow(dead_code)]
     ring: Mutex<Option<io_uring::IoUring>>,
+    /// Pages whose page_lsn is <= this value get a full-page image on their next logged write.
+    ckpt_full_image_threshold: std::sync::atomic::AtomicU64,
 }
 
 impl WalManager {
@@ -602,8 +604,17 @@ impl WalManager {
             active_segment_file: Mutex::new(None),
             #[cfg(target_os = "linux")]
             ring: Mutex::new(io_uring::IoUring::new(16).ok()),
+            ckpt_full_image_threshold: std::sync::atomic::AtomicU64::new(0),
         };
         let _ = mgr.truncate_torn_tail()?;
+        let startup_ckpt = mgr
+            .inner
+            .lock()
+            .unwrap()
+            .checkpoint_meta
+            .map(|m| m.checkpoint_lsn)
+            .unwrap_or(0);
+        mgr.ckpt_full_image_threshold.store(startup_ckpt, std::sync::atomic::Ordering::Relaxed);
         Ok(mgr)
     }
 
@@ -621,6 +632,12 @@ impl WalManager {
             inner = self.flush_cv.wait(inner).unwrap();
         }
         inner
+    }
+
+    /// True if the next logged write to a page with this LSN must carry a full-page image
+    /// (first write since the last checkpoint). Hot path: one relaxed atomic load.
+    pub fn needs_full_page_image(&self, page_lsn: Lsn) -> bool {
+        page_lsn <= self.ckpt_full_image_threshold.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     pub fn register_bpm(&self, bpm: &std::sync::Arc<crate::buffer_pool::BufferPoolManager>) {
@@ -815,6 +832,7 @@ impl WalManager {
                 inner.next_lsn = 1;
                 inner.flushed_lsn = 0;
                 inner.checkpoint_meta = None;
+                self.ckpt_full_image_threshold.store(0, std::sync::atomic::Ordering::Relaxed);
                 inner.txn_trackers.clear();
                 inner.max_user_txn_id = 0;
                 inner.max_sys_txn_id = 0;
@@ -1010,6 +1028,10 @@ impl WalManager {
             inner.flushed_lsn = max_lsn;
             inner.segments = scanned_segments;
             inner.checkpoint_meta = ckpt_meta;
+            self.ckpt_full_image_threshold.store(
+                ckpt_meta.as_ref().map(|m| m.checkpoint_lsn).unwrap_or(0),
+                std::sync::atomic::Ordering::Relaxed,
+            );
             inner.txn_trackers.clear();
             inner.max_user_txn_id = ckpt_meta.as_ref().map(|m| m.max_user_txn_id).unwrap_or(0);
             inner.max_sys_txn_id = ckpt_meta.as_ref().map(|m| m.max_sys_txn_id).unwrap_or(0);
@@ -1698,6 +1720,8 @@ impl WalManager {
             .retain(|_, t| !t.terminated || t.last_lsn >= min_recovery_lsn);
         meta.segments_reclaimed = reclaimed_count;
         inner.checkpoint_meta = Some(meta);
+        self.ckpt_full_image_threshold
+            .store(meta.checkpoint_lsn, std::sync::atomic::Ordering::Relaxed);
         Ok((meta, allocated_pin_id))
     }
 

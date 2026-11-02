@@ -639,7 +639,8 @@ impl BPlusTree {
             let (old_payload, type_changed) = self.bpm.mutate_page(node.page_id, |page| {
                 let page_body = &page.data[PAGE_HEADER_SIZE..PAGE_SIZE];
                 let old_len = Self::get_page_payload_len(page_body);
-                let type_changed = page.page_type() != target_ptype;
+                let type_changed =
+                    page.page_type() != target_ptype || wal.needs_full_page_image(page.page_lsn());
                 let old_data = if type_changed {
                     page_body.to_vec()
                 } else {
