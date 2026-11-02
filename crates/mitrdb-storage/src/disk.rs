@@ -417,12 +417,17 @@ impl DiskManager {
         #[cfg(target_os = "linux")]
         {
             let mut ring_guard = self.ring.lock().unwrap();
+            let mut ring_failed = false;
             if let Some(ref mut ring) = *ring_guard {
                 use io_uring::{opcode, types};
                 let fd = types::Fd(file_guard.as_raw_fd());
+                let mut all_ok = true;
 
-                // Chunk batch if larger than queue capacity
+                // Chunk batch if larger than queue capacity. Every chunk must fully
+                // succeed (no error, no short write); otherwise the whole batch is
+                // rewritten through the plain write_all fallback below.
                 for chunk in prepared.chunks(64) {
+                    let mut submitted = 0usize;
                     unsafe {
                         let mut sq = ring.submission();
                         for (offset, data) in chunk {
@@ -432,22 +437,33 @@ impl DiskManager {
                             if sq.push(&write_op).is_err() {
                                 break;
                             }
+                            submitted += 1;
                         }
                     }
-
-                    if ring.submit_and_wait(chunk.len()).is_ok() {
-                        let mut failed = false;
+                    if submitted != chunk.len() {
+                        all_ok = false;
+                    }
+                    if submitted > 0 {
+                        if ring.submit_and_wait(submitted).is_err() {
+                            all_ok = false;
+                            ring_failed = true;
+                            break;
+                        }
                         for cqe in ring.completion() {
-                            if cqe.result() < 0 {
-                                failed = true;
-                                break;
+                            if cqe.result() != PAGE_SIZE as i32 {
+                                all_ok = false;
                             }
                         }
-                        if !failed {
-                            io_done = true;
-                        }
+                    }
+                    if !all_ok {
+                        break;
                     }
                 }
+                io_done = all_ok;
+            }
+            if ring_failed || !io_done {
+                // Do not reuse a ring that may hold unreaped completions.
+                *ring_guard = None;
             }
         }
 
