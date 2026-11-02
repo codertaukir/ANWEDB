@@ -34,6 +34,11 @@ const PHASE_NAMES: &[&str] = &[
     "LockMutexWait",
     "LockTableScan",
     "LockBookkeeping",
+    "LockConditionWait",
+    "BufferPoolNewPage",
+    "BufferPoolVictimSelect",
+    "BufferPoolDiskAllocate",
+    "BufferPoolUnpin",
 ];
 
 fn percentile(sorted: &[u128], p: usize) -> u128 {
