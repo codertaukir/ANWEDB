@@ -468,6 +468,25 @@ impl BufferPoolManager {
         Ok(())
     }
 
+    /// Recovery only: put a blank, dirty page into the pool without reading the (torn)
+    /// on-disk copy. The caller must follow up with a full-page-image redo record.
+    pub fn install_blank_page(&self, page_id: PageId) -> Result<()> {
+        let mut page_table = self.page_table.lock().unwrap();
+        let mut frames = self.frames.lock().unwrap();
+        if page_table.contains_key(&page_id) {
+            return Ok(());
+        }
+        let victim_idx = self.find_victim_frame(&mut frames, &mut page_table)?;
+        let frame = &mut frames[victim_idx];
+        frame.page = Page::new_empty(page_id, crate::page::PAGE_TYPE_RAW);
+        frame.page_id = Some(page_id);
+        frame.pin_count = 0;
+        frame.is_dirty = true;
+        frame.ref_bit = true;
+        page_table.insert(page_id, victim_idx);
+        Ok(())
+    }
+
     pub fn unmark_page_free(&self, page_id: PageId) {
         self.disk_manager.unmark_page_free(page_id);
     }

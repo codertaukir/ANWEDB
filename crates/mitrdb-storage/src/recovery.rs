@@ -142,6 +142,21 @@ impl RecoveryManager {
             }
         }
 
+        // First full-page-image record per page. Used to rebuild torn pages from a blank page.
+        let mut first_full_lsn: HashMap<PageId, Lsn> = HashMap::new();
+        for r in &records {
+            if (r.record_type == LogRecordType::Update || r.record_type == LogRecordType::Clr)
+                && r.offset as usize == PAGE_HEADER_SIZE
+                && r.redo_data.len() == PAGE_SIZE - PAGE_HEADER_SIZE
+                && matches!(
+                    r.redo_data.first().copied(),
+                    Some(NODE_KIND_LEAF | NODE_KIND_INTERNAL | NODE_KIND_FREE)
+                )
+            {
+                first_full_lsn.entry(r.page_id).or_insert(r.lsn);
+            }
+        }
+
         let mut redone_count = 0;
         if let Some(&min_rec_lsn) = dirty_pages.values().min() {
             for r in &records {
@@ -152,7 +167,24 @@ impl RecoveryManager {
                     && r.lsn >= rec_lsn
                 {
                     self.bpm.unmark_page_free(r.page_id);
-                    let page = self.bpm.fetch_page(r.page_id)?;
+                    let page = match self.bpm.fetch_page(r.page_id) {
+                        Ok(p) => p,
+                        Err(Error::PageCorrupted(msg)) => match first_full_lsn.get(&r.page_id) {
+                            Some(&full_lsn) if r.lsn < full_lsn => continue,
+                            Some(&full_lsn) if r.lsn == full_lsn => {
+                                self.bpm.install_blank_page(r.page_id)?;
+                                self.bpm.fetch_page(r.page_id)?
+                            }
+                            Some(_) => {
+                                return Err(Error::CrashRecovery(format!(
+                                    "Torn page {} met record LSN {} after its full image was skipped",
+                                    r.page_id, r.lsn
+                                )));
+                            }
+                            None => return Err(Error::PageCorrupted(msg)),
+                        },
+                        Err(e) => return Err(e),
+                    };
                     let page_lsn = page.page_lsn();
                     self.bpm.unpin_page(r.page_id, false)?;
 
@@ -578,6 +610,72 @@ mod tests {
 
             let page = bpm.fetch_page(0).unwrap();
             assert_eq!(&page.data[64..64 + 17], b"committed payload");
+        }
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_recovery_torn_page_rebuilt_from_full_image() {
+        use std::io::{Seek, SeekFrom, Write};
+        let temp_dir =
+            std::env::temp_dir().join(format!("mitrdb_rec_torn_{}", std::process::id()));
+        let db_path = temp_dir.join("test.db");
+        let wal_path = temp_dir.join("test.wal");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        let body_len = PAGE_SIZE - PAGE_HEADER_SIZE;
+        let pid;
+
+        {
+            let disk = Arc::new(DiskManager::open_or_create(db_path.as_path()).unwrap());
+            let (p, _) = disk.allocate_page(PAGE_TYPE_RAW).unwrap();
+            pid = p;
+            let wal = Arc::new(WalManager::open_or_create(wal_path.as_path()).unwrap());
+            let mut redo = vec![0u8; body_len];
+            redo[0] = crate::btree::NODE_KIND_LEAF;
+            redo[100..105].copy_from_slice(b"hello");
+            let lsn1 = wal.append_record(LogRecord::new_begin(0, 10)).unwrap();
+            let lsn2 = wal
+                .append_record(LogRecord::new_update(
+                    0,
+                    10,
+                    lsn1,
+                    pid,
+                    PAGE_HEADER_SIZE as u16,
+                    redo,
+                    vec![0u8; body_len],
+                ))
+                .unwrap();
+            let lsn3 = wal
+                .append_record(LogRecord::new_commit(0, 10, lsn2))
+                .unwrap();
+            wal.flush_up_to(lsn3).unwrap();
+        }
+
+        // Simulate a torn write: only the first 2 KB of the page hit the disk.
+        {
+            let mut f = std::fs::OpenOptions::new()
+                .write(true)
+                .open(&db_path)
+                .unwrap();
+            f.seek(SeekFrom::Start(pid as u64 * PAGE_SIZE as u64)).unwrap();
+            f.write_all(&[0xABu8; 2048]).unwrap();
+            f.sync_all().unwrap();
+        }
+
+        {
+            let disk = Arc::new(DiskManager::open_or_create(db_path.as_path()).unwrap());
+            let wal = Arc::new(WalManager::open_or_create(wal_path.as_path()).unwrap());
+            let bpm = Arc::new(BufferPoolManager::new(disk.clone(), 5));
+            let recovery = RecoveryManager::new(wal.clone(), bpm.clone());
+            let report = recovery.recover().unwrap();
+            assert_eq!(report.redone_records, 1);
+            let page = bpm.fetch_page(pid).unwrap();
+            assert_eq!(
+                &page.data[PAGE_HEADER_SIZE + 100..PAGE_HEADER_SIZE + 105],
+                b"hello"
+            );
+            assert_eq!(page.page_type(), crate::page::PAGE_TYPE_BTREE_LEAF);
         }
 
         let _ = std::fs::remove_dir_all(&temp_dir);
