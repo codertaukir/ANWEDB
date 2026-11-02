@@ -573,6 +573,53 @@ impl BPlusTree {
         pos.min(data.len())
     }
 
+    /// Byte ranges (relative to the node payload) where `old` and `new` differ.
+    /// Both slices are treated as zero-padded; nearby differences are merged.
+    fn changed_ranges(old: &[u8], new: &[u8]) -> Vec<(usize, usize)> {
+        const MERGE_GAP: usize = 32;
+        const CHUNK: usize = 64;
+        let len = old.len().max(new.len());
+        let common = old.len().min(new.len());
+        let at = |s: &[u8], i: usize| if i < s.len() { s[i] } else { 0u8 };
+        let mut ranges: Vec<(usize, usize)> = Vec::new();
+        let mut i = 0;
+        while i < len {
+            // Skip identical 64-byte chunks quickly (memcmp) before falling back to bytes.
+            if i + CHUNK <= common && old[i..i + CHUNK] == new[i..i + CHUNK] {
+                i += CHUNK;
+                continue;
+            }
+            if at(old, i) == at(new, i) {
+                i += 1;
+                continue;
+            }
+            let start = i;
+            let mut end = i + 1;
+            let mut j = i + 1;
+            while j < len && j - end <= MERGE_GAP {
+                if at(old, j) != at(new, j) {
+                    end = j + 1;
+                }
+                j += 1;
+            }
+            ranges.push((start, end));
+            i = j;
+        }
+        if ranges.is_empty() {
+            ranges.push((0, len.min(1)));
+        }
+        ranges
+    }
+
+    fn padded_slice(src: &[u8], start: usize, end: usize) -> Vec<u8> {
+        let mut out = vec![0u8; end - start];
+        if start < src.len() {
+            let n = src.len().min(end) - start;
+            out[..n].copy_from_slice(&src[start..start + n]);
+        }
+        out
+    }
+
     fn write_node(&self, node: &BTreeNode, txn_id: TxnId, prev_lsn: &mut Lsn) -> Result<()> {
         let target_ptype = if node.is_leaf {
             PAGE_TYPE_BTREE_LEAF
@@ -614,16 +661,49 @@ impl BPlusTree {
             }
 
             // Step 2: WAL append karo
-            let lsn = wal.append_record(LogRecord::new_update(
-                0,
-                txn_id,
-                *prev_lsn,
-                node.page_id,
-                PAGE_HEADER_SIZE as u16,
-                new_payload, // ZERO-CLONE: ownership directly moved into WAL record
-                old_payload,
-            ))?;
-            *prev_lsn = lsn;
+            // Only the changed byte ranges are logged. Type-changing writes stay full-length
+            // so recovery can restore the page header type.
+            let ranges = if type_changed {
+                vec![(0usize, PAGE_SIZE - PAGE_HEADER_SIZE)]
+            } else {
+                Self::changed_ranges(&old_payload, &new_payload)
+            };
+
+            // Debug builds verify that the ranges exactly reproduce the new payload (redo)
+            // and the old payload (undo).
+            #[cfg(debug_assertions)]
+            {
+                let n = old_payload.len().max(new_payload.len());
+                let mut redo_check = Self::padded_slice(&old_payload, 0, n);
+                let mut undo_check = Self::padded_slice(&new_payload, 0, n);
+                for &(start, end) in &ranges {
+                    redo_check[start..end]
+                        .copy_from_slice(&Self::padded_slice(&new_payload, start, end));
+                    undo_check[start..end]
+                        .copy_from_slice(&Self::padded_slice(&old_payload, start, end));
+                }
+                assert_eq!(redo_check, Self::padded_slice(&new_payload, 0, n));
+                assert_eq!(undo_check, Self::padded_slice(&old_payload, 0, n));
+            }
+
+            let mut lsn = *prev_lsn;
+            for (start, end) in ranges {
+                let redo = Self::padded_slice(&new_payload, start, end);
+                let undo = Self::padded_slice(&old_payload, start, end);
+                let offset = u16::try_from(PAGE_HEADER_SIZE + start).map_err(|_| {
+                    Error::PageCorrupted("WAL record offset out of range".to_string())
+                })?;
+                lsn = wal.append_record(LogRecord::new_update(
+                    0,
+                    txn_id,
+                    *prev_lsn,
+                    node.page_id,
+                    offset,
+                    redo,
+                    undo,
+                ))?;
+                *prev_lsn = lsn;
+            }
 
             // Step 3: LSN stamp karo aur single checksum update
             let profile_started = mitrdb_observe::profiling_enabled().then(std::time::Instant::now);
