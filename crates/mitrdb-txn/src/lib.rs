@@ -871,6 +871,7 @@ pub struct TxnManager {
     lock_manager: Arc<LockManager>,
     txns: Mutex<HashMap<TxnId, TransactionContext>>,
     mvcc_versions: Mutex<MvccVersionStore>,
+    chain_epoch: AtomicU64,
 }
 
 impl TxnManager {
@@ -883,6 +884,7 @@ impl TxnManager {
             lock_manager: Arc::new(LockManager::new()),
             txns: Mutex::new(HashMap::new()),
             mvcc_versions: Mutex::new(MvccVersionStore::default()),
+            chain_epoch: AtomicU64::new(0),
         }
     }
 
@@ -908,6 +910,7 @@ impl TxnManager {
             lock_manager: Arc::new(LockManager::new()),
             txns: Mutex::new(HashMap::new()),
             mvcc_versions: Mutex::new(MvccVersionStore::default()),
+            chain_epoch: AtomicU64::new(0),
         }
     }
 
@@ -1243,6 +1246,10 @@ impl TxnManager {
         let keys_cleared = before_keys - versions.len();
         versions.rebuild_tree_index();
 
+        if versions_pruned > 0 || keys_cleared > 0 {
+            self.chain_epoch.fetch_add(1, Ordering::SeqCst);
+        }
+
         let mut referenced_txns = HashSet::new();
         for chain in versions.values() {
             for v in chain {
@@ -1516,6 +1523,7 @@ impl TxnManager {
 
         let scan_res = (|| -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
             let bounds_started = std::time::Instant::now();
+            let chain_epoch0 = self.chain_epoch.load(Ordering::SeqCst);
             let mut candidate_keys: BTreeSet<Vec<u8>> = BTreeSet::new();
             let mut raw_values: BTreeMap<Vec<u8>, Vec<u8>> = BTreeMap::new();
             let tree_metrics_before = profile_scan.then(|| GLOBAL_METRICS.snapshot());
@@ -1633,6 +1641,8 @@ impl TxnManager {
                 {
                     let versions = self.mvcc_versions.lock().unwrap();
                     let txns = self.txns.lock().unwrap();
+                    let chain_epoch_changed =
+                        self.chain_epoch.load(Ordering::SeqCst) != chain_epoch0;
                     for key in key_batch {
                         let skey = Self::scoped_key(tree, (*key).as_slice());
                         if let Some(chain) = versions.get(&skey)
@@ -1647,7 +1657,12 @@ impl TxnManager {
                                 .and_then(|ver| ver.value.clone());
                             resolved.push(((**key).clone(), visible, true));
                         } else {
-                            resolved.push(((**key).clone(), None, false));
+                            if chain_epoch_changed {
+                                let fresh = tree.get((**key).as_slice())?;
+                                resolved.push(((**key).clone(), fresh, true));
+                            } else {
+                                resolved.push(((**key).clone(), None, false));
+                            }
                         }
                     }
                 }
@@ -1726,6 +1741,7 @@ impl TxnManager {
         let (isolation, read_ts) = self.ensure_active_txn_info(txn_id)?;
         let prefix = Self::tree_scope_prefix(tree);
 
+        let chain_epoch0 = self.chain_epoch.load(Ordering::SeqCst);
         let mut candidate_keys: BTreeSet<Vec<u8>> = BTreeSet::new();
         let mut raw_values: BTreeMap<Vec<u8>, Vec<u8>> = BTreeMap::new();
         for (key, value) in tree.range_scan_bounds(&KeyRange::full())? {
@@ -1750,6 +1766,7 @@ impl TxnManager {
             {
                 let versions = self.mvcc_versions.lock().unwrap();
                 let txns = self.txns.lock().unwrap();
+                let chain_epoch_changed = self.chain_epoch.load(Ordering::SeqCst) != chain_epoch0;
                 for key in key_batch {
                     let skey = Self::scoped_key(tree, key.as_slice());
                     if let Some(chain) = versions.get(&skey)
@@ -1764,7 +1781,12 @@ impl TxnManager {
                             .and_then(|ver| ver.value.clone());
                         resolved.push(((**key).clone(), visible, true));
                     } else {
-                        resolved.push(((**key).clone(), None, false));
+                        if chain_epoch_changed {
+                            let fresh = tree.get((**key).as_slice())?;
+                            resolved.push(((**key).clone(), fresh, true));
+                        } else {
+                            resolved.push(((**key).clone(), None, false));
+                        }
                     }
                 }
             }
@@ -2397,6 +2419,7 @@ impl TxnManager {
                 // }
             }
             versions.retain(|_, chain| !chain.is_empty());
+            self.chain_epoch.fetch_add(1, Ordering::SeqCst);
             versions.rebuild_tree_index();
 
             if let Some(ctx) = txns.get_mut(&txn_id) {
