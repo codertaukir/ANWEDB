@@ -442,6 +442,18 @@ impl LockManager {
             );
         }
 
+        // Fast exit: this txn already holds every requested key in a sufficient mode.
+        if !state.wait_for.contains_key(&txn_id)
+            && effective_keys.iter().all(|k| {
+                state.locks.get(k).is_some_and(|e| {
+                    e.exclusive_holder == Some(txn_id)
+                        || (matches!(mode, LockMode::Shared) && e.shared_holders.contains(&txn_id))
+                })
+            })
+        {
+            return Ok(LockDelta::default());
+        }
+
         loop {
             let scan_started = profiling.then(std::time::Instant::now);
             let mut conflicting_holders = BTreeSet::new();
