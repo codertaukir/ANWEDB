@@ -20,6 +20,8 @@ const DEFAULT_MAX_CONNECTIONS: usize = 128;
 const DEFAULT_MAX_FRAME_BYTES: usize = 1024 * 1024;
 const MIN_FRAME_BYTES: usize = 256;
 const DEFAULT_IO_TIMEOUT: Duration = Duration::from_millis(250);
+const DEFAULT_FRAME_TIMEOUT: Duration = Duration::from_secs(10);
+const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const AUTH_FAILURE_LIMIT: usize = 5;
 const AUTH_FAILURE_WINDOW: Duration = Duration::from_secs(60);
 const AUTH_FAILURE_TRACKED_IP_LIMIT: usize = 4096;
@@ -31,6 +33,12 @@ pub struct TcpServerConfig {
     pub max_connections: usize,
     pub max_frame_bytes: usize,
     pub io_timeout: Duration,
+    /// Once the first byte of a frame arrives, the whole frame must arrive within this time.
+    /// Protects against slow-loris clients that trickle bytes.
+    pub frame_timeout: Duration,
+    /// Time allowed from connection start (including the TLS handshake) until the
+    /// protocol hello (and the AUTH frame, when enabled) has been received.
+    pub handshake_timeout: Duration,
     /// Optional shared secret required before any session commands.
     /// Never transmit this token over a plaintext connection on an untrusted network.
     pub auth_token: Option<Zeroizing<String>>,
@@ -47,6 +55,8 @@ impl std::fmt::Debug for TcpServerConfig {
             .field("max_connections", &self.max_connections)
             .field("max_frame_bytes", &self.max_frame_bytes)
             .field("io_timeout", &self.io_timeout)
+            .field("frame_timeout", &self.frame_timeout)
+            .field("handshake_timeout", &self.handshake_timeout)
             .field(
                 "auth_token",
                 &self.auth_token.as_ref().map(|_| "[REDACTED]"),
@@ -64,6 +74,8 @@ impl Default for TcpServerConfig {
             max_connections: DEFAULT_MAX_CONNECTIONS,
             max_frame_bytes: DEFAULT_MAX_FRAME_BYTES,
             io_timeout: DEFAULT_IO_TIMEOUT,
+            frame_timeout: DEFAULT_FRAME_TIMEOUT,
+            handshake_timeout: DEFAULT_HANDSHAKE_TIMEOUT,
             auth_token: None,
             tls_cert_path: None,
             tls_key_path: None,
@@ -132,6 +144,16 @@ impl Server {
         if config.io_timeout.is_zero() {
             return Err(Error::Io(
                 "io_timeout must be greater than zero".to_string(),
+            ));
+        }
+        if config.frame_timeout.is_zero() {
+            return Err(Error::Io(
+                "frame_timeout must be greater than zero".to_string(),
+            ));
+        }
+        if config.handshake_timeout.is_zero() {
+            return Err(Error::Io(
+                "handshake_timeout must be greater than zero".to_string(),
             ));
         }
 
@@ -410,7 +432,21 @@ fn serve_stream<S: Read + Write>(
     peer_ip: IpAddr,
     auth_failures: &AuthFailureMap,
 ) -> io::Result<()> {
-    let hello = match read_frame(stream, config.max_frame_bytes, shutdown)? {
+    let conn_started = Instant::now();
+    let handshake_limits = FrameLimits {
+        frame_timeout: Some(config.frame_timeout),
+        deadline: conn_started.checked_add(config.handshake_timeout),
+    };
+    let request_limits = FrameLimits {
+        frame_timeout: Some(config.frame_timeout),
+        deadline: None,
+    };
+    let hello = match read_frame_with_limits(
+        stream,
+        config.max_frame_bytes,
+        shutdown,
+        handshake_limits,
+    )? {
         Some(frame) => frame,
         None => return Ok(()),
     };
@@ -437,7 +473,12 @@ fn serve_stream<S: Read + Write>(
             );
             return Ok(());
         }
-        let auth_frame = match read_frame(stream, config.max_frame_bytes, shutdown)? {
+        let auth_frame = match read_frame_with_limits(
+            stream,
+            config.max_frame_bytes,
+            shutdown,
+            handshake_limits,
+        )? {
             Some(frame) => frame,
             None => return Ok(()),
         };
@@ -469,7 +510,12 @@ fn serve_stream<S: Read + Write>(
         if shutdown.load(Ordering::Acquire) {
             break Ok(());
         }
-        let request = match read_frame(stream, config.max_frame_bytes, shutdown) {
+        let request = match read_frame_with_limits(
+            stream,
+            config.max_frame_bytes,
+            shutdown,
+            request_limits,
+        ) {
             Ok(Some(frame)) => frame,
             Ok(None) => break Ok(()),
             Err(err) => break Err(err),
@@ -596,14 +642,65 @@ fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
     diff == 0
 }
 
+/// Per-call limits that stop slow-loris clients from holding a worker thread forever.
+#[derive(Clone, Copy)]
+struct FrameLimits {
+    /// Max time from the first byte of a frame until the whole frame has arrived.
+    frame_timeout: Option<Duration>,
+    /// Absolute point in time by which the frame must be complete.
+    deadline: Option<Instant>,
+}
+
+impl FrameLimits {
+    #[cfg(test)]
+    const NONE: Self = Self {
+        frame_timeout: None,
+        deadline: None,
+    };
+}
+
+fn check_frame_deadlines(limits: FrameLimits, frame_started: Option<Instant>) -> io::Result<()> {
+    if limits.frame_timeout.is_none() && limits.deadline.is_none() {
+        return Ok(());
+    }
+    let now = Instant::now();
+    if limits.deadline.is_some_and(|deadline| now >= deadline) {
+        return Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "handshake deadline exceeded",
+        ));
+    }
+    if let (Some(limit), Some(started)) = (limits.frame_timeout, frame_started) {
+        if now.saturating_duration_since(started) >= limit {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "frame not completed within frame_timeout",
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
 fn read_frame<S: Read>(
     stream: &mut S,
     max_frame_bytes: usize,
     shutdown: &AtomicBool,
 ) -> io::Result<Option<Vec<u8>>> {
+    read_frame_with_limits(stream, max_frame_bytes, shutdown, FrameLimits::NONE)
+}
+
+fn read_frame_with_limits<S: Read>(
+    stream: &mut S,
+    max_frame_bytes: usize,
+    shutdown: &AtomicBool,
+    limits: FrameLimits,
+) -> io::Result<Option<Vec<u8>>> {
+    let mut frame_started: Option<Instant> = None;
     let mut header = [0u8; 4];
     let mut offset = 0;
     while offset < header.len() {
+        check_frame_deadlines(limits, frame_started)?;
         match stream.read(&mut header[offset..]) {
             Ok(0) if offset == 0 => return Ok(None),
             Ok(0) => {
@@ -612,7 +709,10 @@ fn read_frame<S: Read>(
                     "connection closed inside frame header",
                 ));
             }
-            Ok(n) => offset += n,
+            Ok(n) => {
+                offset += n;
+                frame_started.get_or_insert_with(Instant::now);
+            }
             Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
             Err(err)
                 if matches!(
@@ -638,6 +738,7 @@ fn read_frame<S: Read>(
     let mut frame = vec![0u8; frame_len];
     offset = 0;
     while offset < frame.len() {
+        check_frame_deadlines(limits, frame_started)?;
         match stream.read(&mut frame[offset..]) {
             Ok(0) => {
                 return Err(io::Error::new(
@@ -966,6 +1067,104 @@ mod tests {
         socket.set_read_timeout(Some(Duration::from_secs(2)))?;
         socket.set_write_timeout(Some(Duration::from_secs(2)))?;
         Ok(StreamOwned::new(connection, socket))
+    }
+
+    fn start_plain_test_server(
+        frame_timeout: Duration,
+        handshake_timeout: Duration,
+    ) -> (TcpServerHandle, PathBuf, PathBuf) {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let db_path = std::env::temp_dir().join(format!("mitrdb-plain-test-{unique}.db"));
+        let wal_path = std::env::temp_dir().join(format!("mitrdb-plain-test-{unique}.wal"));
+        let (server, _recovery) = Server::open(&db_path, &wal_path, 64).unwrap();
+        let config = TcpServerConfig {
+            bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            max_connections: 4,
+            io_timeout: Duration::from_millis(100),
+            frame_timeout,
+            handshake_timeout,
+            ..TcpServerConfig::default()
+        };
+        let handle = Arc::new(server).bind_tcp(config).unwrap();
+        (handle, db_path, wal_path)
+    }
+
+    /// True if the peer closed the connection (EOF or reset) while we waited on a short read.
+    fn peer_closed(sock: &mut TcpStream) -> bool {
+        let mut buf = [0u8; 16];
+        match sock.read(&mut buf) {
+            Ok(0) => true,
+            Ok(_) => false,
+            Err(err)
+                if matches!(
+                    err.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                ) =>
+            {
+                false
+            }
+            Err(_) => true,
+        }
+    }
+
+    #[test]
+    fn slow_loris_trickled_frame_is_disconnected() {
+        let (handle, db_path, wal_path) =
+            start_plain_test_server(Duration::from_millis(600), Duration::from_secs(5));
+        let mut sock = TcpStream::connect(handle.local_addr()).unwrap();
+        sock.set_read_timeout(Some(Duration::from_millis(20)))
+            .unwrap();
+        // Header announces a 100-byte frame; payload then trickles in at 1 byte / 100 ms.
+        sock.write_all(&100u32.to_be_bytes()).unwrap();
+        let started = Instant::now();
+        let mut closed = false;
+        for _ in 0..30 {
+            std::thread::sleep(Duration::from_millis(100));
+            if sock.write_all(b"x").is_err() || peer_closed(&mut sock) {
+                closed = true;
+                break;
+            }
+        }
+        let elapsed = started.elapsed();
+        drop(sock);
+        handle.shutdown().unwrap();
+        let _ = std::fs::remove_file(db_path);
+        let _ = std::fs::remove_file(wal_path);
+        assert!(closed, "server kept a trickling connection open for {elapsed:?}");
+        assert!(
+            elapsed < Duration::from_secs(3),
+            "disconnect took too long: {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn silent_connection_is_closed_after_handshake_timeout() {
+        let (handle, db_path, wal_path) =
+            start_plain_test_server(Duration::from_secs(5), Duration::from_millis(500));
+        let mut sock = TcpStream::connect(handle.local_addr()).unwrap();
+        sock.set_read_timeout(Some(Duration::from_millis(50)))
+            .unwrap();
+        let started = Instant::now();
+        let mut closed = false;
+        while started.elapsed() < Duration::from_secs(3) {
+            if peer_closed(&mut sock) {
+                closed = true;
+                break;
+            }
+        }
+        let elapsed = started.elapsed();
+        drop(sock);
+        handle.shutdown().unwrap();
+        let _ = std::fs::remove_file(db_path);
+        let _ = std::fs::remove_file(wal_path);
+        assert!(closed, "server kept a silent connection open for {elapsed:?}");
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "silent connection closed too late: {elapsed:?}"
+        );
     }
 
     #[test]
