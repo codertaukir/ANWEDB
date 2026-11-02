@@ -32,6 +32,15 @@ impl Drop for CliServer {
     }
 }
 
+/// Git does not preserve 0600, so copy the fixture key to a private temp file.
+fn private_key_copy(tag: &str) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let dst = std::env::temp_dir().join(format!("mitrdb-cli-key-{tag}.pem"));
+    std::fs::copy(fixture("server-key.pem"), &dst).unwrap();
+    std::fs::set_permissions(&dst, std::fs::Permissions::from_mode(0o600)).unwrap();
+    dst
+}
+
 fn start_cli(tls: bool) -> CliServer {
     let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
     let addr = listener.local_addr().unwrap();
@@ -56,7 +65,7 @@ fn start_cli(tls: bool) -> CliServer {
         cmd.arg("--tls-cert")
             .arg(fixture("server-cert.pem"))
             .arg("--tls-key")
-            .arg(fixture("server-key.pem"));
+            .arg(private_key_copy(&unique.to_string()));
     }
     let child = cmd
         .spawn()

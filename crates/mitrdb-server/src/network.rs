@@ -902,6 +902,15 @@ mod tests {
             .join(name)
     }
 
+    /// Git does not preserve 0600, so copy the fixture key to a private temp file.
+    fn private_key_copy(tag: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let dst = std::env::temp_dir().join(format!("mitrdb-tls-key-{tag}.pem"));
+        std::fs::copy(fixture("server-key.pem"), &dst).unwrap();
+        std::fs::set_permissions(&dst, std::fs::Permissions::from_mode(0o600)).unwrap();
+        dst
+    }
+
     fn start_tls_test_server(
         cert_name: &str,
         token: Option<&str>,
@@ -917,7 +926,7 @@ mod tests {
             bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
             auth_token: token.map(|value| Zeroizing::new(value.to_owned())),
             tls_cert_path: Some(fixture(cert_name)),
-            tls_key_path: Some(fixture("server-key.pem")),
+            tls_key_path: Some(private_key_copy(&unique.to_string())),
             io_timeout: Duration::from_millis(500),
             ..TcpServerConfig::default()
         };
@@ -1092,7 +1101,7 @@ mod tests {
         let no_auth = TcpServerConfig {
             bind_addr: remote,
             tls_cert_path: Some(fixture("server-cert.pem")),
-            tls_key_path: Some(fixture("server-key.pem")),
+            tls_key_path: Some(private_key_copy(&format!("noauth-{}", std::process::id()))),
             ..TcpServerConfig::default()
         };
         assert!(
