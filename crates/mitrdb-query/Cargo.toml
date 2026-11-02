@@ -1,0 +1,8 @@
+[package]
+name = "mitrdb-query"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+mitrdb-catalog = { path = "../mitrdb-catalog" }
+mitrdb-common = { path = "../mitrdb-common" }

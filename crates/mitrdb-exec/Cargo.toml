@@ -1,0 +1,11 @@
+[package]
+name = "mitrdb-exec"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+mitrdb-common = { path = "../mitrdb-common" }
+mitrdb-query = { path = "../mitrdb-query" }
+mitrdb-observe = { path = "../mitrdb-observe" }
+mitrdb-storage = { path = "../mitrdb-storage" }
+mitrdb-txn = { path = "../mitrdb-txn" }

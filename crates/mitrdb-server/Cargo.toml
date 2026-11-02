@@ -1,0 +1,18 @@
+[package]
+name = "mitrdb-server"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+mitrdb-catalog = { path = "../mitrdb-catalog" }
+mitrdb-common = { path = "../mitrdb-common" }
+mitrdb-exec = { path = "../mitrdb-exec" }
+mitrdb-observe = { path = "../mitrdb-observe" }
+mitrdb-query = { path = "../mitrdb-query" }
+mitrdb-storage = { path = "../mitrdb-storage" }
+mitrdb-txn = { path = "../mitrdb-txn" }
+
+
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-pemfile = "2"
+zeroize = "1.9"

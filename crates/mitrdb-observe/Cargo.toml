@@ -1,0 +1,7 @@
+[package]
+name = "mitrdb-observe"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+mitrdb-common = { path = "../mitrdb-common" }

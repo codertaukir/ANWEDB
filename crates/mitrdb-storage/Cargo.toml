@@ -1,0 +1,11 @@
+[package]
+name = "mitrdb-storage"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+mitrdb-common = { path = "../mitrdb-common" }
+mitrdb-observe = { path = "../mitrdb-observe" }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+io-uring = "0.7"

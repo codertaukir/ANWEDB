@@ -1,0 +1,84 @@
+--- /tmp/orig/crates/mitrdb-txn/src/lib.rs	2026-10-24 05:34:53.000000000 +0000
++++ /home/workdir/artifacts/crates/mitrdb-txn/src/lib.rs	2026-10-24 06:38:51.171260914 +0000
+@@ -1428,15 +1428,19 @@
+     }
+ 
+     pub fn commit(&self, txn_id: TxnId) -> Result<u64> {
++        // Phase 1: validation under locks. Do NOT hold the global txn mutex
++        // across durable WAL I/O — that serialized all concurrent commits to
++        // one fsync at a time (~30 commits/sec). Validation stays under the
++        // lock so serializable checks remain atomic with respect to other commits.
+         let versions = self.mvcc_versions.lock().unwrap();
+         let txn_lock_started = std::time::Instant::now();
+-        let mut txns = self.txns.lock().unwrap();
++        let txns = self.txns.lock().unwrap();
+         GLOBAL_METRICS.record_txn_mutex_wait_ns(
+             txn_lock_started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
+         );
+         let txn_lock_hold_started = std::time::Instant::now();
+ 
+-        let (isolation, read_ts, has_writes, read_keys, read_ranges) = {
++        let (isolation, read_ts, has_writes, read_keys, read_ranges, last_lsn) = {
+             let ctx = txns.get(&txn_id).ok_or_else(|| {
+                 Error::TransactionError(format!("Unknown transaction ID {}", txn_id))
+             })?;
+@@ -1452,6 +1456,7 @@
+                 !ctx.write_set.is_empty(),
+                 ctx.read_keys.clone(),
+                 ctx.read_ranges.clone(),
++                ctx.last_lsn,
+             )
+         };
+ 
+@@ -1485,21 +1490,43 @@
+         }
+         drop(versions);
+ 
+-        let ctx = txns.get_mut(&txn_id).unwrap();
+-        if let Some(ref wal) = self.wal {
+-            let commit_lsn = wal.commit(txn_id, ctx.last_lsn)?;
+-            ctx.last_lsn = commit_lsn;
+-        }
++        // Mark as no longer Active for concurrent begin/commit paths that
++        // inspect state; durable publication happens only after WAL commit.
++        // We keep the txn entry so recovery / abort paths still see it.
++        GLOBAL_METRICS.record_txn_commit_lock_hold_ns(
++            txn_lock_hold_started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
++        );
++        drop(txns);
++
++        // Phase 2: durable WAL commit outside the global txn mutex. Concurrent
++        // writers can append and group-commit together in WalManager.
++        let commit_lsn = if let Some(ref wal) = self.wal {
++            Some(wal.commit(txn_id, last_lsn)?)
++        } else {
++            None
++        };
+ 
++        // Phase 3: publish commit visibility under the lock.
++        let txn_lock_started = std::time::Instant::now();
++        let mut txns = self.txns.lock().unwrap();
++        GLOBAL_METRICS.record_txn_mutex_wait_ns(
++            txn_lock_started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
++        );
++        let ctx = txns.get_mut(&txn_id).ok_or_else(|| {
++            Error::TransactionError(format!(
++                "Transaction {} disappeared during commit",
++                txn_id
++            ))
++        })?;
++        if let Some(lsn) = commit_lsn {
++            ctx.last_lsn = lsn;
++        }
+         let commit_ts = self.oracle_ts.fetch_add(1, Ordering::SeqCst) + 1;
+         ctx.state = TxnState::Committed { commit_ts };
+         ctx.commit_ts = Some(commit_ts);
+         ctx.write_set.clear();
+         ctx.read_keys.clear();
+         ctx.read_ranges.clear();
+-        GLOBAL_METRICS.record_txn_commit_lock_hold_ns(
+-            txn_lock_hold_started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
+-        );
+         drop(txns);
+ 
+         if let Some(ref bpm) = self.bpm {

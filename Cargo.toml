@@ -1,0 +1,18 @@
+[workspace]
+members = [
+    "crates/mitrdb-common",
+    "crates/mitrdb-observe",
+    "crates/mitrdb-storage",
+    "crates/mitrdb-txn",
+    "crates/mitrdb-catalog",
+    "crates/mitrdb-query",
+    "crates/mitrdb-exec",
+    "crates/mitrdb-server",
+    "crates/mitrdb-cli",
+]
+resolver = "2"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1

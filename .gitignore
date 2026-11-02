@@ -1,0 +1,22 @@
+# Rust build output (bahut bada hota hai)
+target/
+
+# Database aur WAL files (tumhare tests/bench ke)
+*.db
+*.wal
+*.wal.*
+*.ckpt
+*.ckpt.tmp
+
+# Secrets kabhi push mat karna
+.env
+.env.*
+*.pem
+*.key
+
+# Editor / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+target/
