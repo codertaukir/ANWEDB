@@ -372,7 +372,11 @@ impl LockManager {
 
             entry.shared_holders.remove(&txn_id);
             entry.exclusive_holder = Some(txn_id);
-            state.by_txn.entry(txn_id).or_default().insert(scoped_key.clone());
+            state
+                .by_txn
+                .entry(txn_id)
+                .or_default()
+                .insert(scoped_key.clone());
 
             if let Some(started) = book_started {
                 mitrdb_observe::record_profile_duration(
@@ -697,7 +701,13 @@ impl LockManager {
         drop(state);
         self.cv.notify_all();
     }
-
+    pub fn is_key_exclusively_locked_by_other(&self, key: &LockKey, txn_id: TxnId) -> bool {
+        let state = self.state.lock().unwrap();
+        state
+            .locks
+            .get(key)
+            .is_some_and(|e| e.exclusive_holder.is_some_and(|h| h != txn_id))
+    }
     pub fn has_active_prefix_locks(&self, prefix: &[u8; 8]) -> bool {
         let state = self.state.lock().unwrap();
         state
@@ -1212,7 +1222,7 @@ impl TxnManager {
 
             if chain.len() == 1 && chain[0].xmax.is_none() {
                 let can_collapse = if chain[0].xmin == 0 {
-                    true
+                    chain[0].value.is_some()
                 } else if let Some(creator) = txns.get(&chain[0].xmin)
                     && let TxnState::Committed { commit_ts } = creator.state
                 {
@@ -1220,6 +1230,7 @@ impl TxnManager {
                 } else {
                     false
                 };
+
                 if can_collapse {
                     chain.clear();
                     versions_pruned += 1;
@@ -1378,7 +1389,6 @@ impl TxnManager {
         }
         Ok((ctx.isolation, ctx.read_ts))
     }
-
     fn read_key_visible_value(
         &self,
         txn_id: TxnId,
@@ -1388,6 +1398,22 @@ impl TxnManager {
         key: &[u8],
         skey: &[u8],
     ) -> Result<Option<Vec<u8>>> {
+        let lock_key = LockKey::Key(skey.to_vec());
+
+        // Agar koi writer is key par exclusive lock hold kar raha hai,
+        // toh short yield karke wait karein taaki uncommitted B-Tree mutation leak na ho.
+        let mut retries = 0;
+        while retries < 200 {
+            if !self
+                .lock_manager
+                .is_key_exclusively_locked_by_other(&lock_key, txn_id)
+            {
+                break;
+            }
+            std::thread::yield_now();
+            retries += 1;
+        }
+
         let versions = self.mvcc_versions.lock().unwrap();
         let txns = self.txns.lock().unwrap();
 
@@ -1401,12 +1427,15 @@ impl TxnManager {
             }
             return Ok(None);
         }
+
         drop(txns);
+        // IMPORTANT: keep `versions` locked while reading the B+Tree. Writers mutate the
+        // tree while holding this same mutex, so we can never observe an uncommitted
+        // tree value for a key that has no MVCC chain (vacuum race fix).
+        let res = tree.get(key);
         drop(versions);
-
-        tree.get(key)
+        res
     }
-
     pub fn get(&self, txn_id: TxnId, tree: &Arc<BPlusTree>, key: &[u8]) -> Result<Option<Vec<u8>>> {
         let skey = Self::scoped_key(tree, key);
         let (isolation, read_ts) = self.ensure_active_txn_info(txn_id)?;
@@ -2306,7 +2335,9 @@ impl TxnManager {
                 } => {
                     let lsn_before = last_lsn;
                     let undo_res = match old_value {
-                        Some(val) => tree.insert_logged(txn_id, &mut last_lsn, &key, &val),
+                        Some(val) => tree
+                            .insert_or_replace_logged(txn_id, &mut last_lsn, &key, &val)
+                            .map(|_| ()),
                         None => tree.delete_logged(txn_id, &mut last_lsn, &key).map(|_| ()),
                     };
                     if let Err(e) = undo_res {
@@ -2361,9 +2392,9 @@ impl TxnManager {
                         v.xmax = None;
                     }
                 }
-                if chain.len() == 1 && chain[0].xmin == 0 && chain[0].xmax.is_none() {
-                    chain.clear();
-                }
+                // if chain.len() == 1 && chain[0].xmin == 0 && chain[0].xmax.is_none() {
+                //     chain.clear();
+                // }
             }
             versions.retain(|_, chain| !chain.is_empty());
             versions.rebuild_tree_index();
