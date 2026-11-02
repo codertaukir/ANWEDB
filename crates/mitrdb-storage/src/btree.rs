@@ -655,7 +655,6 @@ impl BPlusTree {
             })?;
 
             // Type-changing writes are logged full-length so recovery can restore the page header type.
-            let mut new_payload = new_payload;
             if type_changed {
                 new_payload.resize(PAGE_SIZE - PAGE_HEADER_SIZE, 0);
             }
