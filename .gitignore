@@ -20,3 +20,7 @@ target/
 *.swp
 .DS_Store
 target/
+*.bak*
+patch*.py
+apply_scan_fix.py
+bench3.sh
