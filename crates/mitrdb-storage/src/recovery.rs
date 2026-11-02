@@ -284,14 +284,21 @@ impl RecoveryManager {
                         undo_payload[0] = NODE_KIND_FREE;
                     }
 
+                    let (clr_off, clr_payload) = clr_image_payload(
+                        &self.bpm,
+                        &self.wal_manager,
+                        rec.page_id,
+                        rec.offset,
+                        &undo_payload,
+                    )?;
                     let clr = LogRecord::new_clr(
                         0,
                         max_txn,
                         entry.last_lsn,
                         rec.page_id,
-                        rec.offset,
+                        clr_off,
                         rec.prev_lsn,
-                        undo_payload.clone(),
+                        clr_payload,
                     );
                     let clr_lsn = self.wal_manager.append_record(clr)?;
                     self.wal_manager.flush_up_to(clr_lsn)?;
@@ -483,14 +490,21 @@ impl RecoveryManager {
                     }
 
                     let _op_guard = self.bpm.acquire_op_shared();
+                    let (clr_off, clr_payload) = clr_image_payload(
+                        &self.bpm,
+                        &self.wal_manager,
+                        rec.page_id,
+                        rec.offset,
+                        &undo_payload,
+                    )?;
                     let clr = LogRecord::new_clr(
                         0,
                         txn_id,
                         entry.last_lsn,
                         rec.page_id,
-                        rec.offset,
+                        clr_off,
                         rec.prev_lsn,
-                        undo_payload.clone(),
+                        clr_payload,
                     );
                     let clr_lsn = self.wal_manager.append_record(clr)?;
                     self.wal_manager.flush_up_to(clr_lsn)?;
@@ -555,6 +569,39 @@ impl RecoveryManager {
 
         Ok(undone_count)
     }
+}
+
+/// CLR payload: if the page needs a full-page image after the last checkpoint, log the
+/// whole post-undo body (same rule as btree write_node) so a torn page can be rebuilt.
+fn clr_image_payload(
+    bpm: &crate::buffer_pool::BufferPoolManager,
+    wal: &crate::wal::WalManager,
+    page_id: PageId,
+    offset: u16,
+    undo_payload: &[u8],
+) -> Result<(u16, Vec<u8>)> {
+    let off = offset as usize;
+    if off == PAGE_HEADER_SIZE && undo_payload.len() == PAGE_SIZE - PAGE_HEADER_SIZE {
+        return Ok((offset, undo_payload.to_vec()));
+    }
+    if off < PAGE_HEADER_SIZE || off + undo_payload.len() > PAGE_SIZE {
+        return Ok((offset, undo_payload.to_vec()));
+    }
+    let page = bpm.fetch_page(page_id)?;
+    let page_lsn = page.page_lsn();
+    let ptype = page.page_type();
+    let mut body = page.data[PAGE_HEADER_SIZE..PAGE_SIZE].to_vec();
+    bpm.unpin_page(page_id, false)?;
+    let is_btree = ptype == PAGE_TYPE_BTREE_LEAF || ptype == PAGE_TYPE_BTREE_INTERNAL;
+    if !is_btree || !wal.needs_full_page_image(page_lsn) {
+        return Ok((offset, undo_payload.to_vec()));
+    }
+    let start = off - PAGE_HEADER_SIZE;
+    body[start..start + undo_payload.len()].copy_from_slice(undo_payload);
+    if !matches!(body.first().copied(), Some(NODE_KIND_LEAF | NODE_KIND_INTERNAL)) {
+        return Ok((offset, undo_payload.to_vec()));
+    }
+    Ok((PAGE_HEADER_SIZE as u16, body))
 }
 
 #[cfg(test)]

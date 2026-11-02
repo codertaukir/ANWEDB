@@ -2007,6 +2007,78 @@ mod tests {
     }
 
     #[test]
+    fn test_btree_torn_leaf_after_rollback_across_checkpoint_multi_segment() {
+        use std::io::{Seek, SeekFrom, Write};
+        let temp_dir =
+            std::env::temp_dir().join(format!("mitrdb_btree_torn_rb_seg_{}", std::process::id()));
+        let db_path = temp_dir.join("test.db");
+        let wal_path = temp_dir.join("test.wal");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        let root;
+
+        {
+            let disk = Arc::new(DiskManager::open_or_create(db_path.as_path()).unwrap());
+            let bpm = Arc::new(BufferPoolManager::new(disk.clone(), 16));
+            let wal = Arc::new(WalManager::open_with_segment_size(wal_path.as_path(), 256).unwrap());
+            let recovery = RecoveryManager::new(wal.clone(), bpm.clone());
+            let tree = BPlusTree::create(bpm.clone(), Some(wal.clone()), 4).unwrap();
+
+            // txn 6: baseline, then checkpoint A.
+            let mut last = wal.append_record(LogRecord::new_begin(0, 6)).unwrap();
+            for i in 0..2 {
+                let k = format!("key_{:02}", i);
+                tree.insert_logged(6, &mut last, k.as_bytes(), b"v").unwrap();
+            }
+            wal.commit(6, last).unwrap();
+            recovery.create_checkpoint().unwrap();
+
+            // txn 8: first write after checkpoint A (full image), committed.
+            let mut last = wal.append_record(LogRecord::new_begin(0, 8)).unwrap();
+            tree.insert_logged(8, &mut last, b"key_02", b"v").unwrap();
+            wal.commit(8, last).unwrap();
+
+            // txn 7: small update (page already has its image), stays active.
+            let mut last7 = wal.append_record(LogRecord::new_begin(0, 7)).unwrap();
+            tree.insert_logged(7, &mut last7, b"key_03", b"v").unwrap();
+
+            // checkpoint B with txn 7 active, then rollback: the CLR is the first write after B.
+            recovery.create_checkpoint().unwrap();
+            recovery.rollback_txn(7).unwrap();
+            root = tree.root_page_id();
+        }
+
+        {
+            let mut f = std::fs::OpenOptions::new()
+                .write(true)
+                .open(&db_path)
+                .unwrap();
+            f.seek(SeekFrom::Start(root as u64 * PAGE_SIZE as u64))
+                .unwrap();
+            f.write_all(&[0xABu8; 2048]).unwrap();
+            f.sync_all().unwrap();
+        }
+
+        {
+            let disk = Arc::new(DiskManager::open_or_create(db_path.as_path()).unwrap());
+            let wal = Arc::new(WalManager::open_with_segment_size(wal_path.as_path(), 256).unwrap());
+            let bpm = Arc::new(BufferPoolManager::new(disk.clone(), 16));
+            let recovery = RecoveryManager::new(wal.clone(), bpm.clone());
+            recovery.recover().unwrap();
+
+            let page = bpm.fetch_page(root).unwrap();
+            assert_eq!(page.page_type(), PAGE_TYPE_BTREE_LEAF);
+            let node = BTreeNode::from_page(&page).unwrap();
+            let mut keys: Vec<Vec<u8>> = node.keys.clone();
+            keys.sort();
+            assert_eq!(keys.len(), 3);
+            assert!(keys.contains(&b"key_02".to_vec()));
+            assert!(!keys.contains(&b"key_03".to_vec()));
+        }
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
     fn test_btree_insert_get_and_update() {
         let temp_dir =
             std::env::temp_dir().join(format!("mitrdb_btree_test1_{}", std::process::id()));
