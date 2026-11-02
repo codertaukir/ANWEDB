@@ -589,18 +589,29 @@ impl BPlusTree {
             new_payload.truncate(new_len);
 
             // Step 1: mutate_page se bina frame clone kiye in-place old_payload nikalo aur new data likho
-            let old_payload = self.bpm.mutate_page(node.page_id, |page| {
+            let (old_payload, type_changed) = self.bpm.mutate_page(node.page_id, |page| {
                 let page_body = &page.data[PAGE_HEADER_SIZE..PAGE_SIZE];
                 let old_len = Self::get_page_payload_len(page_body);
-                let old_data = page_body[..old_len].to_vec();
+                let type_changed = page.page_type() != target_ptype;
+                let old_data = if type_changed {
+                    page_body.to_vec()
+                } else {
+                    page_body[..old_len].to_vec()
+                };
 
                 page.set_page_type(target_ptype);
                 page.set_flags(0);
                 page.data[PAGE_HEADER_SIZE..PAGE_HEADER_SIZE + new_len]
                     .copy_from_slice(&new_payload);
                 page.data[PAGE_HEADER_SIZE + new_len..PAGE_SIZE].fill(0);
-                Ok(old_data)
+                Ok((old_data, type_changed))
             })?;
+
+            // Type-changing writes are logged full-length so recovery can restore the page header type.
+            let mut new_payload = new_payload;
+            if type_changed {
+                new_payload.resize(PAGE_SIZE - PAGE_HEADER_SIZE, 0);
+            }
 
             // Step 2: WAL append karo
             let lsn = wal.append_record(LogRecord::new_update(
