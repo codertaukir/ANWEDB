@@ -381,5 +381,7 @@ impl Default for Server {
     }
 }
 
+mod files;
+pub use files::{FileStore, StoredFile};
 mod table;
 pub use table::{val, Delete, IntoValue, Query, Rows, Table, Update};

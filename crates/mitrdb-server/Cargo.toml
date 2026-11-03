@@ -16,3 +16,4 @@ mitrdb-txn = { path = "../mitrdb-txn" }
 
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 zeroize = "1.9"
+getrandom = "0.2"
