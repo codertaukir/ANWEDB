@@ -80,6 +80,23 @@ fn parse_columns(spec: &str) -> Result<Vec<ColumnDef>> {
     Ok(cols)
 }
 
+/// Names of columns marked `unique` in the spec (primary key columns are skipped).
+fn unique_columns(spec: &str, wanted: &[ColumnDef]) -> Vec<String> {
+    let mut out = Vec::new();
+    for part in spec.split(',') {
+        let tokens: Vec<&str> = part.split_whitespace().collect();
+        if tokens.len() < 3 {
+            continue;
+        }
+        let is_unique = tokens[2..].iter().any(|t| t.eq_ignore_ascii_case("unique"));
+        let is_pk = wanted.iter().any(|c| c.name == tokens[0] && c.is_primary_key);
+        if is_unique && !is_pk {
+            out.push(tokens[0].to_string());
+        }
+    }
+    out
+}
+
 impl Table<'_> {
     fn check_name(&self) -> Result<()> {
         if valid_ident(&self.name) {
@@ -94,6 +111,7 @@ impl Table<'_> {
         self.check_name()?;
         let wanted = parse_columns(spec)?;
         let mut plan: Vec<String> = Vec::new();
+        let uniques = unique_columns(spec, &wanted);
 
         match self.server.get_table_schema(&self.name)? {
             None => {
@@ -138,6 +156,35 @@ impl Table<'_> {
                     }
                 }
             }
+        }
+
+        let existing = self.server.get_table_schema(&self.name)?;
+        let existing_idx = match &existing {
+            Some(sc) => self.server.catalog().get_table_indexes(sc.table_id),
+            None => Vec::new(),
+        };
+        let uq_name = |col: &str| format!("{}_{}_uq", self.name, col);
+        for idx in &existing_idx {
+            if idx.unique
+                && idx.name == uq_name(&idx.column_name)
+                && !uniques.contains(&idx.column_name)
+            {
+                return Err(bad(format!(
+                    "column '{}' is unique in the database but not in your definition; removing unique is not supported",
+                    idx.column_name
+                )));
+            }
+        }
+        for col in &uniques {
+            if existing_idx.iter().any(|i| i.unique && i.column_name == *col) {
+                continue;
+            }
+            plan.push(format!(
+                "CREATE UNIQUE INDEX {} ON {} ({})",
+                uq_name(col),
+                self.name,
+                col
+            ));
         }
 
         for sql in &plan {
