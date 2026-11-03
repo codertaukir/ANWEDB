@@ -263,3 +263,145 @@ impl Table<'_> {
         }
     }
 }
+
+/// Result of `find().run()`.
+#[derive(Debug, Clone)]
+pub struct Rows {
+    pub columns: Vec<String>,
+    pub rows: Vec<Vec<Value>>,
+}
+
+/// Built by `table.find()`. Chain `filter`, `columns`, `order_by`, `limit`, `offset`, then `run()`.
+pub struct Query<'a> {
+    server: &'a Server,
+    table: String,
+    conds: Vec<(String, String, Value)>,
+    cols: Option<Vec<String>>,
+    order: Option<(String, bool)>,
+    limit: Option<usize>,
+    offset: Option<usize>,
+}
+
+impl<'a> Table<'a> {
+    /// Start a query: `db.table("users").find().filter("age", ">", val(26)).run()?`
+    pub fn find(&self) -> Query<'a> {
+        Query {
+            server: self.server,
+            table: self.name.clone(),
+            conds: Vec::new(),
+            cols: None,
+            order: None,
+            limit: None,
+            offset: None,
+        }
+    }
+}
+
+fn lit(v: &Value) -> Result<String> {
+    match v {
+        Value::Null => Ok("NULL".to_string()),
+        Value::Int64(n) => Ok(n.to_string()),
+        Value::Bool(b) => Ok(if *b { "TRUE" } else { "FALSE" }.to_string()),
+        Value::Text(s) => Ok(format!("'{}'", s.replace('\'', "''"))),
+        Value::Bytes(_) => Err(bad("bytes values cannot be used in a filter")),
+    }
+}
+
+impl Query<'_> {
+    /// Add a condition (all conditions are combined with AND).
+    /// Operators: =  !=  >  <  >=  <=   (value Null with = or != means IS NULL / IS NOT NULL)
+    pub fn filter(mut self, column: &str, op: &str, value: Value) -> Self {
+        self.conds.push((column.to_string(), op.to_string(), value));
+        self
+    }
+
+    /// Only return these columns.
+    pub fn columns(mut self, cols: &[&str]) -> Self {
+        self.cols = Some(cols.iter().map(|c| c.to_string()).collect());
+        self
+    }
+
+    pub fn order_by(mut self, column: &str) -> Self {
+        self.order = Some((column.to_string(), false));
+        self
+    }
+
+    pub fn order_by_desc(mut self, column: &str) -> Self {
+        self.order = Some((column.to_string(), true));
+        self
+    }
+
+    pub fn limit(mut self, n: usize) -> Self {
+        self.limit = Some(n);
+        self
+    }
+
+    pub fn offset(mut self, n: usize) -> Self {
+        self.offset = Some(n);
+        self
+    }
+
+    pub fn run(self) -> Result<Rows> {
+        if !valid_ident(&self.table) {
+            return Err(bad(format!("bad table name: '{}'", self.table)));
+        }
+        let schema = self
+            .server
+            .get_table_schema(&self.table)?
+            .ok_or_else(|| bad(format!("table '{}' not found", self.table)))?;
+        let known = |c: &str| schema.columns.iter().any(|x| x.name == c);
+
+        let mut sql = String::from("SELECT ");
+        match &self.cols {
+            None => sql.push('*'),
+            Some(cols) => {
+                if cols.is_empty() {
+                    return Err(bad("columns() needs at least one column"));
+                }
+                for c in cols {
+                    if !known(c) {
+                        return Err(bad(format!("unknown column '{}'", c)));
+                    }
+                }
+                sql.push_str(&cols.join(", "));
+            }
+        }
+        sql.push_str(&format!(" FROM {}", self.table));
+
+        let mut parts: Vec<String> = Vec::new();
+        for (col, op, v) in &self.conds {
+            if !known(col) {
+                return Err(bad(format!("unknown column '{}'", col)));
+            }
+            let part = match (op.as_str(), v) {
+                ("=", Value::Null) => format!("{} IS NULL", col),
+                ("!=", Value::Null) => format!("{} IS NOT NULL", col),
+                (_, Value::Null) => return Err(bad("NULL can only be used with = or !=")),
+                ("=" | "!=" | ">" | "<" | ">=" | "<=", _) => format!("{} {} {}", col, op, lit(v)?),
+                _ => return Err(bad(format!("unknown operator '{}'", op))),
+            };
+            parts.push(part);
+        }
+        if !parts.is_empty() {
+            sql.push_str(" WHERE ");
+            sql.push_str(&parts.join(" AND "));
+        }
+        if let Some((col, desc)) = &self.order {
+            if !known(col) {
+                return Err(bad(format!("unknown column '{}'", col)));
+            }
+            sql.push_str(&format!(" ORDER BY {}{}", col, if *desc { " DESC" } else { "" }));
+        }
+        if let Some(n) = self.limit {
+            sql.push_str(&format!(" LIMIT {}", n));
+        }
+        if let Some(n) = self.offset {
+            sql.push_str(&format!(" OFFSET {}", n));
+        }
+
+        match self.server.execute_sql(&sql)? {
+            ExecutionResult::Rows { columns, rows } => Ok(Rows { columns, rows }),
+            other => Err(bad(format!("unexpected result: {other:?}"))),
+        }
+    }
+}
