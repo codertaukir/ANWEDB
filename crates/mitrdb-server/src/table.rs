@@ -561,3 +561,41 @@ impl Delete<'_> {
         }
     }
 }
+
+impl Query<'_> {
+    /// Number of rows that match the filters. (Do not combine with limit/offset/order.)
+    pub fn count(self) -> Result<usize> {
+        if self.limit.is_some() || self.offset.is_some() {
+            return Err(bad("count() cannot be used with limit() or offset()"));
+        }
+        if !valid_ident(&self.table) {
+            return Err(bad(format!("bad table name: '{}'", self.table)));
+        }
+        let schema = self
+            .server
+            .get_table_schema(&self.table)?
+            .ok_or_else(|| bad(format!("table '{}' not found", self.table)))?;
+        let known = |c: &str| schema.columns.iter().any(|x| x.name == c);
+        let wh = where_sql(&known, &self.conds)?;
+        let sql = format!("SELECT COUNT(*) FROM {}{}", self.table, wh);
+        match self.server.execute_sql(&sql)? {
+            ExecutionResult::Rows { rows, .. } => match rows.first().and_then(|r| r.first()) {
+                Some(Value::Int64(n)) if *n >= 0 => Ok(*n as usize),
+                other => Err(bad(format!("unexpected COUNT result: {other:?}"))),
+            },
+            other => Err(bad(format!("unexpected result: {other:?}"))),
+        }
+    }
+
+    /// First matching row (in the table's column order), or None.
+    pub fn one(self) -> Result<Option<Vec<Value>>> {
+        Ok(self.limit(1).run()?.rows.into_iter().next())
+    }
+}
+
+impl Table<'_> {
+    /// Number of rows in the table.
+    pub fn count(&self) -> Result<usize> {
+        self.find().count()
+    }
+}
