@@ -122,6 +122,33 @@ files.delete(&saved.name)?;
 
 Files get random 32-character names, are written to a temp file and renamed, and use owner-only permissions. `FileStore` does not limit file size, does not encrypt, and does not delete a file when a row is deleted: that is the caller's job.
 
+## Limits
+
+Know these before you use ANWEDB.
+
+**Data**
+- Types: `INT`, `TEXT`, `BOOL`, `BYTES`.
+- A value can be about 3900 bytes. Bigger values give a clean `OUT_OF_SPACE` error. Store big files outside the database and keep only the path or name in a text column.
+- A `UNIQUE` column does not allow two `NULL` values. Use `UNIQUE` together with `NOT NULL`.
+
+**SQL**
+- Not supported yet: `DROP COLUMN`, `DEFAULT`, `IF NOT EXISTS`, `$n` parameters, composite indexes, joins.
+- `INSERT` writes one row at a time.
+- `sync()` creates tables and adds nullable columns without losing data. It does not remove columns, change types, or remove `UNIQUE`.
+- `WHERE` nesting depth is limited to 128.
+
+**Network**
+- One frame is at most 1 MB.
+- There is one shared token. There are no users or roles.
+- 5 failed logins in 60 seconds from one IP rate-limit that IP.
+- Slow or silent connections are closed (handshake and frame timeouts).
+- Binding to a non-local address requires TLS and a token. On localhost the default has no auth.
+- When the database runs on a separate server, always use TLS and a token.
+
+**Files**
+- `.db`, `.wal` and backup files are set to owner-only (`0600`, backup folder `0700`) when opened or created. A small internal free-list file may still be created with the default permissions, so also run the server with `umask 077` (systemd: `UMask=0077`).
+- Backup is a Rust call (`server.backup(path)`), not an SQL command. It refuses an existing destination folder.
+
 ## Benchmarks
 
 Single process, single thread, 10,000 rows inserted in one transaction (batch mode),
