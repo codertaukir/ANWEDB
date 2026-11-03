@@ -133,7 +133,8 @@ Know these before you use ANWEDB.
 
 **SQL**
 - `CREATE TABLE IF NOT EXISTS` and `CREATE [UNIQUE] INDEX IF NOT EXISTS` do nothing (0 rows affected) when the name already exists. The old table or index is not changed.
-- Not supported yet: `DROP COLUMN`, `DEFAULT`, `$n` parameters, composite indexes, joins.
+- `JOIN`, `INNER JOIN`, `LEFT JOIN` work (basic, tested on small data; not performance-tested).
+- Not supported yet: `DROP COLUMN`, `DEFAULT`, `$n` parameters, composite indexes.
 - `INSERT` can write many rows: `INSERT INTO t VALUES (1,'a'), (2,'b')` (up to 1000 rows). With auto-commit it is all or nothing. Inside an explicit transaction, rows before a failing row stay in that transaction. There is no column list yet.
 - `UPDATE ... SET col = col + N` and `col = col - N` work on `INT` columns (`N` is a whole number). `NULL` stays `NULL`, overflow gives an error and changes nothing. Other expressions (for example `a = b + 1`, `col * 2`) are not supported.
 - `sync()` creates tables and adds nullable columns without losing data. It does not remove columns, change types, or remove `UNIQUE`.
