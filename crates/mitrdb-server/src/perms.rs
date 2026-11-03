@@ -33,3 +33,32 @@ pub(crate) fn restrict_db_files(db: &Path, wal: &Path) {
 
 #[cfg(not(unix))]
 pub(crate) fn restrict_db_files(_db: &Path, _wal: &Path) {}
+
+#[cfg(unix)]
+pub(crate) fn restrict_tree(root: &Path) {
+    walk(root, 0);
+}
+
+#[cfg(unix)]
+fn walk(p: &Path, depth: u32) {
+    use std::os::unix::fs::PermissionsExt;
+    if depth > 4 {
+        return;
+    }
+    let Ok(meta) = std::fs::symlink_metadata(p) else {
+        return;
+    };
+    if meta.file_type().is_dir() {
+        let _ = std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o700));
+        if let Ok(entries) = std::fs::read_dir(p) {
+            for e in entries.flatten() {
+                walk(&e.path(), depth + 1);
+            }
+        }
+    } else if meta.file_type().is_file() {
+        let _ = std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o600));
+    }
+}
+
+#[cfg(not(unix))]
+pub(crate) fn restrict_tree(_root: &Path) {}

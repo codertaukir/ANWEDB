@@ -361,7 +361,11 @@ impl Server {
         if self.txn_mgr.active_txn_count() == 0 {
             self.catalog.sync_roots()?;
         }
-        BackupManager::create_online_backup(disk, bpm, wal, rec, dest_dir.as_ref())
+        let result = BackupManager::create_online_backup(disk, bpm, wal, rec, dest_dir.as_ref());
+        if result.is_ok() {
+            perms::restrict_tree(dest_dir.as_ref());
+        }
+        result
     }
 
     pub fn restore<P: AsRef<Path>, Q: AsRef<Path>>(
