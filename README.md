@@ -129,7 +129,7 @@ Know these before you use ANWEDB.
 **Data**
 - Types: `INT`, `TEXT`, `BOOL`, `BYTES`.
 - A value can be about 3900 bytes. Bigger values give a clean `OUT_OF_SPACE` error. Store big files outside the database and keep only the path or name in a text column.
-- A `UNIQUE` column does not allow two `NULL` values. Use `UNIQUE` together with `NOT NULL`.
+- A `UNIQUE` column allows many `NULL` values; real duplicate values are rejected. All `NULL` rows share one index entry, so concurrent writes of `NULL` into the same unique column run one after another (from code reading, not measured).
 
 **SQL**
 - Not supported yet: `DROP COLUMN`, `DEFAULT`, `IF NOT EXISTS`, `$n` parameters, composite indexes, joins.

@@ -671,7 +671,10 @@ impl Executor {
                             let pk_bytes = tuple[pk_idx].to_key_bytes();
                             let idx_key = tuple[col_pos].to_key_bytes();
                             let pks = key_map.entry(idx_key).or_default();
-                            if unique && pks.iter().any(|existing_pk| existing_pk != &pk_bytes) {
+                            if unique
+                                && !matches!(tuple[col_pos], Value::Null)
+                                && pks.iter().any(|existing_pk| existing_pk != &pk_bytes)
+                            {
                                 return Err(Error::WriteConflict(format!(
                                     "Duplicate key violates unique index '{}'",
                                     index_name
@@ -1797,7 +1800,14 @@ impl Executor {
             } else {
                 Vec::new()
             };
-            if idx_meta.unique && pks.iter().any(|existing_pk| existing_pk != &pk_bytes) {
+            if idx_meta.unique
+                && pks.iter().any(|existing_pk| existing_pk != &pk_bytes)
+                && !schema
+                    .columns
+                    .iter()
+                    .position(|c| c.name == idx_meta.column_name)
+                    .is_some_and(|cp| matches!(values[cp], Value::Null))
+            {
                 return Err(Error::WriteConflict(format!(
                     "Duplicate key violates unique index '{}'",
                     idx_meta.name
@@ -1932,6 +1942,9 @@ impl Executor {
             if idx_meta.unique {
                 let mut batch_seen_keys = HashSet::new();
                 for (old_pk_bytes, _, _, new_tuple) in &planned_updates {
+                    if matches!(new_tuple[*col_pos], Value::Null) {
+                        continue;
+                    }
                     let new_idx_key = new_tuple[*col_pos].to_key_bytes();
                     if !batch_seen_keys.insert(new_idx_key.clone()) {
                         return Err(Error::WriteConflict(format!(
