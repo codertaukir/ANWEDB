@@ -46,14 +46,14 @@ The project is a Cargo workspace. Each crate has one responsibility:
 
 | Crate | Responsibility |
 |---|---|
-| `anwedb-common` | Shared types, constants and the error type |
-| `anwedb-observe` | Metrics and the insert profiler |
-| `anwedb-storage` | Pages, disk manager, buffer pool, B+Tree, WAL, recovery, backup |
-| `anwedb-txn` | MVCC, lock manager, range locks, transactions, vacuum |
-| `anwedb-catalog` | Table and schema metadata |
-| `anwedb-query` | Query parsing and planning |
-| `anwedb-exec` | Query execution |
-| `anwedb-server` | Server and benchmark examples |
+| `mitrdb-common` | Shared types, constants and the error type |
+| `mitrdb-observe` | Metrics and the insert profiler |
+| `mitrdb-storage` | Pages, disk manager, buffer pool, B+Tree, WAL, recovery, backup |
+| `mitrdb-txn` | MVCC, lock manager, range locks, transactions, vacuum |
+| `mitrdb-catalog` | Table and schema metadata |
+| `mitrdb-query` | Query parsing and planning |
+| `mitrdb-exec` | Query execution |
+| `mitrdb-server` | Server and benchmark examples |
 
 ## Getting started
 
@@ -68,8 +68,8 @@ cargo build --release
 
 ### Run the tests
 ```bash
-cargo test -p anwedb-txn
-cargo test -p anwedb-storage
+cargo test -p mitrdb-txn
+cargo test -p mitrdb-storage
 ```
 
 The suites cover crash recovery (including torn tails and crashes during checkpoints), WAL
@@ -78,7 +78,7 @@ and serializable range locking.
 
 ### Run the benchmark
 ```bash
-cargo run --release -p anwedb-server --example perf_bench -- \
+cargo run --release -p mitrdb-server --example perf_bench -- \
     /tmp/bench.db /tmp/bench.wal 10000 10 batch 1 4096
 ```
 
@@ -87,7 +87,7 @@ warm-up scans, buffer pool frames.
 
 To see where insert time goes, enable the per-phase profiler:
 ```bash
-ANWEDB_PROFILE_INSERT=1 cargo run --release -p anwedb-server --example perf_bench -- \
+MITRDB_PROFILE_INSERT=1 cargo run --release -p mitrdb-server --example perf_bench -- \
     /tmp/bench.db /tmp/bench.wal 10000 10 batch 1 4096
 ```
 Leave it off when measuring throughput, because profiling adds overhead.
