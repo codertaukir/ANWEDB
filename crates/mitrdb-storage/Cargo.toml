@@ -2,6 +2,7 @@
 name = "mitrdb-storage"
 version = "0.1.0"
 edition = "2024"
+publish = false
 
 [dependencies]
 mitrdb-common = { path = "../mitrdb-common" }
