@@ -380,3 +380,6 @@ impl Default for Server {
         Self::new()
     }
 }
+
+mod table;
+pub use table::Table;
