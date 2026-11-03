@@ -607,7 +607,14 @@ impl Executor {
                 let desc = Self::format_explain_plan(&inner);
                 Ok(ExecutionResult::Explained(desc))
             }
-            PhysicalPlan::CreateTable { name, columns } => {
+            PhysicalPlan::CreateTable {
+                name,
+                columns,
+                if_not_exists,
+            } => {
+                if if_not_exists && catalog.get_table_schema(&name)?.is_some() {
+                    return Ok(ExecutionResult::Affected(0));
+                }
                 catalog.create_table(&name, columns)?;
                 Ok(ExecutionResult::Ok)
             }
@@ -638,7 +645,11 @@ impl Executor {
                 table_name,
                 column_name,
                 unique,
+                if_not_exists,
             } => {
+                if if_not_exists && catalog.get_index_by_name(&index_name).is_some() {
+                    return Ok(ExecutionResult::Affected(0));
+                }
                 let mut staged_entries: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
                 if let Some(schema) = catalog.get_table_schema(&table_name)? {
                     let mut table_trees = Vec::new();

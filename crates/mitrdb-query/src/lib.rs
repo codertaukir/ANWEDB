@@ -472,6 +472,7 @@ pub enum Statement {
     CreateTable {
         name: String,
         columns: Vec<ColumnDef>,
+        if_not_exists: bool,
     },
     DropTable {
         name: String,
@@ -490,6 +491,7 @@ pub enum Statement {
         table_name: String,
         column_name: String,
         unique: bool,
+        if_not_exists: bool,
     },
     DropIndex {
         index_name: String,
@@ -545,6 +547,7 @@ pub enum PhysicalPlan {
     CreateTable {
         name: String,
         columns: Vec<ColumnDef>,
+        if_not_exists: bool,
     },
     DropTable {
         name: String,
@@ -589,6 +592,7 @@ pub enum PhysicalPlan {
         table_name: String,
         column_name: String,
         unique: bool,
+        if_not_exists: bool,
     },
     DropIndex {
         index_name: String,
@@ -905,20 +909,28 @@ impl QueryEngine {
 
     pub fn plan(&self, stmt: Statement) -> Result<PhysicalPlan> {
         match stmt {
-            Statement::CreateTable { name, columns } => {
-                Ok(PhysicalPlan::CreateTable { name, columns })
-            }
+            Statement::CreateTable {
+                name,
+                columns,
+                if_not_exists,
+            } => Ok(PhysicalPlan::CreateTable {
+                name,
+                columns,
+                if_not_exists,
+            }),
             Statement::DropTable { name } => Ok(PhysicalPlan::DropTable { name }),
             Statement::CreateIndex {
                 index_name,
                 table_name,
                 column_name,
                 unique,
+                if_not_exists,
             } => Ok(PhysicalPlan::CreateIndex {
                 index_name,
                 table_name,
                 column_name,
                 unique,
+                if_not_exists,
             }),
             Statement::DropIndex { index_name } => Ok(PhysicalPlan::DropIndex { index_name }),
             Statement::InsertMany { table_name, rows } => {
@@ -2479,6 +2491,25 @@ impl QueryEngine {
         Ok(())
     }
 
+    /// Splits an optional `IF NOT EXISTS` off the front of a name.
+    fn strip_if_not_exists(s: &str) -> Result<(&str, bool)> {
+        const KW: &str = "IF NOT EXISTS";
+        let t = s.trim();
+        match t.get(..KW.len()) {
+            Some(head) if head.eq_ignore_ascii_case(KW) => {
+                let rest = &t[KW.len()..];
+                let name = rest.trim();
+                if name.is_empty() || !rest.starts_with(char::is_whitespace) {
+                    return Err(Error::TransactionError(
+                        "Invalid IF NOT EXISTS clause".to_string(),
+                    ));
+                }
+                Ok((name, true))
+            }
+            _ => Ok((t, false)),
+        }
+    }
+
     fn parse_create_table(sql: &str) -> Result<Statement> {
         let open_paren = sql
             .find('(')
@@ -2486,7 +2517,8 @@ impl QueryEngine {
         let close_paren = sql
             .rfind(')')
             .ok_or_else(|| Error::TransactionError("Missing ')' in CREATE TABLE".to_string()))?;
-        let name = sql[13..open_paren].trim().to_string();
+        let (name, if_not_exists) = Self::strip_if_not_exists(&sql[13..open_paren])?;
+        let name = name.to_string();
         let cols_str = &sql[open_paren + 1..close_paren];
         let mut columns = Vec::new();
 
@@ -2521,7 +2553,11 @@ impl QueryEngine {
             });
         }
 
-        Ok(Statement::CreateTable { name, columns })
+        Ok(Statement::CreateTable {
+            name,
+            columns,
+            if_not_exists,
+        })
     }
 
     fn parse_create_index(sql: &str) -> Result<Statement> {
@@ -2536,7 +2572,8 @@ impl QueryEngine {
             .to_uppercase()
             .find(" ON ")
             .ok_or_else(|| Error::TransactionError("Missing ON in CREATE INDEX".to_string()))?;
-        let index_name = rest[..on_pos].trim().to_string();
+        let (index_name, if_not_exists) = Self::strip_if_not_exists(&rest[..on_pos])?;
+        let index_name = index_name.to_string();
         let after_on = rest[on_pos + 4..].trim();
         let open_paren = after_on
             .find('(')
@@ -2551,6 +2588,7 @@ impl QueryEngine {
             table_name,
             column_name,
             unique,
+            if_not_exists,
         })
     }
 
