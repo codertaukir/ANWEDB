@@ -100,6 +100,8 @@ impl Server {
         pool_size: usize,
         max_segment_bytes: u64,
     ) -> Result<(Self, RecoveryReport)> {
+        let db_copy = db_path.as_ref().to_path_buf();
+        let wal_copy = wal_path.as_ref().to_path_buf();
         let disk = Arc::new(DiskManager::open_or_create(db_path)?);
         let wal = Arc::new(WalManager::open_with_segment_size(
             wal_path,
@@ -108,6 +110,7 @@ impl Server {
         let bpm = Arc::new(BufferPoolManager::new(disk.clone(), pool_size));
         let recovery = Arc::new(RecoveryManager::new(wal.clone(), bpm.clone()));
         let report = recovery.recover()?;
+        perms::restrict_db_files(&db_copy, &wal_copy);
 
         let catalog = Arc::new(Catalog::with_storage(bpm.clone(), Some(wal.clone())));
         let txn_mgr = Arc::new(TxnManager::with_storage(wal.clone(), bpm.clone()));
@@ -381,6 +384,7 @@ impl Default for Server {
     }
 }
 
+mod perms;
 mod files;
 pub use files::{FileStore, StoredFile};
 mod table;
