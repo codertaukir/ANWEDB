@@ -95,7 +95,8 @@ fn tls_client(
     let mut roots = RootCertStore::empty();
     if trust_ca {
         let file = File::open(fixture("ca.pem"))?;
-        let certs = rustls_pemfile::certs(&mut BufReader::new(file))
+        use rustls::pki_types::{CertificateDer, pem::PemObject};
+        let certs = CertificateDer::pem_reader_iter(&mut BufReader::new(file))
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         for cert in certs {
