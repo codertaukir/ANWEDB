@@ -1,7 +1,9 @@
 use std::cmp::Ordering;
 use std::sync::Arc;
 
-pub use mitrdb_catalog::{Catalog, ColumnDef, DataType, IndexMetadata, KeyBound, KeyRange, TableSchema, };
+pub use mitrdb_catalog::{
+    Catalog, ColumnDef, DataType, IndexMetadata, KeyBound, KeyRange, TableSchema,
+};
 use mitrdb_common::{Error, Result};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -2000,6 +2002,7 @@ impl QueryEngine {
                 ));
             }
             let col_name = tokens[0].to_string();
+            Self::validate_name("column", &col_name)?;
             let dtype = match tokens[1].to_uppercase().as_str() {
                 "INT" | "INT64" | "BIGINT" | "INTEGER" => DataType::Int64,
                 "TEXT" | "VARCHAR" | "STRING" => DataType::Text,
@@ -2038,6 +2041,7 @@ impl QueryEngine {
                     "Invalid column names in ALTER TABLE RENAME COLUMN".to_string(),
                 ));
             }
+            Self::validate_name("column", &new_name)?;
             Ok(Statement::AlterTableRenameColumn {
                 table_name,
                 old_name,
@@ -2491,6 +2495,21 @@ impl QueryEngine {
         Ok(())
     }
 
+    /// New table, index and column names: letters, digits, `_`; start with a letter or `_`; max 64.
+    fn validate_name(kind: &str, name: &str) -> Result<()> {
+        let mut chars = name.chars();
+        let ok = name.len() <= 64
+            && matches!(chars.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')
+            && chars.all(|c| c.is_ascii_alphanumeric() || c == '_');
+        if !ok {
+            return Err(Error::TransactionError(format!(
+                "Invalid {} name (letters, digits and _ only, must start with a letter or _, max 64 characters)",
+                kind
+            )));
+        }
+        Ok(())
+    }
+
     /// Splits an optional `IF NOT EXISTS` off the front of a name.
     fn strip_if_not_exists(s: &str) -> Result<(&str, bool)> {
         const KW: &str = "IF NOT EXISTS";
@@ -2519,6 +2538,7 @@ impl QueryEngine {
             .ok_or_else(|| Error::TransactionError("Missing ')' in CREATE TABLE".to_string()))?;
         let (name, if_not_exists) = Self::strip_if_not_exists(&sql[13..open_paren])?;
         let name = name.to_string();
+        Self::validate_name("table", &name)?;
         let cols_str = &sql[open_paren + 1..close_paren];
         let mut columns = Vec::new();
 
@@ -2530,6 +2550,7 @@ impl QueryEngine {
                 ));
             }
             let col_name = tokens[0].to_string();
+            Self::validate_name("column", &col_name)?;
             let dtype = match tokens[1].to_uppercase().as_str() {
                 "INT" | "INT64" | "BIGINT" | "INTEGER" => DataType::Int64,
                 "TEXT" | "VARCHAR" | "STRING" => DataType::Text,
@@ -2574,6 +2595,7 @@ impl QueryEngine {
             .ok_or_else(|| Error::TransactionError("Missing ON in CREATE INDEX".to_string()))?;
         let (index_name, if_not_exists) = Self::strip_if_not_exists(&rest[..on_pos])?;
         let index_name = index_name.to_string();
+        Self::validate_name("index", &index_name)?;
         let after_on = rest[on_pos + 4..].trim();
         let open_paren = after_on
             .find('(')
@@ -2763,9 +2785,9 @@ impl QueryEngine {
                 rhs
             )));
         }
-        let n: i64 = digits.parse().map_err(|_| {
-            Error::TransactionError("Number too large in UPDATE SET".to_string())
-        })?;
+        let n: i64 = digits
+            .parse()
+            .map_err(|_| Error::TransactionError("Number too large in UPDATE SET".to_string()))?;
         Ok(Some(if negative { -n } else { n }))
     }
 
@@ -3340,6 +3362,4 @@ impl QueryEngine {
             token
         )))
     }
-
-
 }
