@@ -367,7 +367,8 @@ fn load_tls_config(
     let cert_file = File::open(cert_path)
         .map_err(|err| Error::Io(format!("cannot open TLS certificate: {err}")))?;
     let mut cert_reader = BufReader::new(cert_file);
-    let certs = rustls_pemfile::certs(&mut cert_reader)
+    use rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
+    let certs = CertificateDer::pem_reader_iter(&mut cert_reader)
         .collect::<std::result::Result<Vec<_>, _>>()
         .map_err(|err| Error::Io(format!("cannot parse TLS certificate PEM: {err}")))?;
     if certs.is_empty() {
@@ -380,11 +381,8 @@ fn load_tls_config(
     let key_file = File::open(key_path)
         .map_err(|err| Error::Io(format!("cannot open TLS private key: {err}")))?;
     let mut key_reader = BufReader::new(key_file);
-    let key = rustls_pemfile::private_key(&mut key_reader)
-        .map_err(|err| Error::Io(format!("cannot parse TLS private key PEM: {err}")))?
-        .ok_or_else(|| {
-            Error::Io("TLS private key file contains no supported private key".to_string())
-        })?;
+    let key = PrivateKeyDer::from_pem_reader(&mut key_reader)
+        .map_err(|err| Error::Io(format!("cannot parse TLS private key PEM: {err}")))?;
     let config = RustlsServerConfig::builder()
         .with_no_client_auth()
         .with_single_cert(certs, key)
@@ -1047,7 +1045,8 @@ mod tests {
     ) -> io::Result<StreamOwned<ClientConnection, TcpStream>> {
         let ca_file = File::open(fixture("ca.pem"))?;
         let mut reader = BufReader::new(ca_file);
-        let roots = rustls_pemfile::certs(&mut reader)
+        use rustls::pki_types::{CertificateDer, pem::PemObject};
+        let roots = CertificateDer::pem_reader_iter(&mut reader)
             .collect::<std::result::Result<Vec<_>, _>>()
             .map_err(|err| io::Error::other(format!("test CA parse failed: {err}")))?;
         let mut root_store = rustls::RootCertStore::empty();

@@ -14,5 +14,4 @@ mitrdb-txn = { path = "../mitrdb-txn" }
 
 
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
-rustls-pemfile = "2"
 zeroize = "1.9"

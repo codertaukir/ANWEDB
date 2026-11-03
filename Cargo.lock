@@ -120,7 +120,6 @@ dependencies = [
  "mitrdb-storage",
  "mitrdb-txn",
  "rustls",
- "rustls-pemfile",
  "zeroize",
 ]
 
