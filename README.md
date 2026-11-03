@@ -92,6 +92,36 @@ MITRDB_PROFILE_INSERT=1 cargo run --release -p mitrdb-server --example perf_benc
 ```
 Leave it off when measuring throughput, because profiling adds overhead.
 
+## Usage (Rust)
+
+### Tables
+
+```rust
+let (db, _report) = Server::open("data.db", "data.wal", 1024)?;
+
+// Create the table, or add new nullable columns. Safe to run again.
+db.table("users").sync("id int primary key, email text not null unique, age int")?;
+
+db.table("users").insert(&[("id", val(1)), ("email", val("a@b.c")), ("age", val(30))])?;
+
+let rows = db.table("users").find().filter("age", ">", val(17)).order_by_desc("age").limit(10).run()?;
+db.table("users").delete().filter("id", "=", val(1)).run()?;
+```
+
+### Big files
+
+A DB value holds up to about 3900 bytes. Bigger data (photos, videos) goes to disk with `FileStore`; the DB keeps only the file name in a normal `text` column.
+
+```rust
+let files = FileStore::open("data/files")?;
+let saved = files.save(&mut reader)?;        // any std::io::Read, written in 1 MB chunks
+// store saved.name in a text column
+let mut file = files.open_read(&saved.name)?;
+files.delete(&saved.name)?;
+```
+
+Files get random 32-character names, are written to a temp file and renamed, and use owner-only permissions. `FileStore` does not limit file size, does not encrypt, and does not delete a file when a row is deleted: that is the caller's job.
+
 ## Benchmarks
 
 Single process, single thread, 10,000 rows inserted in one transaction (batch mode),
