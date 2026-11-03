@@ -111,3 +111,39 @@ impl FileStore {
         fs::remove_file(self.dir.join(name)).map_err(io_err)
     }
 }
+
+impl FileStore {
+    /// Deletes leftover `<name>.tmp` files older than `max_age`.
+    /// Saved files are never touched. Returns how many were removed.
+    pub fn cleanup_tmp(&self, max_age: std::time::Duration) -> Result<usize> {
+        let now = std::time::SystemTime::now();
+        let mut removed = 0usize;
+        for entry in fs::read_dir(&self.dir).map_err(io_err)? {
+            let entry = entry.map_err(io_err)?;
+            let file_name = entry.file_name();
+            let Some(file_name) = file_name.to_str() else {
+                continue;
+            };
+            let Some(stem) = file_name.strip_suffix(".tmp") else {
+                continue;
+            };
+            if !valid_name(stem) {
+                continue;
+            }
+            let Ok(meta) = entry.metadata() else {
+                continue;
+            };
+            if !meta.is_file() {
+                continue;
+            }
+            let Ok(modified) = meta.modified() else {
+                continue;
+            };
+            let age = now.duration_since(modified).unwrap_or_default();
+            if age >= max_age && fs::remove_file(entry.path()).is_ok() {
+                removed += 1;
+            }
+        }
+        Ok(removed)
+    }
+}

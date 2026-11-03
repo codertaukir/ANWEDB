@@ -125,3 +125,60 @@ fn permissions_are_private() {
     assert_eq!(file_mode, 0o600);
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+fn make_old(path: &std::path::Path, secs_ago: u64) {
+    let f = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+    f.set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(secs_ago))
+        .unwrap();
+}
+
+#[test]
+fn cleanup_removes_only_old_tmp_files() {
+    let dir = temp_dir("cleanup");
+    let store = FileStore::open(&dir).unwrap();
+    let saved = store.save(&mut &b"keep me"[..]).unwrap();
+    make_old(&dir.join(&saved.name), 7200);
+
+    let old_tmp = dir.join(format!("{}.tmp", "a".repeat(32)));
+    let new_tmp = dir.join(format!("{}.tmp", "b".repeat(32)));
+    let other = dir.join("notes.tmp");
+    std::fs::write(&old_tmp, b"x").unwrap();
+    std::fs::write(&new_tmp, b"y").unwrap();
+    std::fs::write(&other, b"z").unwrap();
+    make_old(&old_tmp, 7200);
+    make_old(&other, 7200);
+
+    let removed = store
+        .cleanup_tmp(std::time::Duration::from_secs(3600))
+        .unwrap();
+    assert_eq!(removed, 1);
+    assert!(!old_tmp.exists());
+    assert!(new_tmp.exists());
+    assert!(other.exists());
+    let mut back = Vec::new();
+    store
+        .open_read(&saved.name)
+        .unwrap()
+        .read_to_end(&mut back)
+        .unwrap();
+    assert_eq!(back, b"keep me");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn cleanup_does_not_follow_symlinks() {
+    let dir = temp_dir("cleanup_link");
+    let store = FileStore::open(&dir).unwrap();
+    let outside = dir.parent().unwrap().join("anwedb_cleanup_outside.txt");
+    std::fs::write(&outside, b"secret").unwrap();
+    let link = dir.join(format!("{}.tmp", "d".repeat(32)));
+    std::os::unix::fs::symlink(&outside, &link).unwrap();
+    let removed = store
+        .cleanup_tmp(std::time::Duration::from_secs(0))
+        .unwrap();
+    assert_eq!(removed, 0);
+    assert!(outside.exists());
+    std::fs::remove_file(&outside).unwrap();
+    std::fs::remove_dir_all(&dir).unwrap();
+}
