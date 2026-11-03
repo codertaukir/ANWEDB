@@ -670,13 +670,13 @@ fn check_frame_deadlines(limits: FrameLimits, frame_started: Option<Instant>) ->
             "handshake deadline exceeded",
         ));
     }
-    if let (Some(limit), Some(started)) = (limits.frame_timeout, frame_started) {
-        if now.saturating_duration_since(started) >= limit {
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "frame not completed within frame_timeout",
-            ));
-        }
+    if let (Some(limit), Some(started)) = (limits.frame_timeout, frame_started)
+        && now.saturating_duration_since(started) >= limit
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "frame not completed within frame_timeout",
+        ));
     }
     Ok(())
 }
