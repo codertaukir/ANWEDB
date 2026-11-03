@@ -191,4 +191,4 @@ and discussion are welcome once the repository is public.
 
 ## License
 
-Not yet decided. Until a license is added, all rights are reserved.
+Licensed under the Apache License, Version 2.0. See the [LICENSE](LICENSE) file for details.
