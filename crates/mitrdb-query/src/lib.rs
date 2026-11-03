@@ -488,6 +488,10 @@ pub enum Statement {
         old_name: String,
         new_name: String,
     },
+    AlterTableDropColumn {
+        table_name: String,
+        column_name: String,
+    },
     CreateIndex {
         index_name: String,
         table_name: String,
@@ -567,6 +571,10 @@ pub enum PhysicalPlan {
         table_name: String,
         old_name: String,
         new_name: String,
+    },
+    AlterTableDropColumn {
+        table_name: String,
+        column_name: String,
     },
     Distinct {
         input: Box<PhysicalPlan>,
@@ -944,6 +952,13 @@ impl QueryEngine {
                 let schema = self.catalog.get_table_schema(&table_name)?.ok_or_else(|| {
                     Error::TransactionError(format!("Table '{}' not found", table_name))
                 })?;
+                let rows: Vec<Vec<Value>> = if schema.columns.iter().any(|c| c.is_dropped()) {
+                    rows.into_iter()
+                        .map(|r| Self::pad_dropped(&schema, r))
+                        .collect()
+                } else {
+                    rows
+                };
                 for values in &rows {
                     if values.len() != schema.columns.len() {
                         return Err(Error::TransactionError(format!(
@@ -1016,6 +1031,11 @@ impl QueryEngine {
                 let schema = self.catalog.get_table_schema(&table_name)?.ok_or_else(|| {
                     Error::TransactionError(format!("Table '{}' not found", table_name))
                 })?;
+                let values = if schema.columns.iter().any(|c| c.is_dropped()) {
+                    Self::pad_dropped(&schema, values)
+                } else {
+                    values
+                };
                 if values.len() != schema.columns.len() {
                     return Err(Error::TransactionError(format!(
                         "Column count mismatch on INSERT into '{}'",
@@ -1069,6 +1089,13 @@ impl QueryEngine {
                     filter: bound_filter,
                 })
             }
+            Statement::AlterTableDropColumn {
+                table_name,
+                column_name,
+            } => Ok(PhysicalPlan::AlterTableDropColumn {
+                table_name,
+                column_name,
+            }),
             Statement::AlterTableAddColumn { table_name, column } => {
                 let _ = self.catalog.get_table_schema(&table_name)?.ok_or_else(|| {
                     Error::TransactionError(format!("Table '{}' not found", table_name))
@@ -1210,12 +1237,18 @@ impl QueryEngine {
                     let mut proj_items = Vec::new();
                     if projection.len() == 1 && projection[0] == "*" {
                         for (i, c) in left_schema.columns.iter().enumerate() {
+                            if c.is_dropped() {
+                                continue;
+                            }
                             proj_items.push(JoinProjectionItem {
                                 source: JoinProjSource::Left(i),
                                 output_name: format!("{}.{}", left_schema.name, c.name),
                             });
                         }
                         for (j, c) in right_schema.columns.iter().enumerate() {
+                            if c.is_dropped() {
+                                continue;
+                            }
                             proj_items.push(JoinProjectionItem {
                                 source: JoinProjSource::Right(j),
                                 output_name: format!("{}.{}", right_schema.name, c.name),
@@ -2048,6 +2081,24 @@ impl QueryEngine {
         let rest = sql[12..].trim();
         let add_pos = Self::find_top_level_keyword(rest, " ADD ");
         let rename_pos = Self::find_top_level_keyword(rest, " RENAME ");
+        let drop_pos = Self::find_top_level_keyword(rest, " DROP ");
+
+        if let Some(pos) = drop_pos {
+            let table_name = rest[..pos].trim().to_string();
+            let mut col = rest[pos + 6..].trim();
+            if col.to_uppercase().starts_with("COLUMN ") {
+                col = col[7..].trim();
+            }
+            if col.is_empty() || col.split_whitespace().count() != 1 {
+                return Err(Error::TransactionError(
+                    "Invalid column name in ALTER TABLE DROP COLUMN".to_string(),
+                ));
+            }
+            return Ok(Statement::AlterTableDropColumn {
+                table_name,
+                column_name: col.to_string(),
+            });
+        }
 
         if let Some(pos) = add_pos {
             let table_name = rest[..pos].trim().to_string();
@@ -2115,6 +2166,26 @@ impl QueryEngine {
         }
     }
 
+    /// Expand live-column values to full width (NULL at dropped positions).
+    fn pad_dropped(schema: &TableSchema, values: Vec<Value>) -> Vec<Value> {
+        let live = schema.columns.iter().filter(|c| !c.is_dropped()).count();
+        if values.len() != live {
+            return values;
+        }
+        let mut it = values.into_iter();
+        schema
+            .columns
+            .iter()
+            .map(|c| {
+                if c.is_dropped() {
+                    Value::Null
+                } else {
+                    it.next().unwrap()
+                }
+            })
+            .collect()
+    }
+
     fn resolve_projection_or_aggregates(
         schema: &TableSchema,
         projection: &[String],
@@ -2126,7 +2197,9 @@ impl QueryEngine {
         }
         if projection.len() == 1 && projection[0] == "*" {
             return Ok(ResolvedProjection::Columns(
-                (0..schema.columns.len()).collect(),
+                (0..schema.columns.len())
+                    .filter(|&i| !schema.columns[i].is_dropped())
+                    .collect(),
             ));
         }
 

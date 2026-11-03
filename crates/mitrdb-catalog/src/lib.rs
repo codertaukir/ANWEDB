@@ -49,6 +49,15 @@ pub struct ColumnDef {
     pub is_primary_key: bool,
 }
 
+pub const DROPPED_PREFIX: &str = "__dropped_";
+
+impl ColumnDef {
+    /// Logically dropped column: kept in the schema so row positions stay valid.
+    pub fn is_dropped(&self) -> bool {
+        self.name.starts_with(DROPPED_PREFIX)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TableSchema {
     pub table_id: u32,
@@ -1056,6 +1065,72 @@ impl Catalog {
                 for idx_meta in matching_indexes {
                     state.indexes.insert(idx_meta.index_id, idx_meta);
                 }
+                Ok(())
+            }
+            Err(e) => {
+                self.abort_sys_txn(&state, sys_tid, prev_lsn);
+                Err(e)
+            }
+        }
+    }
+
+    pub fn drop_column(&self, table_name: &str, col_name: &str) -> Result<()> {
+        let mut state = self.state.write().unwrap();
+        let table_id = *state.table_names.get(table_name).ok_or_else(|| {
+            Error::TransactionError(format!("Table '{}' does not exist", table_name))
+        })?;
+        let schema = state.schemas.get(&table_id).unwrap();
+        let col_pos = schema
+            .columns
+            .iter()
+            .position(|c| !c.is_dropped() && c.name.eq_ignore_ascii_case(col_name))
+            .ok_or_else(|| {
+                Error::TransactionError(format!(
+                    "Column '{}' not found in table '{}'",
+                    col_name, table_name
+                ))
+            })?;
+        if schema.columns[col_pos].is_primary_key {
+            return Err(Error::TransactionError(
+                "Cannot drop primary key column".to_string(),
+            ));
+        }
+        if state
+            .indexes
+            .values()
+            .any(|i| i.table_id == table_id && i.column_name.eq_ignore_ascii_case(col_name))
+        {
+            return Err(Error::TransactionError(format!(
+                "Column '{}' has an index; DROP INDEX first",
+                col_name
+            )));
+        }
+        if schema.columns.iter().filter(|c| !c.is_dropped()).count() <= 1 {
+            return Err(Error::TransactionError(
+                "Cannot drop the last column of a table".to_string(),
+            ));
+        }
+        let mut updated_schema = schema.clone();
+        updated_schema.columns[col_pos].name = format!("{}{}", DROPPED_PREFIX, col_pos);
+        updated_schema.columns[col_pos].nullable = true;
+
+        let (sys_tid, mut prev_lsn) = self.begin_sys_txn(&mut state)?;
+        let op_res: Result<()> = (|| {
+            if let Some(ref cat_tree) = state.catalog_tree {
+                let key = format!("tbl:{:08}", table_id);
+                cat_tree.insert_logged(
+                    sys_tid,
+                    &mut prev_lsn,
+                    key.as_bytes(),
+                    &updated_schema.serialize(),
+                )?;
+            }
+            self.finish_sys_txn(sys_tid, prev_lsn)?;
+            Ok(())
+        })();
+        match op_res {
+            Ok(()) => {
+                state.schemas.insert(table_id, updated_schema);
                 Ok(())
             }
             Err(e) => {

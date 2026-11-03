@@ -120,6 +120,9 @@ impl Table<'_> {
             }
             Some(schema) => {
                 for old in &schema.columns {
+                    if old.is_dropped() {
+                        continue;
+                    }
                     if !wanted.iter().any(|w| w.name == old.name) {
                         return Err(bad(format!(
                             "column '{}' is missing from your definition; removing columns is not supported (use rename or keep it)",
@@ -191,6 +194,17 @@ impl Table<'_> {
             self.server.execute_sql(sql)?;
         }
         Ok(plan)
+    }
+
+    /// Drop a column (logical drop: no row rewrite, no slowdown). Refuses PK / indexed columns.
+    pub fn drop_column(&self, name: &str) -> Result<()> {
+        self.check_name()?;
+        if !valid_ident(name) {
+            return Err(bad("bad column name"));
+        }
+        self.server
+            .execute_sql(&format!("ALTER TABLE {} DROP COLUMN {}", self.name, name))
+            .map(|_| ())
     }
 
     /// Rename a column, keeping data.
