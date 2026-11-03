@@ -2983,6 +2983,16 @@ impl QueryEngine {
     }
 
     fn parse_where_clause(cond: &str) -> Result<Expr> {
+        Self::parse_where_depth(cond, 0)
+    }
+
+    fn parse_where_depth(cond: &str, depth: usize) -> Result<Expr> {
+        const MAX_WHERE_DEPTH: usize = 128;
+        if depth > MAX_WHERE_DEPTH {
+            return Err(Error::TransactionError(
+                "WHERE clause too deeply nested".to_string(),
+            ));
+        }
         let trimmed = cond.trim();
         if trimmed.is_empty() {
             return Err(Error::TransactionError(
@@ -2999,8 +3009,8 @@ impl QueryEngine {
                     "Missing operand for OR in WHERE clause".to_string(),
                 ));
             }
-            let left = Self::parse_where_clause(left_str)?;
-            let right = Self::parse_where_clause(right_str)?;
+            let left = Self::parse_where_depth(left_str, depth + 1)?;
+            let right = Self::parse_where_depth(right_str, depth + 1)?;
             return Ok(Expr::Or(Box::new(left), Box::new(right)));
         }
 
@@ -3013,8 +3023,8 @@ impl QueryEngine {
                     "Missing operand for AND in WHERE clause".to_string(),
                 ));
             }
-            let left = Self::parse_where_clause(left_str)?;
-            let right = Self::parse_where_clause(right_str)?;
+            let left = Self::parse_where_depth(left_str, depth + 1)?;
+            let right = Self::parse_where_depth(right_str, depth + 1)?;
             return Ok(Expr::And(Box::new(left), Box::new(right)));
         }
 
@@ -3026,7 +3036,7 @@ impl QueryEngine {
                     "Empty parentheses in WHERE clause".to_string(),
                 ));
             }
-            return Self::parse_where_clause(inner);
+            return Self::parse_where_depth(inner, depth + 1);
         }
 
         // 4. IS NOT NULL / IS NULL
