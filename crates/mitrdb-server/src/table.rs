@@ -160,3 +160,106 @@ impl Table<'_> {
             .map(|_| ())
     }
 }
+
+use crate::{ExecutionResult, PhysicalPlan, Value};
+
+/// Turn plain Rust values into database values: `val(1)`, `val("text")`, `val(true)`.
+pub trait IntoValue {
+    fn into_value(self) -> Value;
+}
+impl IntoValue for Value {
+    fn into_value(self) -> Value {
+        self
+    }
+}
+impl IntoValue for i64 {
+    fn into_value(self) -> Value {
+        Value::Int64(self)
+    }
+}
+impl IntoValue for i32 {
+    fn into_value(self) -> Value {
+        Value::Int64(self as i64)
+    }
+}
+impl IntoValue for bool {
+    fn into_value(self) -> Value {
+        Value::Bool(self)
+    }
+}
+impl IntoValue for &str {
+    fn into_value(self) -> Value {
+        Value::Text(self.to_string())
+    }
+}
+impl IntoValue for String {
+    fn into_value(self) -> Value {
+        Value::Text(self)
+    }
+}
+impl IntoValue for Vec<u8> {
+    fn into_value(self) -> Value {
+        Value::Bytes(self)
+    }
+}
+
+pub fn val<T: IntoValue>(x: T) -> Value {
+    x.into_value()
+}
+
+fn check_value(table: &str, col: &ColumnDef, v: &Value) -> Result<()> {
+    match v {
+        Value::Null => {
+            if !col.nullable || col.is_primary_key {
+                Err(bad(format!("NOT NULL constraint failed: {}.{}", table, col.name)))
+            } else {
+                Ok(())
+            }
+        }
+        Value::Int64(_) if col.data_type == DataType::Int64 => Ok(()),
+        Value::Text(_) if col.data_type == DataType::Text => Ok(()),
+        Value::Bool(_) if col.data_type == DataType::Bool => Ok(()),
+        Value::Bytes(_) if col.data_type == DataType::Bytes => Ok(()),
+        _ => Err(bad(format!(
+            "type mismatch for column '{}.{}': expected {:?}",
+            table, col.name, col.data_type
+        ))),
+    }
+}
+
+impl Table<'_> {
+    /// Insert one row. Columns can be in any order; missing columns become NULL.
+    /// `db.table("users").insert(&[("id", val(1)), ("name", val("Taukir"))])?;`
+    pub fn insert(&self, row: &[(&str, Value)]) -> Result<usize> {
+        self.check_name()?;
+        let schema = self
+            .server
+            .get_table_schema(&self.name)?
+            .ok_or_else(|| bad(format!("table '{}' not found", self.name)))?;
+
+        for (i, (name, _)) in row.iter().enumerate() {
+            if !schema.columns.iter().any(|c| c.name == *name) {
+                return Err(bad(format!("unknown column '{}'", name)));
+            }
+            if row[..i].iter().any(|(n, _)| n == name) {
+                return Err(bad(format!("column '{}' given twice", name)));
+            }
+        }
+
+        let mut values = Vec::with_capacity(schema.columns.len());
+        for col in &schema.columns {
+            let v = row
+                .iter()
+                .find(|(n, _)| *n == col.name)
+                .map(|(_, v)| v.clone())
+                .unwrap_or(Value::Null);
+            check_value(&self.name, col, &v)?;
+            values.push(v);
+        }
+
+        match self.server.execute_plan(PhysicalPlan::Insert { schema, values })? {
+            ExecutionResult::Affected(n) => Ok(n),
+            _ => Ok(1),
+        }
+    }
+}
