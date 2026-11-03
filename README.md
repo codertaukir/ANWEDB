@@ -1,5 +1,7 @@
 # ANWEDB
 
+[![CI](https://github.com/codertaukir/ANWEDB/actions/workflows/ci.yml/badge.svg?branch=anwedb-clean)](https://github.com/codertaukir/ANWEDB/actions/workflows/ci.yml)
+
 A transactional database engine written in Rust.
 
 ANWEDB is built from the storage layer up: a B+Tree storage engine, a write-ahead log with
@@ -186,8 +188,7 @@ machines and between runs, so treat them as indicative only.
 
 ## Contributing
 
-The project is in early development and the internals are still changing quickly. Issues
-and discussion are welcome once the repository is public.
+The project is in early development and the internals are still changing quickly. Issues and discussion are welcome.
 
 ## License
 
