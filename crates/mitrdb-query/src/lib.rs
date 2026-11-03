@@ -501,6 +501,7 @@ pub enum Statement {
     Update {
         table_name: String,
         assignments: Vec<(String, Value)>,
+        increments: Vec<(String, i64)>,
         filter: Option<Expr>,
     },
     Select {
@@ -595,6 +596,7 @@ pub enum PhysicalPlan {
     Update {
         schema: TableSchema,
         assignments: Vec<(usize, Value)>,
+        increments: Vec<(usize, i64)>,
         filter: Option<BoundFilter>,
     },
     SeqScan {
@@ -929,6 +931,7 @@ impl QueryEngine {
             Statement::Update {
                 table_name,
                 assignments,
+                increments,
                 filter,
             } => {
                 let schema = self.catalog.get_table_schema(&table_name)?.ok_or_else(|| {
@@ -940,10 +943,30 @@ impl QueryEngine {
                     Self::validate_column_value(&table_name, &schema.columns[idx], &val)?;
                     bound_assignments.push((idx, val));
                 }
+                let mut bound_increments: Vec<(usize, i64)> = Vec::with_capacity(increments.len());
+                for (col_name, delta) in increments {
+                    let idx = Self::resolve_column_index(&schema, &col_name)?;
+                    if schema.columns[idx].data_type != DataType::Int64 {
+                        return Err(Error::TransactionError(format!(
+                            "Cannot add a number to non-INT column '{}.{}'",
+                            table_name, col_name
+                        )));
+                    }
+                    if bound_assignments.iter().any(|(i, _)| *i == idx)
+                        || bound_increments.iter().any(|(i, _)| *i == idx)
+                    {
+                        return Err(Error::TransactionError(format!(
+                            "Column '{}' is set more than once in UPDATE",
+                            col_name
+                        )));
+                    }
+                    bound_increments.push((idx, delta));
+                }
                 let bound_filter = Self::bind_filter(&schema, filter)?;
                 Ok(PhysicalPlan::Update {
                     schema,
                     assignments: bound_assignments,
+                    increments: bound_increments,
                     filter: bound_filter,
                 })
             }
@@ -2581,6 +2604,36 @@ impl QueryEngine {
         Ok(Statement::Insert { table_name, values })
     }
 
+    /// Reads `col + 5` or `col - 5` (same column on both sides). Returns None for anything else.
+    fn parse_increment(col: &str, rhs: &str) -> Result<Option<i64>> {
+        if col.is_empty() || rhs.starts_with('\'') || rhs.starts_with('"') {
+            return Ok(None);
+        }
+        let Some(head) = rhs.get(..col.len()) else {
+            return Ok(None);
+        };
+        if !head.eq_ignore_ascii_case(col) {
+            return Ok(None);
+        }
+        let rest = rhs[col.len()..].trim_start();
+        let negative = match rest.chars().next() {
+            Some('+') => false,
+            Some('-') => true,
+            _ => return Ok(None),
+        };
+        let digits = rest[1..].trim();
+        if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+            return Err(Error::TransactionError(format!(
+                "Invalid number in UPDATE SET: {}",
+                rhs
+            )));
+        }
+        let n: i64 = digits.parse().map_err(|_| {
+            Error::TransactionError("Number too large in UPDATE SET".to_string())
+        })?;
+        Ok(Some(if negative { -n } else { n }))
+    }
+
     fn parse_update(sql: &str) -> Result<Statement> {
         let rest = sql[7..].trim();
         let set_pos = Self::find_top_level_keyword(rest, " SET ")
@@ -2597,18 +2650,25 @@ impl QueryEngine {
             };
 
         let mut assignments = Vec::new();
+        let mut increments: Vec<(String, i64)> = Vec::new();
         for part in Self::split_top_level_commas(assign_str) {
             let eq_pos = part.find('=').ok_or_else(|| {
                 Error::TransactionError("Missing '=' in UPDATE SET assignment".to_string())
             })?;
             let col = part[..eq_pos].trim().to_string();
-            let val = Self::parse_literal(part[eq_pos + 1..].trim())?;
+            let rhs = part[eq_pos + 1..].trim();
+            if let Some(delta) = Self::parse_increment(&col, rhs)? {
+                increments.push((col, delta));
+                continue;
+            }
+            let val = Self::parse_literal(rhs)?;
             assignments.push((col, val));
         }
 
         Ok(Statement::Update {
             table_name,
             assignments,
+            increments,
             filter,
         })
     }

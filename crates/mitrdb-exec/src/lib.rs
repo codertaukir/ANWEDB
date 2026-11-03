@@ -794,6 +794,7 @@ impl Executor {
             PhysicalPlan::Update {
                 schema,
                 assignments,
+                increments,
                 filter,
             } => {
                 let (tid, auto_commit) = Self::ensure_txn(txn_mgr, *active_txn, default_isolation)?;
@@ -803,6 +804,7 @@ impl Executor {
                     tid,
                     &schema,
                     &assignments,
+                    &increments,
                     filter.as_ref(),
                 );
                 if auto_commit {
@@ -1841,6 +1843,7 @@ impl Executor {
         txn_id: TxnId,
         schema: &TableSchema,
         assignments: &[(usize, Value)],
+        increments: &[(usize, i64)],
         filter: Option<&BoundFilter>,
     ) -> Result<ExecutionResult> {
         for (col_idx, new_val) in assignments {
@@ -1874,6 +1877,20 @@ impl Executor {
             matched_rows.push((old_pk_bytes.clone(), old_tuple.clone()));
             for (col_idx, new_val) in assignments {
                 tuple[*col_idx] = new_val.clone();
+            }
+            for (col_idx, delta) in increments {
+                let next = match tuple.get(*col_idx) {
+                    Some(Value::Int64(v)) => Value::Int64(v.checked_add(*delta).ok_or_else(|| {
+                        Error::TransactionError("Integer overflow in UPDATE".to_string())
+                    })?),
+                    Some(Value::Null) => Value::Null,
+                    _ => {
+                        return Err(Error::TransactionError(
+                            "UPDATE increment needs an INT column".to_string(),
+                        ));
+                    }
+                };
+                tuple[*col_idx] = next;
             }
             let new_pk_bytes = tuple[pk_idx].to_key_bytes();
             updating_old_pks.insert(old_pk_bytes.clone());
