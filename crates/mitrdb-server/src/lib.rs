@@ -382,4 +382,4 @@ impl Default for Server {
 }
 
 mod table;
-pub use table::{val, IntoValue, Query, Rows, Table};
+pub use table::{val, Delete, IntoValue, Query, Rows, Table, Update};

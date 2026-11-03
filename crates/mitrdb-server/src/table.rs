@@ -405,3 +405,159 @@ impl Query<'_> {
         }
     }
 }
+
+fn where_sql(known: &dyn Fn(&str) -> bool, conds: &[(String, String, Value)]) -> Result<String> {
+    let mut parts: Vec<String> = Vec::new();
+    for (col, op, v) in conds {
+        if !known(col) {
+            return Err(bad(format!("unknown column '{}'", col)));
+        }
+        let part = match (op.as_str(), v) {
+            ("=", Value::Null) => format!("{} IS NULL", col),
+            ("!=", Value::Null) => format!("{} IS NOT NULL", col),
+            (_, Value::Null) => return Err(bad("NULL can only be used with = or !=")),
+            ("=" | "!=" | ">" | "<" | ">=" | "<=", _) => format!("{} {} {}", col, op, lit(v)?),
+            _ => return Err(bad(format!("unknown operator '{}'", op))),
+        };
+        parts.push(part);
+    }
+    if parts.is_empty() {
+        Ok(String::new())
+    } else {
+        Ok(format!(" WHERE {}", parts.join(" AND ")))
+    }
+}
+
+/// Built by `table.update()`. Chain `set`, `filter` (or `all`), then `run()`.
+pub struct Update<'a> {
+    server: &'a Server,
+    table: String,
+    sets: Vec<(String, Value)>,
+    conds: Vec<(String, String, Value)>,
+    all: bool,
+}
+
+/// Built by `table.delete()`. Chain `filter` (or `all`), then `run()`.
+pub struct Delete<'a> {
+    server: &'a Server,
+    table: String,
+    conds: Vec<(String, String, Value)>,
+    all: bool,
+}
+
+impl<'a> Table<'a> {
+    /// `db.table("users").update().set("age", val(26)).filter("id", "=", val(1)).run()?`
+    pub fn update(&self) -> Update<'a> {
+        Update {
+            server: self.server,
+            table: self.name.clone(),
+            sets: Vec::new(),
+            conds: Vec::new(),
+            all: false,
+        }
+    }
+
+    /// `db.table("users").delete().filter("id", "=", val(1)).run()?`
+    pub fn delete(&self) -> Delete<'a> {
+        Delete {
+            server: self.server,
+            table: self.name.clone(),
+            conds: Vec::new(),
+            all: false,
+        }
+    }
+}
+
+impl Update<'_> {
+    pub fn set(mut self, column: &str, value: Value) -> Self {
+        self.sets.push((column.to_string(), value));
+        self
+    }
+
+    pub fn filter(mut self, column: &str, op: &str, value: Value) -> Self {
+        self.conds.push((column.to_string(), op.to_string(), value));
+        self
+    }
+
+    /// Explicitly update every row (needed when there is no filter).
+    pub fn all(mut self) -> Self {
+        self.all = true;
+        self
+    }
+
+    /// Returns how many rows were changed.
+    pub fn run(self) -> Result<usize> {
+        if !valid_ident(&self.table) {
+            return Err(bad(format!("bad table name: '{}'", self.table)));
+        }
+        let schema = self
+            .server
+            .get_table_schema(&self.table)?
+            .ok_or_else(|| bad(format!("table '{}' not found", self.table)))?;
+        if self.sets.is_empty() {
+            return Err(bad("update needs at least one set(...)"));
+        }
+        if self.conds.is_empty() && !self.all {
+            return Err(bad("update without filter: add filter(...) or all()"));
+        }
+
+        let mut assigns: Vec<String> = Vec::new();
+        for (i, (name, v)) in self.sets.iter().enumerate() {
+            let col = schema
+                .columns
+                .iter()
+                .find(|c| c.name == *name)
+                .ok_or_else(|| bad(format!("unknown column '{}'", name)))?;
+            if col.is_primary_key {
+                return Err(bad(format!("cannot update primary key column '{}'", name)));
+            }
+            if self.sets[..i].iter().any(|(n, _)| n == name) {
+                return Err(bad(format!("column '{}' set twice", name)));
+            }
+            check_value(&self.table, col, v)?;
+            assigns.push(format!("{} = {}", name, lit(v)?));
+        }
+
+        let known = |c: &str| schema.columns.iter().any(|x| x.name == c);
+        let wh = where_sql(&known, &self.conds)?;
+        let sql = format!("UPDATE {} SET {}{}", self.table, assigns.join(", "), wh);
+        match self.server.execute_sql(&sql)? {
+            ExecutionResult::Affected(n) => Ok(n),
+            other => Err(bad(format!("unexpected result: {other:?}"))),
+        }
+    }
+}
+
+impl Delete<'_> {
+    pub fn filter(mut self, column: &str, op: &str, value: Value) -> Self {
+        self.conds.push((column.to_string(), op.to_string(), value));
+        self
+    }
+
+    /// Explicitly delete every row (needed when there is no filter).
+    pub fn all(mut self) -> Self {
+        self.all = true;
+        self
+    }
+
+    /// Returns how many rows were deleted.
+    pub fn run(self) -> Result<usize> {
+        if !valid_ident(&self.table) {
+            return Err(bad(format!("bad table name: '{}'", self.table)));
+        }
+        let schema = self
+            .server
+            .get_table_schema(&self.table)?
+            .ok_or_else(|| bad(format!("table '{}' not found", self.table)))?;
+        if self.conds.is_empty() && !self.all {
+            return Err(bad("delete without filter: add filter(...) or all()"));
+        }
+        let known = |c: &str| schema.columns.iter().any(|x| x.name == c);
+        let wh = where_sql(&known, &self.conds)?;
+        let sql = format!("DELETE FROM {}{}", self.table, wh);
+        match self.server.execute_sql(&sql)? {
+            ExecutionResult::Affected(n) => Ok(n),
+            other => Err(bad(format!("unexpected result: {other:?}"))),
+        }
+    }
+}
