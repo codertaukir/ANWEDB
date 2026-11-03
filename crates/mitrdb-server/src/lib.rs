@@ -393,3 +393,6 @@ mod files;
 pub use files::{FileStore, StoredFile};
 mod table;
 pub use table::{val, Delete, IntoValue, Query, Rows, Table, Update};
+
+mod schema_builder;
+pub use schema_builder::{ColumnBuilder, TableBuilder};
