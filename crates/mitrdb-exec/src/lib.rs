@@ -791,6 +791,30 @@ impl Executor {
                 }
                 res
             }
+            PhysicalPlan::InsertMany { schema, rows } => {
+                let (tid, auto_commit) = Self::ensure_txn(txn_mgr, *active_txn, default_isolation)?;
+                let mut res: Result<ExecutionResult> = Ok(ExecutionResult::Affected(rows.len()));
+                for values in &rows {
+                    if let Err(e) = self.exec_insert(catalog, txn_mgr, tid, &schema, values) {
+                        res = Err(e);
+                        break;
+                    }
+                }
+                if auto_commit {
+                    match res {
+                        Ok(_) => {
+                            txn_mgr.commit(tid)?;
+                            catalog.sync_roots()?;
+                        }
+                        Err(e) => {
+                            txn_mgr.abort(tid)?;
+                            catalog.sync_roots()?;
+                            return Err(e);
+                        }
+                    }
+                }
+                res
+            }
             PhysicalPlan::Update {
                 schema,
                 assignments,

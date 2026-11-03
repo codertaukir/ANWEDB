@@ -498,6 +498,10 @@ pub enum Statement {
         table_name: String,
         values: Vec<Value>,
     },
+    InsertMany {
+        table_name: String,
+        rows: Vec<Vec<Value>>,
+    },
     Update {
         table_name: String,
         assignments: Vec<(String, Value)>,
@@ -592,6 +596,10 @@ pub enum PhysicalPlan {
     Insert {
         schema: TableSchema,
         values: Vec<Value>,
+    },
+    InsertMany {
+        schema: TableSchema,
+        rows: Vec<Vec<Value>>,
     },
     Update {
         schema: TableSchema,
@@ -913,6 +921,23 @@ impl QueryEngine {
                 unique,
             }),
             Statement::DropIndex { index_name } => Ok(PhysicalPlan::DropIndex { index_name }),
+            Statement::InsertMany { table_name, rows } => {
+                let schema = self.catalog.get_table_schema(&table_name)?.ok_or_else(|| {
+                    Error::TransactionError(format!("Table '{}' not found", table_name))
+                })?;
+                for values in &rows {
+                    if values.len() != schema.columns.len() {
+                        return Err(Error::TransactionError(format!(
+                            "Column count mismatch on INSERT into '{}'",
+                            table_name
+                        )));
+                    }
+                    for (col, val) in schema.columns.iter().zip(values.iter()) {
+                        Self::validate_column_value(&table_name, col, val)?;
+                    }
+                }
+                Ok(PhysicalPlan::InsertMany { schema, rows })
+            }
             Statement::Insert { table_name, values } => {
                 let schema = self.catalog.get_table_schema(&table_name)?.ok_or_else(|| {
                     Error::TransactionError(format!("Table '{}' not found", table_name))
@@ -2584,19 +2609,91 @@ impl QueryEngine {
         None
     }
 
+    /// Splits `(1,'a'), (2,'b')` into the text inside each bracket pair.
+    /// Returns None for anything that is not exactly a comma-separated list of groups.
+    fn split_value_groups(s: &str) -> Option<Vec<&str>> {
+        let mut groups = Vec::new();
+        let (mut in_single, mut in_double) = (false, false);
+        let mut depth = 0usize;
+        let mut start = 0usize;
+        let mut after_group = false;
+        for (i, ch) in s.char_indices() {
+            if ch == '\'' && !in_double {
+                in_single = !in_single;
+                continue;
+            }
+            if ch == '"' && !in_single {
+                in_double = !in_double;
+                continue;
+            }
+            if in_single || in_double {
+                continue;
+            }
+            match ch {
+                '(' => {
+                    if depth != 0 || after_group {
+                        return None;
+                    }
+                    depth = 1;
+                    start = i + 1;
+                }
+                ')' => {
+                    if depth != 1 {
+                        return None;
+                    }
+                    groups.push(&s[start..i]);
+                    depth = 0;
+                    after_group = true;
+                }
+                ',' if depth == 0 => {
+                    if !after_group {
+                        return None;
+                    }
+                    after_group = false;
+                }
+                c if depth == 0 && c.is_ascii_whitespace() => {}
+                _ if depth == 0 => return None,
+                _ => {}
+            }
+        }
+        if in_single || in_double || depth != 0 || !after_group {
+            return None;
+        }
+        Some(groups)
+    }
+
     fn parse_insert(sql: &str) -> Result<Statement> {
         let rest = sql[12..].trim();
         let values_pos = Self::find_top_level_keyword(rest, "VALUES")
             .ok_or_else(|| Error::TransactionError("Missing VALUES in INSERT".to_string()))?;
         let table_name = rest[..values_pos].trim().to_string();
         let after_values = rest[values_pos + 6..].trim();
-        let open_paren = after_values
-            .find('(')
-            .ok_or_else(|| Error::TransactionError("Missing '(' after VALUES".to_string()))?;
-        let close_paren = after_values
-            .rfind(')')
-            .ok_or_else(|| Error::TransactionError("Missing ')' after VALUES".to_string()))?;
-        let list_str = &after_values[open_paren + 1..close_paren];
+        if let Some(groups) = Self::split_value_groups(after_values)
+            && groups.len() > 1
+        {
+            const MAX_INSERT_ROWS: usize = 1000;
+            if groups.len() > MAX_INSERT_ROWS {
+                return Err(Error::TransactionError(format!(
+                    "Too many rows in one INSERT (max {})",
+                    MAX_INSERT_ROWS
+                )));
+            }
+            let mut rows = Vec::with_capacity(groups.len());
+            for group in groups {
+                let mut row = Vec::new();
+                for item in Self::split_top_level_commas(group) {
+                    row.push(Self::parse_literal(item.trim())?);
+                }
+                rows.push(row);
+            }
+            return Ok(Statement::InsertMany { table_name, rows });
+        }
+        if !after_values.starts_with('(') || !after_values.ends_with(')') {
+            return Err(Error::TransactionError(
+                "Invalid VALUES list in INSERT".to_string(),
+            ));
+        }
+        let list_str = &after_values[1..after_values.len() - 1];
         let mut values = Vec::new();
         for item in Self::split_top_level_commas(list_str) {
             values.push(Self::parse_literal(item.trim())?);
