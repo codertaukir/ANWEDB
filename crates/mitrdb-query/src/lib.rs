@@ -506,6 +506,11 @@ pub enum Statement {
         table_name: String,
         rows: Vec<Vec<Value>>,
     },
+    InsertColumns {
+        table_name: String,
+        columns: Vec<String>,
+        rows: Vec<Vec<Value>>,
+    },
     Update {
         table_name: String,
         assignments: Vec<(String, Value)>,
@@ -951,6 +956,61 @@ impl QueryEngine {
                     }
                 }
                 Ok(PhysicalPlan::InsertMany { schema, rows })
+            }
+            Statement::InsertColumns {
+                table_name,
+                columns,
+                rows,
+            } => {
+                let schema = self.catalog.get_table_schema(&table_name)?.ok_or_else(|| {
+                    Error::TransactionError(format!("Table '{}' not found", table_name))
+                })?;
+                let mut positions: Vec<usize> = Vec::with_capacity(columns.len());
+                for name in &columns {
+                    let pos = schema
+                        .columns
+                        .iter()
+                        .position(|c| c.name == *name)
+                        .ok_or_else(|| {
+                            Error::TransactionError(format!(
+                                "Unknown column '{}' in INSERT into '{}'",
+                                name, table_name
+                            ))
+                        })?;
+                    if positions.contains(&pos) {
+                        return Err(Error::TransactionError(format!(
+                            "Column '{}' given twice in INSERT",
+                            name
+                        )));
+                    }
+                    positions.push(pos);
+                }
+                let mut full_rows: Vec<Vec<Value>> = Vec::with_capacity(rows.len());
+                for row in rows {
+                    if row.len() != positions.len() {
+                        return Err(Error::TransactionError(format!(
+                            "Value count does not match column list on INSERT into '{}'",
+                            table_name
+                        )));
+                    }
+                    let mut values = vec![Value::Null; schema.columns.len()];
+                    for (pos, v) in positions.iter().zip(row) {
+                        values[*pos] = v;
+                    }
+                    for (col, v) in schema.columns.iter().zip(values.iter()) {
+                        Self::validate_column_value(&table_name, col, v)?;
+                    }
+                    full_rows.push(values);
+                }
+                if full_rows.len() == 1 {
+                    let values = full_rows.remove(0);
+                    Ok(PhysicalPlan::Insert { schema, values })
+                } else {
+                    Ok(PhysicalPlan::InsertMany {
+                        schema,
+                        rows: full_rows,
+                    })
+                }
             }
             Statement::Insert { table_name, values } => {
                 let schema = self.catalog.get_table_schema(&table_name)?.ok_or_else(|| {
@@ -2726,8 +2786,50 @@ impl QueryEngine {
         let rest = sql[12..].trim();
         let values_pos = Self::find_top_level_keyword(rest, "VALUES")
             .ok_or_else(|| Error::TransactionError("Missing VALUES in INSERT".to_string()))?;
-        let table_name = rest[..values_pos].trim().to_string();
+        let head = rest[..values_pos].trim();
         let after_values = rest[values_pos + 6..].trim();
+        let (table_name, columns) = match head.find('(') {
+            None => (head.to_string(), None),
+            Some(open) => {
+                if !head.ends_with(')') {
+                    return Err(Error::TransactionError(
+                        "Invalid column list in INSERT".to_string(),
+                    ));
+                }
+                let mut cols: Vec<String> = Vec::new();
+                for c in head[open + 1..head.len() - 1].split(',') {
+                    let c = c.trim();
+                    Self::validate_name("column", c)?;
+                    cols.push(c.to_string());
+                }
+                (head[..open].trim().to_string(), Some(cols))
+            }
+        };
+        if let Some(columns) = columns {
+            const MAX_COLUMN_INSERT_ROWS: usize = 1000;
+            let groups = Self::split_value_groups(after_values).ok_or_else(|| {
+                Error::TransactionError("Invalid VALUES list in INSERT".to_string())
+            })?;
+            if groups.len() > MAX_COLUMN_INSERT_ROWS {
+                return Err(Error::TransactionError(format!(
+                    "Too many rows in one INSERT (max {})",
+                    MAX_COLUMN_INSERT_ROWS
+                )));
+            }
+            let mut rows = Vec::with_capacity(groups.len());
+            for group in groups {
+                let mut row = Vec::new();
+                for item in Self::split_top_level_commas(group) {
+                    row.push(Self::parse_literal(item.trim())?);
+                }
+                rows.push(row);
+            }
+            return Ok(Statement::InsertColumns {
+                table_name,
+                columns,
+                rows,
+            });
+        }
         if let Some(groups) = Self::split_value_groups(after_values)
             && groups.len() > 1
         {
