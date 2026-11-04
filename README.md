@@ -157,7 +157,7 @@ Know these before you use MITRDB.
 - `ALTER TABLE t DROP [COLUMN] c` (and `table.drop_column("c")`) is a **logical drop**: the column is renamed internally to `__dropped_<pos>` and hidden from `SELECT *`, rows are not rewritten, so the data stays on disk and no space is reclaimed. You cannot drop a primary key column, an indexed column, or the last live column. Do not use column names that start with `__dropped_`.
 - `INSERT` can write many rows: `INSERT INTO t VALUES (1,'a'), (2,'b')` (up to 1000 rows). With auto-commit it is all or nothing. Inside an explicit transaction, rows before a failing row stay in that transaction. `INSERT INTO t (b, a) VALUES (...)` also works; columns you leave out become NULL.
 - `UPDATE ... SET col = col + N` and `col = col - N` work on `INT` columns (`N` is a whole number). `NULL` stays `NULL`, overflow gives an error and changes nothing. Other expressions (for example `a = b + 1`, `col * 2`) are not supported.
-- `sync()` creates tables and adds nullable columns without losing data. It does not remove columns, change types, or remove `UNIQUE`.
+- `sync()` creates tables and adds nullable columns without losing data. It does not remove columns or change types. If you remove `unique` from a column, `sync()` drops that unique index (rows are kept, but duplicates are allowed from then on).
 - `WHERE` nesting depth is limited to 128.
 
 **Network**

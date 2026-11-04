@@ -185,15 +185,15 @@ impl Table<'_> {
             None => Vec::new(),
         };
         let uq_name = |col: &str| format!("{}_{}_uq", self.name, col);
+        let mut dropped_uq: Vec<String> = Vec::new();
         for idx in &existing_idx {
             if idx.unique
                 && idx.name == uq_name(&idx.column_name)
                 && !uniques.contains(&idx.column_name)
             {
-                return Err(bad(format!(
-                    "column '{}' is unique in the database but not in your definition; removing unique is not supported",
-                    idx.column_name
-                )));
+                // unique removed from the definition: drop only the index (rows are untouched)
+                dropped_uq.push(idx.column_name.clone());
+                plan.push(format!("DROP INDEX {}", idx.name));
             }
         }
         for col in &uniques {
@@ -221,7 +221,10 @@ impl Table<'_> {
             }
         }
         for col in &indexed {
-            if existing_idx.iter().any(|i| i.column_name == *col) {
+            if existing_idx
+                .iter()
+                .any(|i| i.column_name == *col && !dropped_uq.contains(&i.column_name))
+            {
                 continue;
             }
             plan.push(format!(

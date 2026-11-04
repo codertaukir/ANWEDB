@@ -29,11 +29,33 @@ fn unique_blocks_duplicates_and_sync_is_idempotent() {
 }
 
 #[test]
-fn removing_unique_is_refused() {
+fn removing_unique_drops_constraint_and_keeps_data() {
     let s = open("b");
     let t = s.table("users");
     t.sync("id int primary key, email text not null unique").unwrap();
-    assert!(t.sync("id int primary key, email text not null").is_err());
+    t.insert(&[("id", val(1)), ("email", val("a@x.com"))]).unwrap();
+    assert!(t.insert(&[("id", val(2)), ("email", val("a@x.com"))]).is_err());
+
+    let ran = t.sync("id int primary key, email text not null").unwrap();
+    assert!(ran.iter().any(|q| q.contains("DROP INDEX users_email_uq")));
+    assert!(t.sync("id int primary key, email text not null").unwrap().is_empty());
+
+    // constraint gone, old row kept
+    t.insert(&[("id", val(2)), ("email", val("a@x.com"))]).unwrap();
+    assert_eq!(t.count().unwrap(), 2);
+}
+
+#[test]
+fn unique_to_plain_index_swaps_index() {
+    let s = open("b2");
+    let t = s.table("users");
+    t.sync("id int primary key, email text not null unique").unwrap();
+    t.insert(&[("id", val(1)), ("email", val("a@x.com"))]).unwrap();
+    let ran = t.sync("id int primary key, email text not null index").unwrap();
+    assert!(ran.iter().any(|q| q.contains("DROP INDEX users_email_uq")));
+    assert!(ran.iter().any(|q| q.contains("CREATE INDEX users_email_idx")));
+    t.insert(&[("id", val(2)), ("email", val("a@x.com"))]).unwrap();
+    assert!(t.sync("id int primary key, email text not null index").unwrap().is_empty());
 }
 
 #[test]
