@@ -61,7 +61,7 @@ The project is a Cargo workspace. Each crate has one responsibility:
 
 ### Requirements
 - A recent stable Rust toolchain (the code uses let-chains, so a current release is needed)
-- Linux is the primary development platform
+- Linux only. Other platforms are not supported.
 
 ### Build
 ```bash
@@ -70,8 +70,7 @@ cargo build --release
 
 ### Run the tests
 ```bash
-cargo test -p mitrdb-txn
-cargo test -p mitrdb-storage
+cargo test --workspace
 ```
 
 The suites cover crash recovery (including torn tails and crashes during checkpoints), WAL
@@ -108,6 +107,24 @@ db.table("users").insert(&[("id", val(1)), ("email", val("a@b.c")), ("age", val(
 
 let rows = db.table("users").find().filter("age", ">", val(17)).order_by_desc("age").limit(10).run()?;
 db.table("users").delete().filter("id", "=", val(1)).run()?;
+```
+
+### Schema builder
+
+Mongoose-style schema in Rust code, no migration files. Safe to run on every start: it creates the table or adds new nullable columns, and keeps your data.
+
+```rust
+let users = db.define_table("users", |t| {
+    t.id().primary_key();
+    t.string("name").not_null();
+    t.integer("age");
+    t.string("email").unique();
+    t.boolean("active");
+    t.bytes("avatar_hash");
+})?;
+
+users.insert(&[("id", val(1)), ("name", val("Asha")), ("email", val("a@b.c"))])?;
+users.drop_column("avatar_hash")?;   // logical drop, see Limits
 ```
 
 ### Big files
@@ -186,10 +203,12 @@ machines and between runs, so treat them as indicative only.
 
 - [ ] Faster inserts: in-place leaf updates with smaller WAL records
 - [ ] Reduce per-row lock bookkeeping
-- [ ] Replication (leader and followers, using the WAL)
-- [ ] Consensus for automatic leader election
+- [ ] Non-unique indexes in `sync()` / `define_table`
+- [ ] Prepared statements and `$n` parameter binding
+- [ ] Space reclaim for dropped columns (table rewrite)
 - [ ] Containerized, Kubernetes-friendly deployment (StatefulSet with persistent volumes)
-- [ ] Sharding
+
+Out of scope: NoSQL/document store, replication, consensus, sharding. MITRDB stays a single-node, Linux-only SQL engine.
 
 ## Contributing
 
