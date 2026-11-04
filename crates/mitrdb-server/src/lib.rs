@@ -193,6 +193,19 @@ impl Server {
         self.execute_with_txn_slot(sql, &mut active_txn, isolation)
     }
 
+    /// SQL with `$1, $2, ...` placeholders; values are bound, never spliced into the text.
+    pub fn execute_sql_params(
+        &self,
+        sql: &str,
+        params: &[mitrdb_query::Value],
+    ) -> Result<ExecutionResult> {
+        let isolation = *self.default_session.isolation.lock().unwrap();
+        let mut active_txn = self.default_session.active_txn.lock().unwrap();
+        GLOBAL_METRICS.record_query();
+        let plan = self.query_engine.parse_and_plan_params(sql, params)?;
+        self.execute_plan_with_txn_slot(plan, &mut active_txn, isolation)
+    }
+
     pub fn execute_in_session(&self, session_id: SessionId, sql: &str) -> Result<ExecutionResult> {
         let session = self
             .sessions

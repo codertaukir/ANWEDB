@@ -234,6 +234,7 @@ impl Tuple {
                     buf.extend_from_slice(&(b.len() as u16).to_le_bytes());
                     buf.extend_from_slice(b);
                 }
+                Value::Param(_) => unreachable!("unbound parameter reached the row codec"),
             }
         }
         buf

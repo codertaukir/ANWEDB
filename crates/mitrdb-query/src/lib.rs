@@ -6,6 +6,24 @@ pub use mitrdb_catalog::{
 };
 use mitrdb_common::{Error, Result};
 
+thread_local! {
+    static PARAMS_ALLOWED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+struct ParamsGuard(bool);
+
+impl ParamsGuard {
+    fn enable() -> Self {
+        ParamsGuard(PARAMS_ALLOWED.with(|f| f.replace(true)))
+    }
+}
+
+impl Drop for ParamsGuard {
+    fn drop(&mut self) {
+        PARAMS_ALLOWED.with(|f| f.set(self.0));
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Value {
     Null,
@@ -13,6 +31,8 @@ pub enum Value {
     Text(String),
     Bool(bool),
     Bytes(Vec<u8>),
+    /// Placeholder `$n` (stored 0-based). Exists only between parse and bind.
+    Param(usize),
 }
 
 impl Value {
@@ -36,6 +56,7 @@ impl Value {
                 out.extend_from_slice(b);
                 out
             }
+            Value::Param(_) => vec![255],
         }
     }
 }
@@ -553,6 +574,90 @@ pub enum Statement {
     Rollback,
 }
 
+fn bind_value(v: &mut Value, params: &[Value], used: &mut [bool]) -> Result<()> {
+    if let Value::Param(i) = *v {
+        let p = params.get(i).ok_or_else(|| {
+            Error::TransactionError(format!("Missing value for parameter ${}", i + 1))
+        })?;
+        if matches!(p, Value::Param(_)) {
+            return Err(Error::TransactionError(
+                "A parameter value cannot itself be a placeholder".to_string(),
+            ));
+        }
+        used[i] = true;
+        *v = p.clone();
+    }
+    Ok(())
+}
+
+fn bind_row(row: &mut [Value], params: &[Value], used: &mut [bool]) -> Result<()> {
+    for v in row.iter_mut() {
+        bind_value(v, params, used)?;
+    }
+    Ok(())
+}
+
+fn bind_expr(e: &mut Expr, params: &[Value], used: &mut [bool]) -> Result<()> {
+    match e {
+        Expr::Literal(v) => bind_value(v, params, used),
+        Expr::Column(_) => Ok(()),
+        Expr::Eq(a, b) | Expr::And(a, b) | Expr::Or(a, b) => {
+            bind_expr(a, params, used)?;
+            bind_expr(b, params, used)
+        }
+        Expr::Compare { left, right, .. } => {
+            bind_expr(left, params, used)?;
+            bind_expr(right, params, used)
+        }
+        Expr::IsNull(a) | Expr::IsNotNull(a) => bind_expr(a, params, used),
+    }
+}
+
+impl Statement {
+    fn bind_params(&mut self, params: &[Value], used: &mut [bool]) -> Result<()> {
+        match self {
+            Statement::Insert { values, .. } => bind_row(values, params, used)?,
+            Statement::InsertMany { rows, .. } | Statement::InsertColumns { rows, .. } => {
+                for r in rows.iter_mut() {
+                    bind_row(r, params, used)?;
+                }
+            }
+            Statement::Update {
+                assignments,
+                filter,
+                ..
+            } => {
+                for (_, v) in assignments.iter_mut() {
+                    bind_value(v, params, used)?;
+                }
+                if let Some(e) = filter {
+                    bind_expr(e, params, used)?;
+                }
+            }
+            Statement::Select { filter, having, .. } => {
+                if let Some(e) = filter {
+                    bind_expr(e, params, used)?;
+                }
+                if let Some(e) = having {
+                    bind_expr(e, params, used)?;
+                }
+            }
+            Statement::Delete { filter, .. } => {
+                if let Some(e) = filter {
+                    bind_expr(e, params, used)?;
+                }
+            }
+            Statement::Union { left, right, .. } => {
+                left.bind_params(params, used)?;
+                right.bind_params(params, used)?;
+            }
+            Statement::Explain(inner) => inner.bind_params(params, used)?,
+            _ => {}
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PhysicalPlan {
     CreateTable {
@@ -919,6 +1024,25 @@ impl QueryEngine {
 
     pub fn parse_and_plan(&self, sql: &str) -> Result<PhysicalPlan> {
         let stmt = self.parse(sql)?;
+        self.plan(stmt)
+    }
+
+    /// Like `parse_and_plan`, but `$1, $2, ...` placeholders are allowed and bound
+    /// to `params` (values never pass through SQL text, so no injection).
+    pub fn parse_and_plan_params(&self, sql: &str, params: &[Value]) -> Result<PhysicalPlan> {
+        let parsed = {
+            let _guard = ParamsGuard::enable();
+            self.parse(sql)
+        };
+        let mut stmt = parsed?;
+        let mut used = vec![false; params.len()];
+        stmt.bind_params(params, &mut used)?;
+        if let Some(i) = used.iter().position(|u| !u) {
+            return Err(Error::TransactionError(format!(
+                "Parameter ${} was supplied but not used in the statement",
+                i + 1
+            )));
+        }
         self.plan(stmt)
     }
 
@@ -3506,6 +3630,30 @@ impl QueryEngine {
         }
         if token.eq_ignore_ascii_case("FALSE") {
             return Ok(Value::Bool(false));
+        }
+        if let Some(digits) = token.strip_prefix('$') {
+            if !PARAMS_ALLOWED.with(|f| f.get()) {
+                return Err(Error::TransactionError(
+                    "Parameter placeholders ($n) need parameter binding (execute_sql_params)"
+                        .to_string(),
+                ));
+            }
+            if digits.is_empty()
+                || digits.len() > 6
+                || !digits.bytes().all(|b| b.is_ascii_digit())
+            {
+                return Err(Error::TransactionError(format!(
+                    "Invalid parameter placeholder: {}",
+                    token
+                )));
+            }
+            let n: usize = digits.parse().unwrap_or(0);
+            if n == 0 {
+                return Err(Error::TransactionError(
+                    "Parameters are numbered from $1".to_string(),
+                ));
+            }
+            return Ok(Value::Param(n - 1));
         }
         if token.starts_with('\'') || token.starts_with('"') {
             let quote = token.chars().next().unwrap();

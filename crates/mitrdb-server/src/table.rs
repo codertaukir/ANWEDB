@@ -410,6 +410,7 @@ fn lit(v: &Value) -> Result<String> {
         Value::Bool(b) => Ok(if *b { "TRUE" } else { "FALSE" }.to_string()),
         Value::Text(s) => Ok(format!("'{}'", s.replace('\'', "''"))),
         Value::Bytes(_) => Err(bad("bytes values cannot be used in a filter")),
+        Value::Param(_) => Err(bad("parameter placeholders are not allowed here")),
     }
 }
 
@@ -474,24 +475,8 @@ impl Query<'_> {
         }
         sql.push_str(&format!(" FROM {}", self.table));
 
-        let mut parts: Vec<String> = Vec::new();
-        for (col, op, v) in &self.conds {
-            if !known(col) {
-                return Err(bad(format!("unknown column '{}'", col)));
-            }
-            let part = match (op.as_str(), v) {
-                ("=", Value::Null) => format!("{} IS NULL", col),
-                ("!=", Value::Null) => format!("{} IS NOT NULL", col),
-                (_, Value::Null) => return Err(bad("NULL can only be used with = or !=")),
-                ("=" | "!=" | ">" | "<" | ">=" | "<=", _) => format!("{} {} {}", col, op, lit(v)?),
-                _ => return Err(bad(format!("unknown operator '{}'", op))),
-            };
-            parts.push(part);
-        }
-        if !parts.is_empty() {
-            sql.push_str(" WHERE ");
-            sql.push_str(&parts.join(" AND "));
-        }
+        let mut params: Vec<Value> = Vec::new();
+        sql.push_str(&where_sql(&known, &self.conds, &mut params)?);
         if let Some((col, desc)) = &self.order {
             if !known(col) {
                 return Err(bad(format!("unknown column '{}'", col)));
@@ -505,14 +490,18 @@ impl Query<'_> {
             sql.push_str(&format!(" OFFSET {}", n));
         }
 
-        match self.server.execute_sql(&sql)? {
+        match self.server.execute_sql_params(&sql, &params)? {
             ExecutionResult::Rows { columns, rows } => Ok(Rows { columns, rows }),
             other => Err(bad(format!("unexpected result: {other:?}"))),
         }
     }
 }
 
-fn where_sql(known: &dyn Fn(&str) -> bool, conds: &[(String, String, Value)]) -> Result<String> {
+fn where_sql(
+    known: &dyn Fn(&str) -> bool,
+    conds: &[(String, String, Value)],
+    params: &mut Vec<Value>,
+) -> Result<String> {
     let mut parts: Vec<String> = Vec::new();
     for (col, op, v) in conds {
         if !known(col) {
@@ -522,7 +511,11 @@ fn where_sql(known: &dyn Fn(&str) -> bool, conds: &[(String, String, Value)]) ->
             ("=", Value::Null) => format!("{} IS NULL", col),
             ("!=", Value::Null) => format!("{} IS NOT NULL", col),
             (_, Value::Null) => return Err(bad("NULL can only be used with = or !=")),
-            ("=" | "!=" | ">" | "<" | ">=" | "<=", _) => format!("{} {} {}", col, op, lit(v)?),
+            ("=" | "!=" | ">" | "<" | ">=" | "<=", _) => {
+                lit(v)?;
+                params.push(v.clone());
+                format!("{} {} ${}", col, op, params.len())
+            }
             _ => return Err(bad(format!("unknown operator '{}'", op))),
         };
         parts.push(part);
@@ -607,6 +600,7 @@ impl Update<'_> {
             return Err(bad("update without filter: add filter(...) or all()"));
         }
 
+        let mut params: Vec<Value> = Vec::new();
         let mut assigns: Vec<String> = Vec::new();
         for (i, (name, v)) in self.sets.iter().enumerate() {
             let col = schema
@@ -621,13 +615,15 @@ impl Update<'_> {
                 return Err(bad(format!("column '{}' set twice", name)));
             }
             check_value(&self.table, col, v)?;
-            assigns.push(format!("{} = {}", name, lit(v)?));
+            lit(v)?;
+            params.push(v.clone());
+            assigns.push(format!("{} = ${}", name, params.len()));
         }
 
         let known = |c: &str| schema.columns.iter().any(|x| x.name == c);
-        let wh = where_sql(&known, &self.conds)?;
+        let wh = where_sql(&known, &self.conds, &mut params)?;
         let sql = format!("UPDATE {} SET {}{}", self.table, assigns.join(", "), wh);
-        match self.server.execute_sql(&sql)? {
+        match self.server.execute_sql_params(&sql, &params)? {
             ExecutionResult::Affected(n) => Ok(n),
             other => Err(bad(format!("unexpected result: {other:?}"))),
         }
@@ -659,9 +655,10 @@ impl Delete<'_> {
             return Err(bad("delete without filter: add filter(...) or all()"));
         }
         let known = |c: &str| schema.columns.iter().any(|x| x.name == c);
-        let wh = where_sql(&known, &self.conds)?;
+        let mut params: Vec<Value> = Vec::new();
+        let wh = where_sql(&known, &self.conds, &mut params)?;
         let sql = format!("DELETE FROM {}{}", self.table, wh);
-        match self.server.execute_sql(&sql)? {
+        match self.server.execute_sql_params(&sql, &params)? {
             ExecutionResult::Affected(n) => Ok(n),
             other => Err(bad(format!("unexpected result: {other:?}"))),
         }
@@ -682,9 +679,10 @@ impl Query<'_> {
             .get_table_schema(&self.table)?
             .ok_or_else(|| bad(format!("table '{}' not found", self.table)))?;
         let known = |c: &str| schema.columns.iter().any(|x| x.name == c);
-        let wh = where_sql(&known, &self.conds)?;
+        let mut params: Vec<Value> = Vec::new();
+        let wh = where_sql(&known, &self.conds, &mut params)?;
         let sql = format!("SELECT COUNT(*) FROM {}{}", self.table, wh);
-        match self.server.execute_sql(&sql)? {
+        match self.server.execute_sql_params(&sql, &params)? {
             ExecutionResult::Rows { rows, .. } => match rows.first().and_then(|r| r.first()) {
                 Some(Value::Int64(n)) if *n >= 0 => Ok(*n as usize),
                 other => Err(bad(format!("unexpected COUNT result: {other:?}"))),
