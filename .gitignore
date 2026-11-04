@@ -21,9 +21,6 @@ target/
 .DS_Store
 target/
 *.bak*
-patch*.py
-apply_scan_fix.py
-bench3.sh
 
 # Test-only TLS fixtures (fake CA/cert/key, safe to commit)
 !crates/*/tests/fixtures/tls/*.pem

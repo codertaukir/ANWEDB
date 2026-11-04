@@ -1,10 +1,10 @@
-# ANWEDB
+# MITRDB
 
 [![CI](https://github.com/codertaukir/ANWEDB/actions/workflows/ci.yml/badge.svg?branch=anwedb-clean)](https://github.com/codertaukir/ANWEDB/actions/workflows/ci.yml)
 
 A transactional database engine written in Rust.
 
-ANWEDB is built from the storage layer up: a B+Tree storage engine, a write-ahead log with
+MITRDB is built from the storage layer up: a B+Tree storage engine, a write-ahead log with
 crash recovery, MVCC transactions with serializable range locking, and online backup.
 It is currently a **single-node** engine in **early development**.
 
@@ -126,7 +126,7 @@ Files get random 32-character names, are written to a temp file and renamed, and
 
 ## Limits
 
-Know these before you use ANWEDB.
+Know these before you use MITRDB.
 
 **Data**
 - Types: `INT`, `TEXT`, `BOOL`, `BYTES`.
@@ -136,7 +136,8 @@ Know these before you use ANWEDB.
 **SQL**
 - `CREATE TABLE IF NOT EXISTS` and `CREATE [UNIQUE] INDEX IF NOT EXISTS` do nothing (0 rows affected) when the name already exists. The old table or index is not changed.
 - `JOIN`, `INNER JOIN`, `LEFT JOIN` work (basic, tested on small data; not performance-tested).
-- Not supported yet: `DROP COLUMN`, `DEFAULT`, `$n` parameters, composite indexes.
+- Not supported yet: `DEFAULT`, `$n` parameters, composite indexes.
+- `ALTER TABLE t DROP [COLUMN] c` (and `table.drop_column("c")`) is a **logical drop**: the column is renamed internally to `__dropped_<pos>` and hidden from `SELECT *`, rows are not rewritten, so the data stays on disk and no space is reclaimed. You cannot drop a primary key column, an indexed column, or the last live column. Do not use column names that start with `__dropped_`.
 - `INSERT` can write many rows: `INSERT INTO t VALUES (1,'a'), (2,'b')` (up to 1000 rows). With auto-commit it is all or nothing. Inside an explicit transaction, rows before a failing row stay in that transaction. `INSERT INTO t (b, a) VALUES (...)` also works; columns you leave out become NULL.
 - `UPDATE ... SET col = col + N` and `col = col - N` work on `INT` columns (`N` is a whole number). `NULL` stays `NULL`, overflow gives an error and changes nothing. Other expressions (for example `a = b + 1`, `col * 2`) are not supported.
 - `sync()` creates tables and adds nullable columns without losing data. It does not remove columns, change types, or remove `UNIQUE`.
@@ -153,6 +154,7 @@ Know these before you use ANWEDB.
 **Files**
 - `.db`, `.wal` and backup files are set to owner-only (`0600`, backup folder `0700`) when opened or created. A small internal free-list file may still be created with the default permissions, so also run the server with `umask 077` (systemd: `UMask=0077`).
 - Backup is a Rust call (`server.backup(path)`), not an SQL command. It refuses an existing destination folder.
+- There is no `CREATE DATABASE`. MITRDB is an embedded single-node engine: one database file is one database (`Server::open(path)`).
 
 ## Benchmarks
 
@@ -161,7 +163,10 @@ Single process, single thread, 10,000 rows inserted in one transaction (batch mo
 
 | | Durable insert throughput |
 |---|---|
-| Result on a development machine | roughly 25,000 rows/sec |
+| Result on a development machine | roughly 50,000 - 59,000 rows/sec |
+
+In the same run, full-scan latency (p50) is about 32 - 34 ms.
+Reproduce with `./scripts/bench.sh` (5 runs).
 
 This is a single-thread baseline, not a concurrency benchmark. Numbers vary between
 machines and between runs, so treat them as indicative only.
