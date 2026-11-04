@@ -163,7 +163,8 @@ Know these before you use MITRDB.
 
 **SQL**
 - `CREATE TABLE IF NOT EXISTS` and `CREATE [UNIQUE] INDEX IF NOT EXISTS` do nothing (0 rows affected) when the name already exists. The old table or index is not changed.
-- `JOIN`, `INNER JOIN`, `LEFT JOIN` work (basic, tested on small data; not performance-tested).
+- `JOIN`, `INNER JOIN`, `LEFT JOIN` work. Equality conditions in `ON` use an in-memory hash join; other conditions (`<`, `!=`, ...) use a nested loop (O(left x right)). Both tables are read fully into memory, and `WHERE` is applied after the join (no pushdown), so very large joins use a lot of memory.
+- In a `JOIN` query, an `ORDER BY` column must also appear in the `SELECT` list (otherwise an error is returned).
 - Not supported yet: `DEFAULT`, composite indexes, `LIMIT $n` / `OFFSET $n`.
 - One index value can match many rows (tested with thousands): the row list is stored in chunks. Updating or deleting one row of a very large group rewrites part of that group's list, so it gets slower as the group grows (not measured).
 - `ALTER TABLE t DROP [COLUMN] c` (and `table.drop_column("c")`) is a **logical drop**: the column is renamed internally to `__dropped_<pos>` and hidden from `SELECT *`, rows are not rewritten, so the data stays on disk and no space is reclaimed. You cannot drop a primary key column, an indexed column, or the last live column. Column names that start with `__dropped_` are reserved and rejected.

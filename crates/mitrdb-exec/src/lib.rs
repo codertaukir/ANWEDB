@@ -1385,9 +1385,42 @@ impl Executor {
                     projection.iter().map(|p| p.output_name.clone()).collect();
                 let mut result_tuples = Vec::new();
 
+                let eq_pairs: Vec<(usize, usize)> = join_conditions
+                    .iter()
+                    .filter(|(_, _, op)| *op == mitrdb_query::CompareOp::Eq)
+                    .map(|&(l, r, _)| (l, r))
+                    .collect();
+                let use_hash = !eq_pairs.is_empty();
+                let all_idx: Vec<usize> = (0..right_rows.len()).collect();
+                let no_match: Vec<usize> = Vec::new();
+                let mut hash_index: std::collections::HashMap<Vec<Value>, Vec<usize>> =
+                    std::collections::HashMap::new();
+                if use_hash {
+                    for (ri, rrow) in right_rows.iter().enumerate() {
+                        let key: Vec<Value> = eq_pairs.iter().map(|&(_, r)| rrow[r].clone()).collect();
+                        if key.iter().any(|v| matches!(v, Value::Null)) {
+                            continue;
+                        }
+                        hash_index.entry(key).or_default().push(ri);
+                    }
+                }
                 for left_row in &left_rows {
                     let mut matched = false;
-                    for right_row in &right_rows {
+                    let cands: &[usize] = if use_hash {
+                        let key: Vec<Value> = eq_pairs.iter().map(|&(l, _)| left_row[l].clone()).collect();
+                        if key.iter().any(|v| matches!(v, Value::Null)) {
+                            no_match.as_slice()
+                        } else {
+                            hash_index
+                                .get(&key)
+                                .map(|v| v.as_slice())
+                                .unwrap_or(no_match.as_slice())
+                        }
+                    } else {
+                        all_idx.as_slice()
+                    };
+                    for &ri in cands {
+                        let right_row = &right_rows[ri];
                         let mut conds_met = true;
                         for &(l_idx, r_idx, op) in &join_conditions {
                             if !op.evaluate(&left_row[l_idx], &right_row[r_idx]) {

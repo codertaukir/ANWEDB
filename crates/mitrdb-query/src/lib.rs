@@ -1430,8 +1430,14 @@ impl QueryEngine {
                             &left_schema,
                             &right_schema,
                         )?;
-                        if let Some(pos) = proj_items.iter().position(|p| p.source == src) {
-                            sort_keys.push((pos, ob.descending));
+                        match proj_items.iter().position(|p| p.source == src) {
+                            Some(pos) => sort_keys.push((pos, ob.descending)),
+                            None => {
+                                return Err(Error::TransactionError(format!(
+                                    "ORDER BY column '{}' must appear in the SELECT list of a JOIN query",
+                                    ob.column_name
+                                )));
+                            }
                         }
                     }
 
