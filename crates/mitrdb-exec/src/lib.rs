@@ -551,9 +551,13 @@ impl Executor {
 
     /// Entries (head first, then overflow chunks) for one index key.
     fn idx_encode_entries(key: &[u8], pks: &[Vec<u8>]) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        let plain = Self::encode_index_pks(pks);
+        if plain.len() + 3 <= IDX_CHUNK_BUDGET.saturating_sub(key.len() + 64).max(256) {
+        return Ok(vec![(key.to_vec(), plain)]);
+        }
         let chunks = Self::idx_split_chunks(key.len(), pks);
         if chunks.len() <= 1 {
-            return Ok(vec![(key.to_vec(), Self::encode_index_pks(pks))]);
+        return Ok(vec![(key.to_vec(), plain)]);
         }
         if chunks.len() - 1 > u16::MAX as usize {
             return Err(Error::OutOfSpace);
@@ -584,10 +588,7 @@ impl Executor {
         mut raw: Option<&mut Vec<Vec<u8>>>,
     ) -> Result<Vec<Vec<u8>>> {
         if head.first() != Some(&CHUNKED_PK_TAG) {
-            if let Some(r) = raw.as_deref_mut() {
-                r.push(head.to_vec());
-            }
-            return Self::decode_index_pks(head);
+        return Self::decode_index_pks(head);
         }
         if head.len() < 3 {
             return Err(Error::PageCorrupted(
