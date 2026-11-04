@@ -97,6 +97,23 @@ fn unique_columns(spec: &str, wanted: &[ColumnDef]) -> Vec<String> {
     out
 }
 
+/// Names of columns marked `index` in the spec (non-unique index). PK and unique columns are skipped.
+fn indexed_columns(spec: &str, wanted: &[ColumnDef], uniques: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    for part in spec.split(',') {
+        let tokens: Vec<&str> = part.split_whitespace().collect();
+        if tokens.len() < 3 {
+            continue;
+        }
+        let is_index = tokens[2..].iter().any(|t| t.eq_ignore_ascii_case("index"));
+        let is_pk = wanted.iter().any(|c| c.name == tokens[0] && c.is_primary_key);
+        if is_index && !is_pk && !uniques.iter().any(|u| u == tokens[0]) {
+            out.push(tokens[0].to_string());
+        }
+    }
+    out
+}
+
 impl Table<'_> {
     fn check_name(&self) -> Result<()> {
         if valid_ident(&self.name) {
@@ -112,6 +129,7 @@ impl Table<'_> {
         let wanted = parse_columns(spec)?;
         let mut plan: Vec<String> = Vec::new();
         let uniques = unique_columns(spec, &wanted);
+        let indexed = indexed_columns(spec, &wanted, &uniques);
 
         match self.server.get_table_schema(&self.name)? {
             None => {
@@ -185,6 +203,30 @@ impl Table<'_> {
             plan.push(format!(
                 "CREATE UNIQUE INDEX {} ON {} ({})",
                 uq_name(col),
+                self.name,
+                col
+            ));
+        }
+
+        let ix_name = |col: &str| format!("{}_{}_idx", self.name, col);
+        for idx in &existing_idx {
+            if !idx.unique
+                && idx.name == ix_name(&idx.column_name)
+                && !indexed.contains(&idx.column_name)
+            {
+                return Err(bad(format!(
+                    "column '{}' has an index in the database but not in your definition; removing an index is not supported here (run DROP INDEX {} first)",
+                    idx.column_name, idx.name
+                )));
+            }
+        }
+        for col in &indexed {
+            if existing_idx.iter().any(|i| i.column_name == *col) {
+                continue;
+            }
+            plan.push(format!(
+                "CREATE INDEX {} ON {} ({})",
+                ix_name(col),
                 self.name,
                 col
             ));

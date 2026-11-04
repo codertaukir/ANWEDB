@@ -28,6 +28,7 @@ pub struct ColumnBuilder {
     primary_key: bool,
     not_null: bool,
     unique: bool,
+    indexed: bool,
 }
 
 impl ColumnBuilder {
@@ -43,6 +44,11 @@ impl ColumnBuilder {
         self.unique = true;
         self
     }
+    /// Plain (non-unique) index on this column. Ignored for primary key / unique columns.
+    pub fn index(&mut self) -> &mut Self {
+        self.indexed = true;
+        self
+    }
     fn to_spec(&self) -> String {
         let mut s = format!("{} {}", self.name, self.sql_type);
         if self.primary_key {
@@ -53,6 +59,8 @@ impl ColumnBuilder {
             }
             if self.unique {
                 s.push_str(" unique");
+            } else if self.indexed {
+                s.push_str(" index");
             }
         }
         s
@@ -73,6 +81,7 @@ impl TableBuilder {
             primary_key: false,
             not_null: false,
             unique: false,
+            indexed: false,
         });
         self.cols.last_mut().unwrap()
     }
