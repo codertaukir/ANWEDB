@@ -2630,6 +2630,12 @@ impl QueryEngine {
 
     /// New table, index and column names: letters, digits, `_`; start with a letter or `_`; max 64.
     fn validate_name(kind: &str, name: &str) -> Result<()> {
+        // same value as mitrdb_catalog::DROPPED_PREFIX; reserved for logically dropped columns
+        if kind == "column" && name.starts_with("__dropped_") {
+            return Err(Error::TransactionError(
+                "Column names starting with '__dropped_' are reserved".to_string(),
+            ));
+        }
         let mut chars = name.chars();
         let ok = name.len() <= 64
             && matches!(chars.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')

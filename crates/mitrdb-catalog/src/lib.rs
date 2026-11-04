@@ -837,6 +837,13 @@ impl Catalog {
                 ))
             })?;
 
+        if schema.columns[col_pos].is_dropped() {
+            return Err(Error::TransactionError(format!(
+                "Column '{}' not found in table '{}'",
+                old_name, table_name
+            )));
+        }
+
         if schema
             .columns
             .iter()
