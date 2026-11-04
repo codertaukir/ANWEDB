@@ -248,6 +248,77 @@ fn test_table_and_index_root_resolution_after_split_and_sync() {
 }
 
 #[test]
+fn test_catalog_root_collapse_and_drop_index_reclaims_pages() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "mitrdb_group_c_collapse_and_idx_{}",
+        std::process::id()
+    ));
+    let db_path = temp_dir.join("test.db");
+    let wal_path = temp_dir.join("test.wal");
+    let _ = std::fs::remove_dir_all(&temp_dir);
+
+    let cols = || {
+        vec![
+            ColumnDef {
+                name: "id".to_string(),
+                data_type: DataType::Int64,
+                nullable: false,
+                is_primary_key: true,
+            },
+            ColumnDef {
+                name: "email".to_string(),
+                data_type: DataType::Text,
+                nullable: false,
+                is_primary_key: false,
+            },
+        ]
+    };
+
+    {
+        let disk = Arc::new(DiskManager::open_or_create(db_path.as_path()).unwrap());
+        let wal = Arc::new(WalManager::open_or_create(wal_path.as_path()).unwrap());
+        let bpm = Arc::new(BufferPoolManager::new(disk.clone(), 64));
+        let _recovery = RecoveryManager::new(wal.clone(), bpm.clone());
+        let catalog = Catalog::with_storage(bpm.clone(), Some(wal.clone()));
+
+        for i in 1..=18 {
+            let tname = format!("tbl_{:03}", i);
+            catalog.create_table(&tname, cols()).unwrap();
+            let iname = format!("idx_{:03}", i);
+            catalog
+                .create_index(&iname, &tname, "email", true)
+                .unwrap();
+        }
+
+        let free_before = bpm.free_page_count();
+        assert!(catalog.drop_index("idx_001").unwrap());
+        assert!(bpm.free_page_count() > free_before);
+
+        for i in 2..=18 {
+            let tname = format!("tbl_{:03}", i);
+            assert!(catalog.drop_table(&tname).unwrap());
+        }
+        bpm.flush_all().unwrap();
+    }
+
+    {
+        let disk = Arc::new(DiskManager::open_or_create(db_path.as_path()).unwrap());
+        let wal = Arc::new(WalManager::open_or_create(wal_path.as_path()).unwrap());
+        let bpm = Arc::new(BufferPoolManager::new(disk.clone(), 64));
+        let recovery = RecoveryManager::new(wal.clone(), bpm.clone());
+        recovery.recover().unwrap();
+
+        let catalog = Catalog::with_storage(bpm.clone(), Some(wal.clone()));
+        assert!(catalog.get_table_schema("tbl_001").unwrap().is_some());
+        assert!(catalog.get_index_by_name("idx_001").is_none());
+        assert!(catalog.get_table_schema("tbl_002").unwrap().is_none());
+        assert!(catalog.get_index_by_name("idx_002").is_none());
+    }
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
 fn test_populate_index_entries_logged_durability_across_crash_recovery() {
     let temp_dir = std::env::temp_dir().join(format!(
         "mitrdb_group_c_populate_idx_logged_{}",
