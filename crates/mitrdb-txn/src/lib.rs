@@ -2205,7 +2205,9 @@ impl TxnManager {
                     return Err(err);
                 }
             };
-            if let Err(err) = wal.flush_up_to(lsn) {
+            // Read-only txn ke paas durable karne ko kuch nahi: commit record buffer mein jata hai, fsync skip.
+            let flush_res = if has_writes { wal.flush_up_to(lsn) } else { Ok(()) };
+            if let Err(err) = flush_res {
                 if wal.flushed_lsn() < lsn {
                     if let Some(ctx) = self.txns.lock().unwrap().get_mut(&txn_id) {
                         ctx.commit_poisoned = true;
