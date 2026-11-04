@@ -276,7 +276,6 @@ pub struct RestoreReport {
 }
 
 fn sync_parent_dir(path: &Path) -> Result<()> {
-    #[cfg(unix)]
     {
         if let Some(parent) = path.parent() {
             let dir_path = if parent.as_os_str().is_empty() {
@@ -287,10 +286,6 @@ fn sync_parent_dir(path: &Path) -> Result<()> {
             let dir = File::open(dir_path)?;
             dir.sync_all()?;
         }
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = path;
     }
     Ok(())
 }

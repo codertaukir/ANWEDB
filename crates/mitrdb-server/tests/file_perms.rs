@@ -1,4 +1,3 @@
-#![cfg(unix)]
 use mitrdb_server::Server;
 use std::os::unix::fs::PermissionsExt;
 

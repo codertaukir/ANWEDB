@@ -1,6 +1,5 @@
 use std::path::Path;
 
-#[cfg(unix)]
 pub(crate) fn restrict_db_files(db: &Path, wal: &Path) {
     use std::os::unix::fs::PermissionsExt;
     for base in [db, wal] {
@@ -31,15 +30,10 @@ pub(crate) fn restrict_db_files(db: &Path, wal: &Path) {
     }
 }
 
-#[cfg(not(unix))]
-pub(crate) fn restrict_db_files(_db: &Path, _wal: &Path) {}
-
-#[cfg(unix)]
 pub(crate) fn restrict_tree(root: &Path) {
     walk(root, 0);
 }
 
-#[cfg(unix)]
 fn walk(p: &Path, depth: u32) {
     use std::os::unix::fs::PermissionsExt;
     if depth > 4 {
@@ -60,5 +54,3 @@ fn walk(p: &Path, depth: u32) {
     }
 }
 
-#[cfg(not(unix))]
-pub(crate) fn restrict_tree(_root: &Path) {}

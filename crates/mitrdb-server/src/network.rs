@@ -390,7 +390,6 @@ fn load_tls_config(
     Ok(Arc::new(config))
 }
 
-#[cfg(unix)]
 fn validate_private_key_permissions(path: &std::path::Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
     let metadata = std::fs::symlink_metadata(path)
@@ -405,20 +404,6 @@ fn validate_private_key_permissions(path: &std::path::Path) -> Result<()> {
             "TLS private key is accessible by group/others; restrict permissions (for example chmod 600)".to_string(),
         ));
     }
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn validate_private_key_permissions(path: &std::path::Path) -> Result<()> {
-    let metadata = std::fs::symlink_metadata(path)
-        .map_err(|err| Error::Io(format!("cannot inspect TLS private-key metadata: {err}")))?;
-    if metadata.file_type().is_symlink() || !metadata.is_file() {
-        return Err(Error::Io(
-            "TLS private key must be a regular, non-symlink file".to_string(),
-        ));
-    }
-    // std does not expose portable Windows ACL inspection; administrators must
-    // restrict this file to the service identity using NTFS permissions.
     Ok(())
 }
 

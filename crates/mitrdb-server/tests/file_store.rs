@@ -108,7 +108,6 @@ fn failed_upload_leaves_no_leftovers() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
-#[cfg(unix)]
 #[test]
 fn permissions_are_private() {
     use std::os::unix::fs::PermissionsExt;
@@ -165,7 +164,6 @@ fn cleanup_removes_only_old_tmp_files() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
-#[cfg(unix)]
 #[test]
 fn cleanup_does_not_follow_symlinks() {
     let dir = temp_dir("cleanup_link");

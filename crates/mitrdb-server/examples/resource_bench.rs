@@ -101,98 +101,6 @@ struct Sample {
     cpu_percent: f64,
 }
 
-#[cfg(windows)]
-mod process_stats {
-    use super::ProcessSample;
-    use std::ffi::c_void;
-    use std::mem::size_of;
-
-    #[repr(C)]
-    #[derive(Default, Clone, Copy)]
-    struct FileTime {
-        low_date_time: u32,
-        high_date_time: u32,
-    }
-
-    impl FileTime {
-        fn as_u64(self) -> u64 {
-            ((self.high_date_time as u64) << 32) | self.low_date_time as u64
-        }
-    }
-
-    #[repr(C)]
-    #[derive(Default)]
-    struct ProcessMemoryCountersEx {
-        cb: u32,
-        page_fault_count: u32,
-        peak_working_set_size: usize,
-        working_set_size: usize,
-        quota_peak_paged_pool_usage: usize,
-        quota_paged_pool_usage: usize,
-        quota_peak_nonpaged_pool_usage: usize,
-        quota_nonpaged_pool_usage: usize,
-        pagefile_usage: usize,
-        peak_pagefile_usage: usize,
-        private_usage: usize,
-    }
-
-    #[link(name = "kernel32")]
-    unsafe extern "system" {
-        fn GetCurrentProcess() -> *mut c_void;
-        fn GetProcessTimes(
-            process: *mut c_void,
-            creation_time: *mut FileTime,
-            exit_time: *mut FileTime,
-            kernel_time: *mut FileTime,
-            user_time: *mut FileTime,
-        ) -> i32;
-    }
-
-    #[link(name = "psapi")]
-    unsafe extern "system" {
-        fn GetProcessMemoryInfo(
-            process: *mut c_void,
-            counters: *mut ProcessMemoryCountersEx,
-            size: u32,
-        ) -> i32;
-    }
-
-    pub fn snapshot() -> Result<ProcessSample, String> {
-        unsafe {
-            let process = GetCurrentProcess();
-            let mut memory = ProcessMemoryCountersEx {
-                cb: size_of::<ProcessMemoryCountersEx>() as u32,
-                ..Default::default()
-            };
-            if GetProcessMemoryInfo(
-                process,
-                &mut memory,
-                size_of::<ProcessMemoryCountersEx>() as u32,
-            ) == 0
-            {
-                return Err("GetProcessMemoryInfo failed".into());
-            }
-
-            let mut creation = FileTime::default();
-            let mut exit = FileTime::default();
-            let mut kernel = FileTime::default();
-            let mut user = FileTime::default();
-            if GetProcessTimes(process, &mut creation, &mut exit, &mut kernel, &mut user) == 0 {
-                return Err("GetProcessTimes failed".into());
-            }
-
-            Ok(ProcessSample {
-                rss_bytes: memory.working_set_size as u64,
-                private_or_virtual_bytes: memory.private_usage as u64,
-                process_peak_rss_bytes: memory.peak_working_set_size as u64,
-                // FILETIME uses 100-nanosecond units.
-                cpu_time_ns: kernel.as_u64().saturating_add(user.as_u64()) * 100,
-            })
-        }
-    }
-}
-
-#[cfg(target_os = "linux")]
 mod process_stats {
     use super::ProcessSample;
     use std::fs;
@@ -250,15 +158,6 @@ mod process_stats {
             process_peak_rss_bytes: peak_rss * 1024,
             cpu_time_ns,
         })
-    }
-}
-
-#[cfg(not(any(windows, target_os = "linux")))]
-mod process_stats {
-    use super::ProcessSample;
-
-    pub fn snapshot() -> Result<ProcessSample, String> {
-        Err("resource_bench currently supports Windows and Linux process metrics".into())
     }
 }
 

@@ -40,7 +40,6 @@ fn random_name() -> Result<String> {
 fn write_chunks<R: Read>(reader: &mut R, path: &Path) -> Result<u64> {
     let mut opts = OpenOptions::new();
     opts.write(true).create_new(true);
-    #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
         opts.mode(0o600);
@@ -67,7 +66,6 @@ fn write_chunks<R: Read>(reader: &mut R, path: &Path) -> Result<u64> {
 impl FileStore {
     pub fn open<P: AsRef<Path>>(dir: P) -> Result<Self> {
         fs::create_dir_all(dir.as_ref()).map_err(io_err)?;
-        #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             fs::set_permissions(dir.as_ref(), fs::Permissions::from_mode(0o700))
