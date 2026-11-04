@@ -127,6 +127,17 @@ users.insert(&[("id", val(1)), ("name", val("Asha")), ("email", val("a@b.c"))])?
 users.drop_column("avatar_hash")?;   // logical drop, see Limits
 ```
 
+### Parameters (no SQL injection)
+
+Use `$1, $2, ...` placeholders with `execute_sql_params`. Values are bound, never spliced into the SQL text:
+
+```rust
+db.execute_sql_params("INSERT INTO users VALUES ($1, $2)", &[val(1), val("O'Brien")])?;
+db.execute_sql_params("UPDATE users SET age = age + $1 WHERE id = $2", &[val(1), val(7)])?;
+```
+
+Placeholders work for values in INSERT, UPDATE (`SET col = $n`, `col = col +/- $n`), and WHERE comparisons. Missing, extra, or non-integer increment parameters are errors. Plain `execute_sql` rejects `$n`. `Table::find/count/update/delete` already bind their values this way. `LIMIT`/`OFFSET` placeholders are not supported.
+
 ### Big files
 
 A DB value holds up to about 3900 bytes. Bigger data (photos, videos) goes to disk with `FileStore`; the DB keeps only the file name in a normal `text` column.

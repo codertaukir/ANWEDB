@@ -540,6 +540,8 @@ pub enum Statement {
         table_name: String,
         assignments: Vec<(String, Value)>,
         increments: Vec<(String, i64)>,
+        /// `col = col +/- $n` (column, 0-based param index, negative). Resolved by bind.
+        param_increments: Vec<(String, usize, bool)>,
         filter: Option<Expr>,
     },
     Select {
@@ -624,11 +626,31 @@ impl Statement {
             }
             Statement::Update {
                 assignments,
+                increments,
+                param_increments,
                 filter,
                 ..
             } => {
                 for (_, v) in assignments.iter_mut() {
                     bind_value(v, params, used)?;
+                }
+                for (col, i, negative) in param_increments.drain(..) {
+                    let p = params.get(i).ok_or_else(|| {
+                        Error::TransactionError(format!("Missing value for parameter ${}", i + 1))
+                    })?;
+                    let n = match p {
+                        Value::Int64(n) => *n,
+                        _ => {
+                            return Err(Error::TransactionError(format!(
+                                "Parameter ${} must be an integer (used in {} = {} +/- ${})",
+                                i + 1, col, col, i + 1
+                            )));
+                        }
+                    };
+                    let delta = if negative { n.checked_neg() } else { Some(n) }
+                        .ok_or_else(|| Error::TransactionError("Number too large in UPDATE SET".to_string()))?;
+                    used[i] = true;
+                    increments.push((col, delta));
                 }
                 if let Some(e) = filter {
                     bind_expr(e, params, used)?;
@@ -1175,6 +1197,7 @@ impl QueryEngine {
                 table_name,
                 assignments,
                 increments,
+                param_increments: _,
                 filter,
             } => {
                 let schema = self.catalog.get_table_schema(&table_name)?.ok_or_else(|| {
@@ -3096,6 +3119,33 @@ impl QueryEngine {
         Ok(Some(if negative { -n } else { n }))
     }
 
+    /// `col + $n` / `col - $n` (same column on the left). None for anything else.
+    fn parse_param_increment(col: &str, rhs: &str) -> Result<Option<(usize, bool)>> {
+        if col.is_empty() || rhs.starts_with('\'') || rhs.starts_with('"') {
+            return Ok(None);
+        }
+        let Some(head) = rhs.get(..col.len()) else {
+            return Ok(None);
+        };
+        if !head.eq_ignore_ascii_case(col) {
+            return Ok(None);
+        }
+        let rest = rhs[col.len()..].trim_start();
+        let negative = match rest.chars().next() {
+            Some('+') => false,
+            Some('-') => true,
+            _ => return Ok(None),
+        };
+        let operand = rest[1..].trim();
+        if !operand.starts_with('$') {
+            return Ok(None);
+        }
+        match Self::parse_literal(operand)? {
+            Value::Param(i) => Ok(Some((i, negative))),
+            _ => Ok(None),
+        }
+    }
+
     fn parse_update(sql: &str) -> Result<Statement> {
         let rest = sql[7..].trim();
         let set_pos = Self::find_top_level_keyword(rest, " SET ")
@@ -3113,12 +3163,17 @@ impl QueryEngine {
 
         let mut assignments = Vec::new();
         let mut increments: Vec<(String, i64)> = Vec::new();
+        let mut param_increments: Vec<(String, usize, bool)> = Vec::new();
         for part in Self::split_top_level_commas(assign_str) {
             let eq_pos = part.find('=').ok_or_else(|| {
                 Error::TransactionError("Missing '=' in UPDATE SET assignment".to_string())
             })?;
             let col = part[..eq_pos].trim().to_string();
             let rhs = part[eq_pos + 1..].trim();
+            if let Some((idx, negative)) = Self::parse_param_increment(&col, rhs)? {
+                param_increments.push((col, idx, negative));
+                continue;
+            }
             if let Some(delta) = Self::parse_increment(&col, rhs)? {
                 increments.push((col, delta));
                 continue;
@@ -3131,6 +3186,7 @@ impl QueryEngine {
             table_name,
             assignments,
             increments,
+            param_increments,
             filter,
         })
     }
