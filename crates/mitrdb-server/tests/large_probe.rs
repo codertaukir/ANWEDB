@@ -36,7 +36,8 @@ fn probe_large_dataset() {
     std::fs::create_dir_all(&d).unwrap();
 
     let s = open(&d);
-    s.table("t").sync("id int primary key, g int index, name text").unwrap();
+    let spec = if std::env::var("MITRDB_INDEX").map(|v| v == "0").unwrap_or(false) { "id int primary key, g int, name text" } else { "id int primary key, g int index, name text" };
+    s.table("t").sync(spec).unwrap();
     let t0 = Instant::now();
     let mut i = 0i64;
     while i < n {
