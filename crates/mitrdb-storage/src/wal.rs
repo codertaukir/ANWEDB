@@ -4,7 +4,6 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Condvar, Mutex, MutexGuard};
 
-#[cfg(target_os = "linux")]
 use std::os::unix::io::AsRawFd;
 
 use mitrdb_common::{Error, INVALID_LSN, Lsn, MAGIC_BYTES, PageId, Result, TxnId};
@@ -376,7 +375,6 @@ impl LogRecord {
 }
 
 fn sync_parent_dir(path: &Path) -> Result<()> {
-    #[cfg(unix)]
     {
         if let Some(parent) = path.parent() {
             let dir_path = if parent.as_os_str().is_empty() {
@@ -388,14 +386,9 @@ fn sync_parent_dir(path: &Path) -> Result<()> {
             dir.sync_all()?;
         }
     }
-    #[cfg(not(unix))]
-    {
-        let _ = path;
-    }
     Ok(())
 }
 
-#[cfg(target_os = "linux")]
 #[allow(dead_code)]
 fn write_and_sync_uring(
     ring: &mut io_uring::IoUring,
@@ -556,7 +549,6 @@ pub struct WalManager {
     bpm_listeners: Mutex<Vec<std::sync::Weak<crate::buffer_pool::BufferPoolManager>>>,
     /// (segment_id, open_file_handle) cached for fast sequential append & flush.
     active_segment_file: Mutex<Option<(u64, std::fs::File)>>,
-    #[cfg(target_os = "linux")]
     #[allow(dead_code)]
     ring: Mutex<Option<io_uring::IoUring>>,
     /// Pages whose page_lsn is <= this value get a full-page image on their next logged write.
@@ -602,7 +594,6 @@ impl WalManager {
             path: path_buf,
             bpm_listeners: Mutex::new(Vec::new()),
             active_segment_file: Mutex::new(None),
-            #[cfg(target_os = "linux")]
             ring: Mutex::new(io_uring::IoUring::new(16).ok()),
             ckpt_full_image_threshold: std::sync::atomic::AtomicU64::new(0),
         };

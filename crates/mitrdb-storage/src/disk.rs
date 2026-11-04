@@ -4,7 +4,6 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
-#[cfg(target_os = "linux")]
 use std::os::unix::io::AsRawFd;
 
 use mitrdb_common::{Error, Lsn, MAGIC_BYTES, PAGE_HEADER_SIZE, PAGE_SIZE, PageId, Result, TxnId};
@@ -21,12 +20,10 @@ pub struct DiskManager {
     free_pages: Mutex<Vec<PageId>>,
     pending_free_pages: Mutex<HashMap<TxnId, Vec<PageId>>>,
     backup_dirty_pages: Mutex<Option<BTreeSet<PageId>>>,
-    #[cfg(target_os = "linux")]
     ring: Mutex<Option<io_uring::IoUring>>,
 }
 
 fn sync_parent_dir(path: &Path) -> Result<()> {
-    #[cfg(unix)]
     {
         if let Some(parent) = path.parent() {
             let dir_path = if parent.as_os_str().is_empty() {
@@ -37,10 +34,6 @@ fn sync_parent_dir(path: &Path) -> Result<()> {
             let dir = File::open(dir_path)?;
             dir.sync_all()?;
         }
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = path;
     }
     Ok(())
 }
@@ -182,7 +175,6 @@ impl DiskManager {
             free_pages: Mutex::new(free_pages),
             pending_free_pages: Mutex::new(HashMap::new()),
             backup_dirty_pages: Mutex::new(None),
-            #[cfg(target_os = "linux")]
             ring: Mutex::new(io_uring::IoUring::new(64).ok()),
         })
     }
@@ -411,10 +403,8 @@ impl DiskManager {
 
         let mut file_guard = self.file.lock().unwrap();
 
-        #[cfg(target_os = "linux")]
         let mut io_done = false;
 
-        #[cfg(target_os = "linux")]
         {
             let mut ring_guard = self.ring.lock().unwrap();
             let mut ring_failed = false;
@@ -467,10 +457,7 @@ impl DiskManager {
             }
         }
 
-        #[cfg(target_os = "linux")]
         let needs_fallback = !io_done;
-        #[cfg(not(target_os = "linux"))]
-        let needs_fallback = true;
 
         if needs_fallback {
             for (offset, data) in &prepared {
