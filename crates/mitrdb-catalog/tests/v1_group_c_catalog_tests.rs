@@ -248,68 +248,6 @@ fn test_table_and_index_root_resolution_after_split_and_sync() {
 }
 
 #[test]
-fn test_catalog_root_collapse_and_drop_collection_index_reclaims_pages() {
-    let temp_dir = std::env::temp_dir().join(format!(
-        "mitrdb_group_c_collapse_and_cidx_{}",
-        std::process::id()
-    ));
-    let db_path = temp_dir.join("test.db");
-    let wal_path = temp_dir.join("test.wal");
-    let _ = std::fs::remove_dir_all(&temp_dir);
-
-    {
-        let disk = Arc::new(DiskManager::open_or_create(db_path.as_path()).unwrap());
-        let wal = Arc::new(WalManager::open_or_create(wal_path.as_path()).unwrap());
-        let bpm = Arc::new(BufferPoolManager::new(disk.clone(), 64));
-        let _recovery = RecoveryManager::new(wal.clone(), bpm.clone());
-        let catalog = Catalog::with_storage(bpm.clone(), Some(wal.clone()));
-
-        for i in 1..=18 {
-            let cname = format!("coll_{:03}", i);
-            catalog.create_collection(&cname).unwrap();
-            let iname = format!("cidx_{:03}", i);
-            catalog
-                .create_collection_index(&cname, &iname, "email", true)
-                .unwrap();
-        }
-
-        let free_before = bpm.free_page_count();
-        assert!(
-            catalog
-                .drop_collection_index("coll_001", "cidx_001")
-                .unwrap()
-        );
-        assert!(bpm.free_page_count() > free_before);
-
-        for i in 2..=18 {
-            let cname = format!("coll_{:03}", i);
-            assert!(catalog.drop_collection(&cname).unwrap());
-        }
-        bpm.flush_all().unwrap();
-    }
-
-    {
-        let disk = Arc::new(DiskManager::open_or_create(db_path.as_path()).unwrap());
-        let wal = Arc::new(WalManager::open_or_create(wal_path.as_path()).unwrap());
-        let bpm = Arc::new(BufferPoolManager::new(disk.clone(), 64));
-        let recovery = RecoveryManager::new(wal.clone(), bpm.clone());
-        recovery.recover().unwrap();
-
-        let catalog = Catalog::with_storage(bpm.clone(), Some(wal.clone()));
-        assert!(catalog.get_collection_schema("coll_001").unwrap().is_some());
-        assert!(
-            catalog
-                .get_collection_index_by_name("coll_001", "cidx_001")
-                .unwrap()
-                .is_none()
-        );
-        assert!(catalog.get_collection_schema("coll_002").unwrap().is_none());
-    }
-
-    let _ = std::fs::remove_dir_all(&temp_dir);
-}
-
-#[test]
 fn test_populate_index_entries_logged_durability_across_crash_recovery() {
     let temp_dir = std::env::temp_dir().join(format!(
         "mitrdb_group_c_populate_idx_logged_{}",
@@ -356,17 +294,6 @@ fn test_populate_index_entries_logged_durability_across_crash_recovery() {
         }
         catalog.populate_index_entries(idx_id, &entries).unwrap();
 
-        let c_id = catalog.create_collection("docs").unwrap();
-        let cidx_id = catalog
-            .create_collection_index("docs", "idx_docs_slug", "slug", true)
-            .unwrap();
-        catalog
-            .populate_collection_index_entries(
-                c_id,
-                cidx_id,
-                &[(b"slug_alpha".to_vec(), b"doc_1".to_vec())],
-            )
-            .unwrap();
     }
 
     {
@@ -382,15 +309,6 @@ fn test_populate_index_entries_logged_durability_across_crash_recovery() {
         let idx_tree = catalog.index_tree(idx_meta.index_id).unwrap();
         assert_eq!(idx_tree.range_scan(None, None).unwrap().len(), 20);
 
-        let cidx_meta = catalog
-            .get_collection_index_by_name("docs", "idx_docs_slug")
-            .unwrap()
-            .unwrap();
-        let cidx_tree = catalog.collection_index_tree(cidx_meta.index_id).unwrap();
-        assert_eq!(
-            cidx_tree.get(b"slug_alpha").unwrap(),
-            Some(b"doc_1".to_vec())
-        );
     }
 
     let _ = std::fs::remove_dir_all(&temp_dir);

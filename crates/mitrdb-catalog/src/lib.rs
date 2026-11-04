@@ -207,130 +207,15 @@ impl IndexMetadata {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CollectionSchema {
-    pub collection_id: u32,
-    pub name: String,
-    pub root_page_id: PageId,
-}
-
-impl CollectionSchema {
-    pub fn serialize(&self) -> Vec<u8> {
-        let mut buf = Vec::new();
-        buf.extend_from_slice(&self.collection_id.to_le_bytes());
-        buf.extend_from_slice(&self.root_page_id.to_le_bytes());
-        let name_bytes = self.name.as_bytes();
-        buf.extend_from_slice(&(name_bytes.len() as u16).to_le_bytes());
-        buf.extend_from_slice(name_bytes);
-        buf
-    }
-
-    pub fn deserialize(buf: &[u8]) -> Result<Self> {
-        if buf.len() < 10 {
-            return Err(Error::PageCorrupted(
-                "CollectionSchema buffer too short".to_string(),
-            ));
-        }
-        let collection_id = u32::from_le_bytes(buf[0..4].try_into().unwrap());
-        let root_page_id = u32::from_le_bytes(buf[4..8].try_into().unwrap());
-        let nlen = u16::from_le_bytes(buf[8..10].try_into().unwrap()) as usize;
-        if 10 + nlen > buf.len() {
-            return Err(Error::PageCorrupted(
-                "Truncated CollectionSchema name".to_string(),
-            ));
-        }
-        let name = String::from_utf8(buf[10..10 + nlen].to_vec())
-            .map_err(|e| Error::PageCorrupted(e.to_string()))?;
-        Ok(CollectionSchema {
-            collection_id,
-            name,
-            root_page_id,
-        })
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CollectionIndexMeta {
-    pub index_id: u32,
-    pub collection_id: u32,
-    pub name: String,
-    pub field_path: String,
-    pub root_page_id: PageId,
-    pub unique: bool,
-}
-
-impl CollectionIndexMeta {
-    pub fn serialize(&self) -> Vec<u8> {
-        let mut buf = Vec::new();
-        buf.extend_from_slice(&self.index_id.to_le_bytes());
-        buf.extend_from_slice(&self.collection_id.to_le_bytes());
-        buf.extend_from_slice(&self.root_page_id.to_le_bytes());
-        buf.push(u8::from(self.unique));
-        let nbytes = self.name.as_bytes();
-        buf.extend_from_slice(&(nbytes.len() as u16).to_le_bytes());
-        buf.extend_from_slice(nbytes);
-        let pbytes = self.field_path.as_bytes();
-        buf.extend_from_slice(&(pbytes.len() as u16).to_le_bytes());
-        buf.extend_from_slice(pbytes);
-        buf
-    }
-
-    pub fn deserialize(buf: &[u8]) -> Result<Self> {
-        if buf.len() < 15 {
-            return Err(Error::PageCorrupted(
-                "CollectionIndexMeta buffer too short".to_string(),
-            ));
-        }
-        let index_id = u32::from_le_bytes(buf[0..4].try_into().unwrap());
-        let collection_id = u32::from_le_bytes(buf[4..8].try_into().unwrap());
-        let root_page_id = u32::from_le_bytes(buf[8..12].try_into().unwrap());
-        let unique = buf[12] != 0;
-        let nlen = u16::from_le_bytes(buf[13..15].try_into().unwrap()) as usize;
-        let mut pos = 15;
-        if pos + nlen + 2 > buf.len() {
-            return Err(Error::PageCorrupted(
-                "Truncated CollectionIndexMeta name".to_string(),
-            ));
-        }
-        let name = String::from_utf8(buf[pos..pos + nlen].to_vec())
-            .map_err(|e| Error::PageCorrupted(e.to_string()))?;
-        pos += nlen;
-        let plen = u16::from_le_bytes(buf[pos..pos + 2].try_into().unwrap()) as usize;
-        pos += 2;
-        if pos + plen > buf.len() {
-            return Err(Error::PageCorrupted(
-                "Truncated CollectionIndexMeta field_path".to_string(),
-            ));
-        }
-        let field_path = String::from_utf8(buf[pos..pos + plen].to_vec())
-            .map_err(|e| Error::PageCorrupted(e.to_string()))?;
-        Ok(CollectionIndexMeta {
-            index_id,
-            collection_id,
-            name,
-            field_path,
-            root_page_id,
-            unique,
-        })
-    }
-}
-
 struct CatalogState {
     next_table_id: u32,
     next_index_id: u32,
-    next_collection_id: u32,
-    next_coll_index_id: u32,
     next_sys_txn_id: TxnId,
     schemas: HashMap<u32, TableSchema>,
     table_names: HashMap<String, u32>,
     indexes: HashMap<u32, IndexMetadata>,
     table_trees: HashMap<u32, Arc<BPlusTree>>,
     index_trees: HashMap<u32, Arc<BPlusTree>>,
-    collections: HashMap<u32, CollectionSchema>,
-    collection_names: HashMap<String, u32>,
-    collection_trees: HashMap<u32, Arc<BPlusTree>>,
-    collection_indexes: HashMap<u32, Vec<CollectionIndexMeta>>,
-    collection_index_trees: HashMap<u32, Arc<BPlusTree>>,
     catalog_tree: Option<Arc<BPlusTree>>,
 }
 
@@ -348,19 +233,12 @@ impl Catalog {
             state: RwLock::new(CatalogState {
                 next_table_id: 1,
                 next_index_id: 1,
-                next_collection_id: 1,
-                next_coll_index_id: 1,
                 next_sys_txn_id: 1_000_000_000,
                 schemas: HashMap::new(),
                 table_names: HashMap::new(),
                 indexes: HashMap::new(),
                 table_trees: HashMap::new(),
                 index_trees: HashMap::new(),
-                collections: HashMap::new(),
-                collection_names: HashMap::new(),
-                collection_trees: HashMap::new(),
-                collection_indexes: HashMap::new(),
-                collection_index_trees: HashMap::new(),
                 catalog_tree: None,
             }),
             bpm: None,
@@ -381,19 +259,12 @@ impl Catalog {
         let mut state = CatalogState {
             next_table_id: 1,
             next_index_id: 1,
-            next_collection_id: 1,
-            next_coll_index_id: 1,
             next_sys_txn_id: initial_sys_tid,
             schemas: HashMap::new(),
             table_names: HashMap::new(),
             indexes: HashMap::new(),
             table_trees: HashMap::new(),
             index_trees: HashMap::new(),
-            collections: HashMap::new(),
-            collection_names: HashMap::new(),
-            collection_trees: HashMap::new(),
-            collection_indexes: HashMap::new(),
-            collection_index_trees: HashMap::new(),
             catalog_tree: None,
         };
 
@@ -440,48 +311,6 @@ impl Catalog {
                                     state.index_trees.insert(meta.index_id, Arc::new(tree));
                                 }
                                 state.indexes.insert(meta.index_id, meta);
-                            } else if k.starts_with(b"col:")
-                                && let Ok(mut schema) = CollectionSchema::deserialize(&v)
-                            {
-                                if schema.collection_id >= state.next_collection_id {
-                                    state.next_collection_id = schema.collection_id + 1;
-                                }
-                                schema.root_page_id =
-                                    Self::resolve_root_page(&bpm, schema.root_page_id);
-                                if let Ok(tree) = BPlusTree::open(
-                                    bpm.clone(),
-                                    wal.clone(),
-                                    schema.root_page_id,
-                                    DEFAULT_BTREE_MAX_KEYS,
-                                ) {
-                                    state
-                                        .collection_trees
-                                        .insert(schema.collection_id, Arc::new(tree));
-                                }
-                                state
-                                    .collection_names
-                                    .insert(schema.name.clone(), schema.collection_id);
-                                state.collections.insert(schema.collection_id, schema);
-                            } else if k.starts_with(b"cidx:")
-                                && let Ok(mut meta) = CollectionIndexMeta::deserialize(&v)
-                            {
-                                if meta.index_id >= state.next_coll_index_id {
-                                    state.next_coll_index_id = meta.index_id + 1;
-                                }
-                                meta.root_page_id =
-                                    Self::resolve_root_page(&bpm, meta.root_page_id);
-                                if let Ok(tree) =
-                                    BPlusTree::open(bpm.clone(), wal.clone(), meta.root_page_id, DEFAULT_BTREE_MAX_KEYS)
-                                {
-                                    state
-                                        .collection_index_trees
-                                        .insert(meta.index_id, Arc::new(tree));
-                                }
-                                state
-                                    .collection_indexes
-                                    .entry(meta.collection_id)
-                                    .or_default()
-                                    .push(meta);
                             }
                         }
                     }
@@ -1162,32 +991,8 @@ impl Catalog {
             }
         }
 
-        let mut updated_collections = Vec::new();
-        for (&cid, tree) in &state.collection_trees {
-            let current_root = tree.root_page_id();
-            if let Some(schema) = state.collections.get(&cid)
-                && schema.root_page_id != current_root
-            {
-                updated_collections.push((cid, current_root));
-            }
-        }
-
-        let mut updated_cindexes = Vec::new();
-        for (&ciid, tree) in &state.collection_index_trees {
-            let current_root = tree.root_page_id();
-            for metas in state.collection_indexes.values() {
-                if let Some(meta) = metas.iter().find(|m| m.index_id == ciid)
-                    && meta.root_page_id != current_root
-                {
-                    updated_cindexes.push((ciid, meta.collection_id, current_root));
-                }
-            }
-        }
-
         if updated_tables.is_empty()
             && updated_indexes.is_empty()
-            && updated_collections.is_empty()
-            && updated_cindexes.is_empty()
         {
             return Ok(());
         }
@@ -1226,40 +1031,6 @@ impl Catalog {
                 }
             }
 
-            for &(cid, new_root) in &updated_collections {
-                if let Some(schema) = state.collections.get(&cid) {
-                    let mut updated = schema.clone();
-                    updated.root_page_id = new_root;
-                    if let Some(ref cat_tree) = state.catalog_tree {
-                        let key = format!("col:{:08}", cid);
-                        cat_tree.insert_logged(
-                            sys_tid,
-                            &mut prev_lsn,
-                            key.as_bytes(),
-                            &updated.serialize(),
-                        )?;
-                    }
-                }
-            }
-
-            for &(ciid, cid, new_root) in &updated_cindexes {
-                if let Some(metas) = state.collection_indexes.get(&cid)
-                    && let Some(meta) = metas.iter().find(|m| m.index_id == ciid)
-                {
-                    let mut updated = meta.clone();
-                    updated.root_page_id = new_root;
-                    if let Some(ref cat_tree) = state.catalog_tree {
-                        let key = format!("cidx:{:08}", ciid);
-                        cat_tree.insert_logged(
-                            sys_tid,
-                            &mut prev_lsn,
-                            key.as_bytes(),
-                            &updated.serialize(),
-                        )?;
-                    }
-                }
-            }
-
             self.finish_sys_txn(sys_tid, prev_lsn)?;
             Ok(())
         })();
@@ -1273,18 +1044,6 @@ impl Catalog {
                 }
                 for (iid, new_root) in updated_indexes {
                     if let Some(meta) = state.indexes.get_mut(&iid) {
-                        meta.root_page_id = new_root;
-                    }
-                }
-                for (cid, new_root) in updated_collections {
-                    if let Some(schema) = state.collections.get_mut(&cid) {
-                        schema.root_page_id = new_root;
-                    }
-                }
-                for (ciid, cid, new_root) in updated_cindexes {
-                    if let Some(metas) = state.collection_indexes.get_mut(&cid)
-                        && let Some(meta) = metas.iter_mut().find(|m| m.index_id == ciid)
-                    {
                         meta.root_page_id = new_root;
                     }
                 }
@@ -1317,391 +1076,6 @@ impl Catalog {
         state.index_trees.get(&index_id).cloned()
     }
 
-    pub fn create_collection(&self, name: &str) -> Result<u32> {
-        let mut state = self.state.write().unwrap();
-        if state.collection_names.contains_key(name) {
-            return Err(Error::TransactionError(format!(
-                "Collection '{}' already exists",
-                name
-            )));
-        }
-
-        let collection_id = state.next_collection_id;
-        let (sys_tid, mut prev_lsn) = self.begin_sys_txn(&mut state)?;
-
-        let op_res: Result<(Option<Arc<BPlusTree>>, CollectionSchema)> = (|| {
-            let (root_page_id, tree_opt) = if let Some(ref bpm) = self.bpm {
-                let tree = Arc::new(BPlusTree::create_logged(
-                    bpm.clone(),
-                    self.wal.clone(),
-                    DEFAULT_BTREE_MAX_KEYS,
-                    sys_tid,
-                    &mut prev_lsn,
-                )?);
-                (tree.root_page_id(), Some(tree))
-            } else {
-                (INVALID_PAGE_ID, None)
-            };
-
-            let schema = CollectionSchema {
-                collection_id,
-                name: name.to_string(),
-                root_page_id,
-            };
-
-            if let Some(ref cat_tree) = state.catalog_tree {
-                let key = format!("col:{:08}", collection_id);
-                cat_tree.insert_logged(
-                    sys_tid,
-                    &mut prev_lsn,
-                    key.as_bytes(),
-                    &schema.serialize(),
-                )?;
-            }
-
-            self.finish_sys_txn(sys_tid, prev_lsn)?;
-            Ok((tree_opt, schema))
-        })();
-
-        match op_res {
-            Ok((tree_opt, schema)) => {
-                state.next_collection_id = collection_id + 1;
-                state
-                    .collection_names
-                    .insert(name.to_string(), collection_id);
-                state.collections.insert(collection_id, schema);
-                if let Some(tree) = tree_opt {
-                    state.collection_trees.insert(collection_id, tree);
-                }
-                Ok(collection_id)
-            }
-            Err(e) => {
-                self.abort_sys_txn(&state, sys_tid, prev_lsn);
-                Err(e)
-            }
-        }
-    }
-
-    pub fn drop_collection(&self, name: &str) -> Result<bool> {
-        let mut state = self.state.write().unwrap();
-        if let Some(&collection_id) = state.collection_names.get(name) {
-            let (sys_tid, mut prev_lsn) = self.begin_sys_txn(&mut state)?;
-            let coll_tree = state.collection_trees.get(&collection_id).cloned();
-            let cindexes = state
-                .collection_indexes
-                .get(&collection_id)
-                .cloned()
-                .unwrap_or_default();
-            let dropped_cidx_trees: Vec<Arc<BPlusTree>> = cindexes
-                .iter()
-                .filter_map(|cidx| state.collection_index_trees.get(&cidx.index_id).cloned())
-                .collect();
-
-            let op_res: Result<()> = (|| {
-                if let Some(ref cat_tree) = state.catalog_tree {
-                    let key = format!("col:{:08}", collection_id);
-                    let _ = cat_tree.delete_logged(sys_tid, &mut prev_lsn, key.as_bytes())?;
-                    for cidx in &cindexes {
-                        let ckey = format!("cidx:{:08}", cidx.index_id);
-                        let _ = cat_tree.delete_logged(sys_tid, &mut prev_lsn, ckey.as_bytes())?;
-                    }
-                }
-                if let Some(ref tree) = coll_tree {
-                    tree.free_all_pages_logged(sys_tid, &mut prev_lsn)?;
-                }
-                for citree in &dropped_cidx_trees {
-                    citree.free_all_pages_logged(sys_tid, &mut prev_lsn)?;
-                }
-                self.finish_sys_txn(sys_tid, prev_lsn)?;
-                Ok(())
-            })();
-
-            match op_res {
-                Ok(()) => {
-                    state.collection_names.remove(name);
-                    state.collections.remove(&collection_id);
-                    state.collection_trees.remove(&collection_id);
-                    if let Some(removed_cidxs) = state.collection_indexes.remove(&collection_id) {
-                        for cidx in removed_cidxs {
-                            state.collection_index_trees.remove(&cidx.index_id);
-                        }
-                    }
-                    drop(state);
-                    let _ = self.sync_roots();
-                    Ok(true)
-                }
-                Err(e) => {
-                    self.abort_sys_txn(&state, sys_tid, prev_lsn);
-                    Err(e)
-                }
-            }
-        } else {
-            Err(Error::TransactionError(format!(
-                "Collection '{}' does not exist",
-                name
-            )))
-        }
-    }
-
-    pub fn get_collection_id(&self, name: &str) -> Result<Option<u32>> {
-        let state = self.state.read().unwrap();
-        Ok(state.collection_names.get(name).copied())
-    }
-
-    pub fn get_collection_schema(&self, name: &str) -> Result<Option<CollectionSchema>> {
-        let state = self.state.read().unwrap();
-        if let Some(&id) = state.collection_names.get(name) {
-            Ok(state.collections.get(&id).cloned())
-        } else {
-            Ok(None)
-        }
-    }
-
-    pub fn get_collection_schema_by_id(
-        &self,
-        collection_id: u32,
-    ) -> Result<Option<CollectionSchema>> {
-        let state = self.state.read().unwrap();
-        Ok(state.collections.get(&collection_id).cloned())
-    }
-
-    pub fn list_collections(&self) -> Vec<CollectionSchema> {
-        let state = self.state.read().unwrap();
-        let mut cols: Vec<CollectionSchema> = state.collections.values().cloned().collect();
-        cols.sort_by(|a, b| a.name.cmp(&b.name));
-        cols
-    }
-
-    pub fn collection_tree(&self, collection_id: u32) -> Option<Arc<BPlusTree>> {
-        let state = self.state.read().unwrap();
-        state.collection_trees.get(&collection_id).cloned()
-    }
-
-    pub fn create_collection_index(
-        &self,
-        collection_name: &str,
-        index_name: &str,
-        field_path: &str,
-        unique: bool,
-    ) -> Result<u32> {
-        let mut state = self.state.write().unwrap();
-        let &collection_id = state.collection_names.get(collection_name).ok_or_else(|| {
-            Error::TransactionError(format!("Collection '{}' does not exist", collection_name))
-        })?;
-
-        if let Some(list) = state.collection_indexes.get(&collection_id)
-            && list.iter().any(|idx| idx.name == index_name)
-        {
-            return Err(Error::TransactionError(format!(
-                "Index '{}' already exists on collection '{}'",
-                index_name, collection_name
-            )));
-        }
-
-        let index_id = state.next_coll_index_id;
-        let (sys_tid, mut prev_lsn) = self.begin_sys_txn(&mut state)?;
-
-        let op_res: Result<(Option<Arc<BPlusTree>>, CollectionIndexMeta)> = (|| {
-            let (root_page_id, tree_opt) = if let Some(ref bpm) = self.bpm {
-                let tree = Arc::new(BPlusTree::create_logged(
-                    bpm.clone(),
-                    self.wal.clone(),
-                    DEFAULT_BTREE_MAX_KEYS,
-                    sys_tid,
-                    &mut prev_lsn,
-                )?);
-                (tree.root_page_id(), Some(tree))
-            } else {
-                (INVALID_PAGE_ID, None)
-            };
-
-            let meta = CollectionIndexMeta {
-                index_id,
-                collection_id,
-                name: index_name.to_string(),
-                field_path: field_path.to_string(),
-                root_page_id,
-                unique,
-            };
-
-            if let Some(ref cat_tree) = state.catalog_tree {
-                let key = format!("cidx:{:08}", index_id);
-                cat_tree.insert_logged(
-                    sys_tid,
-                    &mut prev_lsn,
-                    key.as_bytes(),
-                    &meta.serialize(),
-                )?;
-            }
-
-            self.finish_sys_txn(sys_tid, prev_lsn)?;
-            Ok((tree_opt, meta))
-        })();
-
-        match op_res {
-            Ok((tree_opt, meta)) => {
-                state.next_coll_index_id = index_id + 1;
-                state
-                    .collection_indexes
-                    .entry(collection_id)
-                    .or_default()
-                    .push(meta);
-                if let Some(tree) = tree_opt {
-                    state.collection_index_trees.insert(index_id, tree);
-                }
-                Ok(index_id)
-            }
-            Err(e) => {
-                self.abort_sys_txn(&state, sys_tid, prev_lsn);
-                Err(e)
-            }
-        }
-    }
-
-    pub fn populate_collection_index_entries(
-        &self,
-        collection_id: u32,
-        index_id: u32,
-        entries: &[(Vec<u8>, Vec<u8>)],
-    ) -> Result<()> {
-        if entries.is_empty() {
-            return Ok(());
-        }
-        let mut state = self.state.write().unwrap();
-        let idx_tree = state
-            .collection_index_trees
-            .get(&index_id)
-            .cloned()
-            .ok_or_else(|| {
-                Error::TransactionError(format!(
-                    "Collection index B+Tree {} not initialized",
-                    index_id
-                ))
-            })?;
-        let orig_root = idx_tree.root_page_id();
-        let (sys_tid, mut prev_lsn) = self.begin_sys_txn(&mut state)?;
-        let op_res: Result<PageId> = (|| {
-            for (k, v) in entries {
-                idx_tree.insert_logged(sys_tid, &mut prev_lsn, k, v)?;
-            }
-            let new_root = idx_tree.root_page_id();
-            if let Some(metas) = state.collection_indexes.get(&collection_id)
-                && let Some(meta) = metas.iter().find(|m| m.index_id == index_id)
-                && meta.root_page_id != new_root
-            {
-                let mut updated = meta.clone();
-                updated.root_page_id = new_root;
-                if let Some(ref cat_tree) = state.catalog_tree {
-                    let key = format!("cidx:{:08}", index_id);
-                    cat_tree.insert_logged(
-                        sys_tid,
-                        &mut prev_lsn,
-                        key.as_bytes(),
-                        &updated.serialize(),
-                    )?;
-                }
-            }
-            self.finish_sys_txn(sys_tid, prev_lsn)?;
-            Ok(new_root)
-        })();
-
-        match op_res {
-            Ok(new_root) => {
-                if let Some(metas) = state.collection_indexes.get_mut(&collection_id)
-                    && let Some(meta) = metas.iter_mut().find(|m| m.index_id == index_id)
-                {
-                    meta.root_page_id = new_root;
-                }
-                Ok(())
-            }
-            Err(e) => {
-                self.abort_sys_txn(&state, sys_tid, prev_lsn);
-                idx_tree.set_root_page_id(orig_root);
-                Err(e)
-            }
-        }
-    }
-
-    pub fn get_collection_indexes(&self, collection_id: u32) -> Vec<CollectionIndexMeta> {
-        let state = self.state.read().unwrap();
-        state
-            .collection_indexes
-            .get(&collection_id)
-            .cloned()
-            .unwrap_or_default()
-    }
-
-    pub fn collection_index_tree(&self, index_id: u32) -> Option<Arc<BPlusTree>> {
-        let state = self.state.read().unwrap();
-        state.collection_index_trees.get(&index_id).cloned()
-    }
-
-    pub fn get_collection_index_by_name(
-        &self,
-        collection_name: &str,
-        index_name: &str,
-    ) -> Result<Option<CollectionIndexMeta>> {
-        let state = self.state.read().unwrap();
-        let collection_id = match state.collection_names.get(collection_name) {
-            Some(&id) => id,
-            None => return Ok(None),
-        };
-        if let Some(indexes) = state.collection_indexes.get(&collection_id) {
-            Ok(indexes.iter().find(|i| i.name == index_name).cloned())
-        } else {
-            Ok(None)
-        }
-    }
-
-    pub fn drop_collection_index(&self, collection_name: &str, index_name: &str) -> Result<bool> {
-        let mut state = self.state.write().unwrap();
-        let collection_id = *state.collection_names.get(collection_name).ok_or_else(|| {
-            Error::TransactionError(format!("Collection '{}' does not exist", collection_name))
-        })?;
-
-        let index_pos = state
-            .collection_indexes
-            .get(&collection_id)
-            .and_then(|list| list.iter().position(|idx| idx.name == index_name));
-
-        if let Some(pos) = index_pos {
-            let meta = state.collection_indexes.get(&collection_id).unwrap()[pos].clone();
-            let (sys_tid, mut prev_lsn) = self.begin_sys_txn(&mut state)?;
-            let citree = state.collection_index_trees.get(&meta.index_id).cloned();
-            let op_res: Result<()> = (|| {
-                if let Some(ref cat_tree) = state.catalog_tree {
-                    let key = format!("cidx:{:08}", meta.index_id);
-                    let _ = cat_tree.delete_logged(sys_tid, &mut prev_lsn, key.as_bytes())?;
-                }
-                if let Some(ref tree) = citree {
-                    tree.free_all_pages_logged(sys_tid, &mut prev_lsn)?;
-                }
-                self.finish_sys_txn(sys_tid, prev_lsn)?;
-                Ok(())
-            })();
-
-            match op_res {
-                Ok(()) => {
-                    if let Some(list) = state.collection_indexes.get_mut(&collection_id) {
-                        list.remove(pos);
-                    }
-                    state.collection_index_trees.remove(&meta.index_id);
-                    drop(state);
-                    let _ = self.sync_roots();
-                    Ok(true)
-                }
-                Err(e) => {
-                    self.abort_sys_txn(&state, sys_tid, prev_lsn);
-                    Err(e)
-                }
-            }
-        } else {
-            Err(Error::TransactionError(format!(
-                "Index '{}' does not exist on collection '{}'",
-                index_name, collection_name
-            )))
-        }
-    }
 }
 
 impl Default for Catalog {
