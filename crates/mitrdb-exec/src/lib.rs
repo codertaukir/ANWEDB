@@ -11,6 +11,11 @@ use mitrdb_query::{
 use mitrdb_txn::{IsolationLevel, KeyRange, TxnManager};
 
 const MULTI_PK_TAG: u8 = 0xFF;
+/// Index head value whose PK list continues in overflow keys: [tag][n_overflow u16 LE][first chunk].
+const CHUNKED_PK_TAG: u8 = 0xFD;
+/// Overflow key prefix: [tag] + head_key + [chunk_no u16 BE]. Real key tags are 0..=4.
+const OVERFLOW_KEY_TAG: u8 = 0xFE;
+const IDX_CHUNK_BUDGET: usize = 2048;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExecutionResult {
@@ -516,6 +521,142 @@ impl Executor {
         }
     }
 
+    fn idx_overflow_key(head: &[u8], n: u16) -> Vec<u8> {
+        let mut k = Vec::with_capacity(head.len() + 3);
+        k.push(OVERFLOW_KEY_TAG);
+        k.extend_from_slice(head);
+        k.extend_from_slice(&n.to_be_bytes());
+        k
+    }
+
+    fn idx_split_chunks(key_len: usize, pks: &[Vec<u8>]) -> Vec<(usize, usize)> {
+        let budget = IDX_CHUNK_BUDGET.saturating_sub(key_len + 64).max(256);
+        let mut out = Vec::new();
+        let mut start = 0usize;
+        let mut size = 3usize;
+        for (i, pk) in pks.iter().enumerate() {
+            let add = 2 + pk.len();
+            if i > start && size + add > budget {
+                out.push((start, i));
+                start = i;
+                size = 3;
+            }
+            size += add;
+        }
+        if start < pks.len() {
+            out.push((start, pks.len()));
+        }
+        out
+    }
+
+    /// Entries (head first, then overflow chunks) for one index key.
+    fn idx_encode_entries(key: &[u8], pks: &[Vec<u8>]) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        let chunks = Self::idx_split_chunks(key.len(), pks);
+        if chunks.len() <= 1 {
+            return Ok(vec![(key.to_vec(), Self::encode_index_pks(pks))]);
+        }
+        if chunks.len() - 1 > u16::MAX as usize {
+            return Err(Error::OutOfSpace);
+        }
+        let mut out = Vec::with_capacity(chunks.len());
+        let (s0, e0) = chunks[0];
+        let mut head = vec![CHUNKED_PK_TAG];
+        head.extend_from_slice(&((chunks.len() - 1) as u16).to_le_bytes());
+        head.extend_from_slice(&Self::encode_index_pks(&pks[s0..e0]));
+        out.push((key.to_vec(), head));
+        for (i, &(s, e)) in chunks.iter().enumerate().skip(1) {
+            out.push((
+                Self::idx_overflow_key(key, i as u16),
+                Self::encode_index_pks(&pks[s..e]),
+            ));
+        }
+        Ok(out)
+    }
+
+    /// Decodes a head value (plain, multi, or chunked). `raw` collects the stored
+    /// values (head first, then overflow chunks) when the caller wants to rewrite.
+    fn idx_decode_entry(
+        txn_mgr: &TxnManager,
+        txn_id: TxnId,
+        tree: &Arc<mitrdb_txn::BPlusTree>,
+        key: &[u8],
+        head: &[u8],
+        mut raw: Option<&mut Vec<Vec<u8>>>,
+    ) -> Result<Vec<Vec<u8>>> {
+        if head.first() != Some(&CHUNKED_PK_TAG) {
+            if let Some(r) = raw.as_deref_mut() {
+                r.push(head.to_vec());
+            }
+            return Self::decode_index_pks(head);
+        }
+        if head.len() < 3 {
+            return Err(Error::PageCorrupted(
+                "Truncated chunked index entry".to_string(),
+            ));
+        }
+        let n = u16::from_le_bytes([head[1], head[2]]);
+        let mut pks = Self::decode_index_pks(&head[3..])?;
+        if let Some(r) = raw.as_deref_mut() {
+            r.push(head.to_vec());
+        }
+        for i in 1..=n {
+            let okey = Self::idx_overflow_key(key, i);
+            let v = txn_mgr.get(txn_id, tree, &okey)?.ok_or_else(|| {
+                Error::PageCorrupted("Missing index overflow chunk".to_string())
+            })?;
+            pks.extend(Self::decode_index_pks(&v)?);
+            if let Some(r) = raw.as_deref_mut() {
+                r.push(v);
+            }
+        }
+        Ok(pks)
+    }
+
+    /// (all PKs, stored raw values) for an index key; both empty if the key is absent.
+    fn idx_read_all(
+        txn_mgr: &TxnManager,
+        txn_id: TxnId,
+        tree: &Arc<mitrdb_txn::BPlusTree>,
+        key: &[u8],
+    ) -> Result<(Vec<Vec<u8>>, Vec<Vec<u8>>)> {
+        let mut raw = Vec::new();
+        match txn_mgr.get(txn_id, tree, key)? {
+            None => Ok((Vec::new(), raw)),
+            Some(head) => {
+                let pks = Self::idx_decode_entry(txn_mgr, txn_id, tree, key, &head, Some(&mut raw))?;
+                Ok((pks, raw))
+            }
+        }
+    }
+
+    /// Writes only the chunks that changed; removes leftover overflow chunks.
+    /// Empty `pks` deletes the whole entry.
+    fn idx_write_all(
+        txn_mgr: &TxnManager,
+        txn_id: TxnId,
+        tree: &Arc<mitrdb_txn::BPlusTree>,
+        key: &[u8],
+        pks: &[Vec<u8>],
+        old_raw: &[Vec<u8>],
+    ) -> Result<()> {
+        let new_len = if pks.is_empty() {
+            let _ = txn_mgr.delete(txn_id, tree, key)?;
+            1
+        } else {
+            let entries = Self::idx_encode_entries(key, pks)?;
+            for (i, (k, v)) in entries.iter().enumerate() {
+                if old_raw.get(i) != Some(v) {
+                    txn_mgr.put(txn_id, tree, k, v)?;
+                }
+            }
+            entries.len()
+        };
+        for i in new_len..old_raw.len() {
+            let _ = txn_mgr.delete(txn_id, tree, &Self::idx_overflow_key(key, i as u16))?;
+        }
+        Ok(())
+    }
+
     fn encode_index_pks(pks: &[Vec<u8>]) -> Vec<u8> {
         if pks.len() == 1 {
             return pks[0].clone();
@@ -715,7 +856,7 @@ impl Executor {
                             }
                         }
                         for (k, pks) in key_map {
-                            staged_entries.push((k, Self::encode_index_pks(&pks)));
+                            staged_entries.extend(Self::idx_encode_entries(&k, &pks)?);
                         }
                     }
                 }
@@ -1878,11 +2019,7 @@ impl Executor {
 
         let mut encoded_idx_writes = Vec::with_capacity(idx_writes.len());
         for (idx_meta, idx_tree, idx_key) in &idx_writes {
-            let mut pks = if let Some(existing_bytes) = txn_mgr.get(txn_id, idx_tree, idx_key)? {
-                Self::decode_index_pks(&existing_bytes)?
-            } else {
-                Vec::new()
-            };
+            let (mut pks, old_raw) = Self::idx_read_all(txn_mgr, txn_id, idx_tree, idx_key)?;
             if idx_meta.unique
                 && pks.iter().any(|existing_pk| existing_pk != &pk_bytes)
                 && !schema
@@ -1900,11 +2037,11 @@ impl Executor {
                 pks.push(pk_bytes.clone());
                 pks.sort();
             }
-            encoded_idx_writes.push((idx_tree, idx_key, Self::encode_index_pks(&pks)));
+            encoded_idx_writes.push((idx_tree, idx_key, pks, old_raw));
         }
 
-        for (idx_tree, idx_key, encoded_pks) in encoded_idx_writes {
-            txn_mgr.put(txn_id, idx_tree, idx_key, &encoded_pks)?;
+        for (idx_tree, idx_key, pks, old_raw) in encoded_idx_writes {
+            Self::idx_write_all(txn_mgr, txn_id, idx_tree, idx_key, &pks, &old_raw)?;
         }
 
         txn_mgr.put(txn_id, &tree, &pk_bytes, &row_bytes)?;
@@ -2050,8 +2187,8 @@ impl Executor {
                             idx_meta.name
                         )));
                     }
-                    if let Some(existing_bytes) = txn_mgr.get(txn_id, idx_tree, &new_idx_key)? {
-                        let existing_pks = Self::decode_index_pks(&existing_bytes)?;
+                    {
+                        let (existing_pks, _) = Self::idx_read_all(txn_mgr, txn_id, idx_tree, &new_idx_key)?;
                         if existing_pks.iter().any(|existing_pk| {
                             existing_pk != old_pk_bytes && !updating_old_pks.contains(existing_pk)
                         }) {
@@ -2072,20 +2209,11 @@ impl Executor {
             for (_, col_pos, idx_tree) in &idx_trees {
                 let old_idx_key = old_tuple[*col_pos].to_key_bytes();
                 let new_idx_key = new_tuple[*col_pos].to_key_bytes();
-                if (old_idx_key != new_idx_key || old_pk_bytes != new_pk_bytes)
-                    && let Some(existing_bytes) = txn_mgr.get(txn_id, idx_tree, &old_idx_key)?
-                {
-                    let mut pks = Self::decode_index_pks(&existing_bytes)?;
-                    pks.retain(|pk| pk != old_pk_bytes);
-                    if pks.is_empty() {
-                        let _ = txn_mgr.delete(txn_id, idx_tree, &old_idx_key)?;
-                    } else {
-                        txn_mgr.put(
-                            txn_id,
-                            idx_tree,
-                            &old_idx_key,
-                            &Self::encode_index_pks(&pks),
-                        )?;
+                if old_idx_key != new_idx_key || old_pk_bytes != new_pk_bytes {
+                    let (mut pks, old_raw) = Self::idx_read_all(txn_mgr, txn_id, idx_tree, &old_idx_key)?;
+                    if !pks.is_empty() {
+                        pks.retain(|pk| pk != old_pk_bytes);
+                        Self::idx_write_all(txn_mgr, txn_id, idx_tree, &old_idx_key, &pks, &old_raw)?;
                     }
                 }
             }
@@ -2100,23 +2228,12 @@ impl Executor {
                 let old_idx_key = old_tuple[*col_pos].to_key_bytes();
                 let new_idx_key = new_tuple[*col_pos].to_key_bytes();
                 if old_idx_key != new_idx_key || old_pk_bytes != new_pk_bytes {
-                    let mut pks = if let Some(existing_bytes) =
-                        txn_mgr.get(txn_id, idx_tree, &new_idx_key)?
-                    {
-                        Self::decode_index_pks(&existing_bytes)?
-                    } else {
-                        Vec::new()
-                    };
+                    let (mut pks, old_raw) = Self::idx_read_all(txn_mgr, txn_id, idx_tree, &new_idx_key)?;
                     if !pks.contains(new_pk_bytes) {
                         pks.push(new_pk_bytes.clone());
                         pks.sort();
                     }
-                    txn_mgr.put(
-                        txn_id,
-                        idx_tree,
-                        &new_idx_key,
-                        &Self::encode_index_pks(&pks),
-                    )?;
+                    Self::idx_write_all(txn_mgr, txn_id, idx_tree, &new_idx_key, &pks, &old_raw)?;
                 }
             }
 
@@ -2294,8 +2411,11 @@ impl Executor {
 
         for range in ranges {
             let idx_entries = txn_mgr.range_scan(txn_id, &idx_tree, range)?;
-            for (_idx_key, encoded_pks) in idx_entries {
-                let pks = Self::decode_index_pks(&encoded_pks)?;
+            for (idx_key, encoded_pks) in idx_entries {
+                if idx_key.first() == Some(&OVERFLOW_KEY_TAG) {
+                    continue;
+                }
+                let pks = Self::idx_decode_entry(txn_mgr, txn_id, &idx_tree, &idx_key, &encoded_pks, None)?;
                 for pk_bytes in pks {
                     if !seen_pks.insert(pk_bytes.clone()) {
                         continue;
@@ -2408,8 +2528,11 @@ impl Executor {
 
         'range_loop: for range in ordered_ranges {
             let idx_entries = txn_mgr.range_scan_directed(txn_id, &idx_tree, range, descending)?;
-            for (_idx_key, encoded_pks) in idx_entries {
-                let mut pks = Self::decode_index_pks(&encoded_pks)?;
+            for (idx_key, encoded_pks) in idx_entries {
+                if idx_key.first() == Some(&OVERFLOW_KEY_TAG) {
+                    continue;
+                }
+                let mut pks = Self::idx_decode_entry(txn_mgr, txn_id, &idx_tree, &idx_key, &encoded_pks, None)?;
                 if pk_descending {
                     pks.reverse();
                 }
@@ -2619,19 +2742,10 @@ impl Executor {
             if txn_mgr.delete(txn_id, &tree, &pk_bytes)? {
                 for (col_pos, idx_tree) in &idx_trees {
                     let idx_key = tuple[*col_pos].to_key_bytes();
-                    if let Some(existing_bytes) = txn_mgr.get(txn_id, idx_tree, &idx_key)? {
-                        let mut pks = Self::decode_index_pks(&existing_bytes)?;
+                    let (mut pks, old_raw) = Self::idx_read_all(txn_mgr, txn_id, idx_tree, &idx_key)?;
+                    if !pks.is_empty() {
                         pks.retain(|pk| pk != &pk_bytes);
-                        if pks.is_empty() {
-                            let _ = txn_mgr.delete(txn_id, idx_tree, &idx_key)?;
-                        } else {
-                            txn_mgr.put(
-                                txn_id,
-                                idx_tree,
-                                &idx_key,
-                                &Self::encode_index_pks(&pks),
-                            )?;
-                        }
+                        Self::idx_write_all(txn_mgr, txn_id, idx_tree, &idx_key, &pks, &old_raw)?;
                     }
                 }
                 deleted += 1;

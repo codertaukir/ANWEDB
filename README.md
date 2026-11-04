@@ -164,7 +164,8 @@ Know these before you use MITRDB.
 **SQL**
 - `CREATE TABLE IF NOT EXISTS` and `CREATE [UNIQUE] INDEX IF NOT EXISTS` do nothing (0 rows affected) when the name already exists. The old table or index is not changed.
 - `JOIN`, `INNER JOIN`, `LEFT JOIN` work (basic, tested on small data; not performance-tested).
-- Not supported yet: `DEFAULT`, `$n` parameters, composite indexes.
+- Not supported yet: `DEFAULT`, composite indexes, `LIMIT $n` / `OFFSET $n`.
+- One index value can match many rows (tested with thousands): the row list is stored in chunks. Updating or deleting one row of a very large group rewrites part of that group's list, so it gets slower as the group grows (not measured).
 - `ALTER TABLE t DROP [COLUMN] c` (and `table.drop_column("c")`) is a **logical drop**: the column is renamed internally to `__dropped_<pos>` and hidden from `SELECT *`, rows are not rewritten, so the data stays on disk and no space is reclaimed. You cannot drop a primary key column, an indexed column, or the last live column. Column names that start with `__dropped_` are reserved and rejected.
 - `INSERT` can write many rows: `INSERT INTO t VALUES (1,'a'), (2,'b')` (up to 1000 rows). With auto-commit it is all or nothing. Inside an explicit transaction, rows before a failing row stay in that transaction. `INSERT INTO t (b, a) VALUES (...)` also works; columns you leave out become NULL.
 - `UPDATE ... SET col = col + N` and `col = col - N` work on `INT` columns (`N` is a whole number). `NULL` stays `NULL`, overflow gives an error and changes nothing. Other expressions (for example `a = b + 1`, `col * 2`) are not supported.
@@ -215,7 +216,7 @@ machines and between runs, so treat them as indicative only.
 
 - [ ] Faster inserts: in-place leaf updates with smaller WAL records
 - [ ] Reduce per-row lock bookkeeping
-- [ ] Non-unique indexes in `sync()` / `define_table`
+- [x] Non-unique indexes in `sync()` / `define_table`
 - [ ] Prepared statements and `$n` parameter binding
 - [ ] Space reclaim for dropped columns (table rewrite)
 - [ ] Containerized, Kubernetes-friendly deployment (StatefulSet with persistent volumes)
