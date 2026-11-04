@@ -1,3 +1,7 @@
+// MITRDB is Linux-only (O_DIRECT/fsync/permission semantics are Linux-specific).
+#[cfg(not(target_os = "linux"))]
+compile_error!("MITRDB supports Linux only. Build on a Linux target.");
+
 pub mod backup;
 pub mod btree;
 pub mod buffer_pool;
