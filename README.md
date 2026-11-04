@@ -159,6 +159,7 @@ Know these before you use MITRDB.
 - `UPDATE ... SET col = col + N` and `col = col - N` work on `INT` columns (`N` is a whole number). `NULL` stays `NULL`, overflow gives an error and changes nothing. Other expressions (for example `a = b + 1`, `col * 2`) are not supported.
 - `sync()` creates tables and adds nullable columns without losing data. It does not remove columns or change types. If you remove `unique` from a column, `sync()` drops that unique index (rows are kept, but duplicates are allowed from then on).
 - `WHERE` nesting depth is limited to 128.
+- DDL (`CREATE`/`DROP`/`ALTER`) is not transactional: it takes effect at once and cannot be rolled back, so it is rejected inside `BEGIN ... COMMIT`.
 
 **Network**
 - One frame is at most 1 MB.

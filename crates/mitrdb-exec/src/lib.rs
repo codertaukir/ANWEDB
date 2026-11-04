@@ -570,6 +570,23 @@ impl Executor {
         active_txn: &mut Option<TxnId>,
         default_isolation: IsolationLevel,
     ) -> Result<ExecutionResult> {
+        if active_txn.is_some()
+            && matches!(
+                plan,
+                PhysicalPlan::CreateTable { .. }
+                    | PhysicalPlan::DropTable { .. }
+                    | PhysicalPlan::CreateIndex { .. }
+                    | PhysicalPlan::DropIndex { .. }
+                    | PhysicalPlan::AlterTableAddColumn { .. }
+                    | PhysicalPlan::AlterTableRenameColumn { .. }
+                    | PhysicalPlan::AlterTableDropColumn { .. }
+            )
+        {
+            return Err(Error::TransactionError(
+                "DDL (CREATE/DROP/ALTER) is not allowed inside a transaction; COMMIT or ROLLBACK first"
+                    .to_string(),
+            ));
+        }
         match plan {
             PhysicalPlan::Begin => {
                 if active_txn.is_some() {

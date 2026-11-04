@@ -95,3 +95,61 @@ fn rename_indexed_column_keeps_unique_working() {
     assert!(s.execute_sql("INSERT INTO t VALUES (3, 'a@x.com')").is_err());
     let _ = std::fs::remove_dir_all(&d);
 }
+
+#[test]
+fn ddl_inside_transaction_is_rejected_and_changes_nothing() {
+    let d = fresh("ddl_txn");
+    let s = open(&d);
+    s.execute_sql("CREATE TABLE base (id int primary key, v text, w text)").unwrap();
+    s.execute_sql("CREATE TABLE other (id int primary key)").unwrap();
+    s.execute_sql("CREATE INDEX base_v ON base (v)").unwrap();
+
+    let a = s.create_session();
+    s.execute_in_session(a, "BEGIN").unwrap();
+    for sql in [
+        "CREATE TABLE p1 (id int primary key)",
+        "DROP TABLE other",
+        "CREATE INDEX i2 ON base (id)",
+        "DROP INDEX base_v",
+        "ALTER TABLE base ADD COLUMN z int",
+        "ALTER TABLE base RENAME COLUMN v TO v2",
+        "ALTER TABLE base DROP COLUMN w",
+    ] {
+        assert!(s.execute_in_session(a, sql).is_err(), "should be rejected: {sql}");
+    }
+    // the transaction itself is still usable after the rejected DDL
+    s.execute_in_session(a, "INSERT INTO base VALUES (1, 'x', 'y')").unwrap();
+    s.execute_in_session(a, "ROLLBACK").unwrap();
+    s.close_session(a).unwrap();
+
+    // nothing changed
+    assert!(s.execute_sql("SELECT * FROM p1").is_err());
+    assert!(s.execute_sql("SELECT * FROM other").is_ok());
+    assert!(s.execute_sql("SELECT z FROM base").is_err());
+    assert!(s.execute_sql("SELECT v, w FROM base").is_ok());
+    assert_eq!(rows(&s, "SELECT * FROM base"), 0);
+
+    // outside a transaction the same DDL works
+    s.execute_sql("CREATE TABLE p1 (id int primary key)").unwrap();
+    s.execute_sql("DROP TABLE other").unwrap();
+    s.execute_sql("ALTER TABLE base ADD COLUMN z int").unwrap();
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+#[test]
+fn ddl_works_again_after_commit_or_rollback() {
+    let d = fresh("ddl_after_txn");
+    let s = open(&d);
+    s.execute_sql("CREATE TABLE t (id int primary key)").unwrap();
+    let a = s.create_session();
+    s.execute_in_session(a, "BEGIN").unwrap();
+    s.execute_in_session(a, "INSERT INTO t VALUES (1)").unwrap();
+    s.execute_in_session(a, "COMMIT").unwrap();
+    s.execute_in_session(a, "ALTER TABLE t ADD COLUMN n int").unwrap();
+    s.execute_in_session(a, "BEGIN").unwrap();
+    s.execute_in_session(a, "ROLLBACK").unwrap();
+    s.execute_in_session(a, "CREATE TABLE t2 (id int primary key)").unwrap();
+    s.close_session(a).unwrap();
+    assert_eq!(rows(&s, "SELECT * FROM t"), 1);
+    let _ = std::fs::remove_dir_all(&d);
+}
