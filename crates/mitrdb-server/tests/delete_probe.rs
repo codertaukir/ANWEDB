@@ -41,16 +41,21 @@ fn probe_delete_scaling() {
     }
     let (w0, hwm0) = (wal_bytes(&d), status_mb("VmHWM"));
     let t = Instant::now();
-    let del = s.table("t").delete().filter("id", ">=", val(0)).run().unwrap();
+    let pred = std::env::var("MITRDB_PRED").unwrap_or_else(|_| "all".to_string());
+    let del = match pred.as_str() {
+        "half_g" => s.table("t").delete().filter("g", "<", val(500)).run().unwrap(),
+        "upper" => s.table("t").delete().filter("id", ">=", val(n / 2)).run().unwrap(),
+        _ => s.table("t").delete().filter("id", ">=", val(0)).run().unwrap(),
+    };
     let el = t.elapsed();
     let (w1, hwm1) = (wal_bytes(&d), status_mb("VmHWM"));
     println!(
-        "DEL n={n} deleted={del} took={el:?} per_row={:.0}us wal_delta={:.1}MB wal_per_row={:.0}B hwm_before={hwm0}MB hwm_after={hwm1}MB",
-        el.as_micros() as f64 / n as f64,
+        "DEL pred={pred} n={n} deleted={del} took={el:?} per_row={:.0}us wal_delta={:.1}MB wal_per_row={:.0}B hwm_before={hwm0}MB hwm_after={hwm1}MB",
+        el.as_micros() as f64 / del as f64,
         (w1 - w0) as f64 / 1_048_576.0,
-        (w1 - w0) as f64 / n as f64
+        (w1 - w0) as f64 / del as f64
     );
-    assert_eq!(s.table("t").find().count().unwrap(), 0);
+    assert_eq!(s.table("t").find().count().unwrap(), (n - del as i64) as usize);
     drop(s);
     let _ = std::fs::remove_dir_all(&d);
 }
