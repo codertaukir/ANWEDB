@@ -40,6 +40,7 @@ fn probe_delete_scaling() {
         i = end;
     }
     let (w0, hwm0) = (wal_bytes(&d), status_mb("VmHWM"));
+    let m0 = s.metrics_snapshot();
     let t = Instant::now();
     let pred = std::env::var("MITRDB_PRED").unwrap_or_else(|_| "all".to_string());
     let del = match pred.as_str() {
@@ -49,12 +50,29 @@ fn probe_delete_scaling() {
     };
     let el = t.elapsed();
     let (w1, hwm1) = (wal_bytes(&d), status_mb("VmHWM"));
+    let m1 = s.metrics_snapshot();
     println!(
         "DEL pred={pred} n={n} deleted={del} took={el:?} per_row={:.0}us wal_delta={:.1}MB wal_per_row={:.0}B hwm_before={hwm0}MB hwm_after={hwm1}MB",
         el.as_micros() as f64 / del as f64,
         (w1 - w0) as f64 / 1_048_576.0,
         (w1 - w0) as f64 / del as f64
     );
+    {
+        let dd = |a: u64, b: u64| a.saturating_sub(b);
+        let appends = dd(m1.wal_appends, m0.wal_appends);
+        println!(
+            "METRICS appends={} appends_per_row={:.2} avg_rec_bytes={:.0} flushes={} sync_count={} sync_total_ms={} sync_max_ms_global={} page_writes={} evictions={}",
+            appends,
+            appends as f64 / del as f64,
+            (w1 - w0) as f64 / appends.max(1) as f64,
+            dd(m1.wal_flushes, m0.wal_flushes),
+            dd(m1.wal_sync_count, m0.wal_sync_count),
+            dd(m1.wal_sync_total_ns, m0.wal_sync_total_ns) / 1_000_000,
+            m1.wal_sync_max_ns / 1_000_000,
+            dd(m1.page_writes, m0.page_writes),
+            dd(m1.buffer_evictions, m0.buffer_evictions)
+        );
+    }
     assert_eq!(s.table("t").find().count().unwrap(), (n - del as i64) as usize);
     drop(s);
     let _ = std::fs::remove_dir_all(&d);
