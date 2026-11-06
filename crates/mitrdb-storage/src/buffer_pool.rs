@@ -173,7 +173,7 @@ impl BufferPoolManager {
                         "Page ID modified during update_page_data".to_string(),
                     ));
                 }
-               if let Err(e) = working_page.validate_structure() {
+                if let Err(e) = working_page.validate_structure() {
                     frame.pin_count -= 1;
                     return Err(e);
                 }
@@ -405,6 +405,7 @@ impl BufferPoolManager {
             let staged = self.disk_manager.take_pending_free_pages(tid);
             let mut keep_tid_deferred = false;
 
+            let mut to_free: Vec<(PageId, Option<usize>)> = Vec::new();
             for pid in staged {
                 if pid == 0 {
                     continue;
@@ -414,36 +415,15 @@ impl BufferPoolManager {
                         self.disk_manager.stage_free_page(tid, pid);
                         keep_tid_deferred = true;
                     } else if (frames[frame_idx].page.flags() & PAGE_FLAG_FREE) != 0 {
-                        match self.disk_manager.free_page(pid) {
-                            Ok(()) => {
-                                frames[frame_idx].is_dirty = false;
-                                frames[frame_idx].page_id = None;
-                                frames[frame_idx].pin_count = 0;
-                                frames[frame_idx].ref_bit = false;
-                                page_table.remove(&pid);
-                            }
-                            Err(e) => {
-                                self.disk_manager.stage_free_page(tid, pid);
-                                keep_tid_deferred = true;
-                                if first_err.is_none() {
-                                    first_err = Some(e);
-                                }
-                            }
-                        }
+                        to_free.push((pid, Some(frame_idx)));
                     }
                 } else if self.disk_manager.is_page_free(pid) {
                     continue;
                 } else {
                     match self.disk_manager.read_page(pid) {
                         Ok(p) => {
-                            if (p.flags() & PAGE_FLAG_FREE) != 0
-                                && let Err(e) = self.disk_manager.free_page(pid)
-                            {
-                                self.disk_manager.stage_free_page(tid, pid);
-                                keep_tid_deferred = true;
-                                if first_err.is_none() {
-                                    first_err = Some(e);
-                                }
+                            if (p.flags() & PAGE_FLAG_FREE) != 0 {
+                                to_free.push((pid, None));
                             }
                         }
                         Err(e) => {
@@ -452,6 +432,32 @@ impl BufferPoolManager {
                             if first_err.is_none() {
                                 first_err = Some(e);
                             }
+                        }
+                    }
+                }
+            }
+
+            if !to_free.is_empty() {
+                let pids: Vec<PageId> = to_free.iter().map(|(p, _)| *p).collect();
+                match self.disk_manager.free_pages_batch(&pids) {
+                    Ok(()) => {
+                        for (pid, fidx) in &to_free {
+                            if let Some(frame_idx) = *fidx {
+                                frames[frame_idx].is_dirty = false;
+                                frames[frame_idx].page_id = None;
+                                frames[frame_idx].pin_count = 0;
+                                frames[frame_idx].ref_bit = false;
+                                page_table.remove(pid);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        for pid in &pids {
+                            self.disk_manager.stage_free_page(tid, *pid);
+                        }
+                        keep_tid_deferred = true;
+                        if first_err.is_none() {
+                            first_err = Some(e);
                         }
                     }
                 }

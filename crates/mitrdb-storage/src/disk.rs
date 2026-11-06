@@ -577,6 +577,63 @@ impl DiskManager {
         Ok(())
     }
 
+    /// Free many pages with one data-file fsync and one freelist save.
+    /// Same ordering as `free_page` (blank pages durable, then freelist), but per call
+    /// instead of per page. On error nothing is added to the in-memory freelist.
+    pub fn free_pages_batch(&self, page_ids: &[PageId]) -> Result<()> {
+        if page_ids.is_empty() {
+            return Ok(());
+        }
+        let num_pages = self.num_pages.lock().unwrap();
+        let mut free_pages = self.free_pages.lock().unwrap();
+        let np = *num_pages;
+        drop(num_pages);
+
+        let mut seen = std::collections::HashSet::new();
+        let mut todo: Vec<PageId> = Vec::with_capacity(page_ids.len());
+        for &pid in page_ids {
+            if pid == 0 {
+                return Err(Error::TransactionError(
+                    "Cannot free reserved page 0".to_string(),
+                ));
+            }
+            if pid >= np {
+                return Err(Error::InvalidPageId(pid));
+            }
+            if free_pages.contains(&pid) || !seen.insert(pid) {
+                continue;
+            }
+            todo.push(pid);
+        }
+        if todo.is_empty() {
+            return Ok(());
+        }
+
+        {
+            let mut file = self.file.lock().unwrap();
+            for &pid in &todo {
+                let mut blank_page = Page::new_empty(pid, PAGE_TYPE_RAW);
+                blank_page.set_flags(PAGE_FLAG_FREE);
+                blank_page.data[PAGE_HEADER_SIZE] = 0xFF;
+                blank_page.update_checksum();
+                let offset = (pid as u64) * (PAGE_SIZE as u64);
+                file.seek(SeekFrom::Start(offset))?;
+                file.write_all(blank_page.as_bytes())?;
+            }
+            file.sync_all()?;
+            for &pid in &todo {
+                self.record_backup_dirty_page(pid);
+            }
+        }
+
+        free_pages.extend_from_slice(&todo);
+        let _ = self.save_freelist_locked(&free_pages);
+        for _ in &todo {
+            GLOBAL_METRICS.record_write();
+        }
+        Ok(())
+    }
+
     pub fn sync(&self) -> Result<()> {
         let file = self.file.lock().unwrap();
         file.sync_all()?;
@@ -873,6 +930,65 @@ mod tests {
         assert_eq!(rebuilt_after_unpin, vec![p1]);
         assert!(disk.is_page_free(p1));
         assert!(disk.pending_free_txn_ids().is_empty());
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn free_pages_batch_persists_and_reopens() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "mitrdb_test_disk_free_batch_{}",
+            std::process::id()
+        ));
+        let db_path = temp_dir.join("test.db");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+
+        {
+            let disk = DiskManager::open_or_create(db_path.as_path()).unwrap();
+            let mut ids = Vec::new();
+            for _ in 0..8 {
+                let (p, _) = disk.allocate_page(PAGE_TYPE_SLOTTED).unwrap();
+                ids.push(p);
+            }
+            // duplicate (ids[5]) ko dedupe hona chahiye
+            disk.free_pages_batch(&[ids[2], ids[3], ids[5], ids[5]])
+                .unwrap();
+            assert_eq!(disk.free_page_count(), 3);
+            assert!(disk.is_page_free(ids[2]));
+            assert!(disk.is_page_free(ids[3]));
+            assert!(disk.is_page_free(ids[5]));
+            assert!(!disk.is_page_free(ids[4]));
+
+            // idempotent
+            disk.free_pages_batch(&[ids[2]]).unwrap();
+            assert_eq!(disk.free_page_count(), 3);
+
+            // invalid input: kuch add nahi hona chahiye
+            assert!(disk.free_pages_batch(&[ids[6], 0]).is_err());
+            assert!(disk.free_pages_batch(&[ids[6], 9999]).is_err());
+            assert_eq!(disk.free_page_count(), 3);
+            assert!(!disk.is_page_free(ids[6]));
+        }
+
+        // reopen: freelist file se
+        {
+            let disk = DiskManager::open_or_create(db_path.as_path()).unwrap();
+            assert_eq!(disk.free_page_count(), 3);
+            assert!(disk.is_page_free(2) && disk.is_page_free(3) && disk.is_page_free(5));
+        }
+
+        // freelist file hata do: page flags se rebuild hona chahiye
+        let fl = DiskManager::freelist_path(&db_path);
+        std::fs::remove_file(&fl).unwrap();
+        {
+            let disk = DiskManager::open_or_create(db_path.as_path()).unwrap();
+            assert_eq!(disk.free_page_count(), 3);
+            assert!(disk.is_page_free(2) && disk.is_page_free(3) && disk.is_page_free(5));
+            // reuse kaam karta hai
+            let (p, _) = disk.allocate_page(PAGE_TYPE_SLOTTED).unwrap();
+            assert!([2u32, 3, 5].contains(&p));
+            assert_eq!(disk.free_page_count(), 2);
+        }
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
