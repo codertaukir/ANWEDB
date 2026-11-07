@@ -2260,6 +2260,125 @@ impl TxnManager {
         Ok(commit_ts)
     }
 
+    /// Number of undo entries so far; used as a statement-rollback mark.
+    pub fn write_mark(&self, txn_id: TxnId) -> Result<usize> {
+        let txns = self.txns.lock().unwrap();
+        let ctx = txns.get(&txn_id).ok_or_else(|| {
+            Error::TransactionError(format!("Unknown transaction ID {}", txn_id))
+        })?;
+        Ok(ctx.write_set.len())
+    }
+
+    /// Statement-level rollback: undo only writes made after `mark`; txn stays Active.
+    /// Caller must abort the whole txn if this returns Err.
+    pub fn rollback_to_mark(&self, txn_id: TxnId, mark: usize) -> Result<()> {
+        let (mut last_lsn, earlier) = {
+            let txns = self.txns.lock().unwrap();
+            let ctx = txns.get(&txn_id).ok_or_else(|| {
+                Error::TransactionError(format!("Unknown transaction ID {}", txn_id))
+            })?;
+            if ctx.state != TxnState::Active || ctx.rollback_poisoned || ctx.commit_poisoned {
+                return Err(Error::TransactionError(format!(
+                    "Transaction {} cannot roll back a statement in its current state",
+                    txn_id
+                )));
+            }
+            let earlier: HashSet<Vec<u8>> = ctx
+                .write_set
+                .iter()
+                .take(mark)
+                .filter_map(|a| match a {
+                    UndoAction::BTreeKey { tree, key, .. } => Some(Self::scoped_key(tree, key)),
+                    _ => None,
+                })
+                .collect();
+            (ctx.last_lsn, earlier)
+        };
+
+        let mut undone = false;
+        loop {
+            let next_action = {
+                let txns = self.txns.lock().unwrap();
+                txns.get(&txn_id).and_then(|ctx| {
+                    if ctx.write_set.len() > mark {
+                        ctx.write_set.last().cloned()
+                    } else {
+                        None
+                    }
+                })
+            };
+            let Some(action) = next_action else {
+                break;
+            };
+            match action {
+                UndoAction::PageSlice { .. } => {
+                    return Err(Error::TransactionError(
+                        "statement rollback does not support page-slice undo".to_string(),
+                    ));
+                }
+                UndoAction::BTreeKey {
+                    tree,
+                    key,
+                    old_value,
+                } => {
+                    let lsn_before = last_lsn;
+                    let undo_res = match &old_value {
+                        Some(val) => tree
+                            .insert_or_replace_logged(txn_id, &mut last_lsn, &key, val)
+                            .map(|_| ()),
+                        None => tree.delete_logged(txn_id, &mut last_lsn, &key).map(|_| ()),
+                    };
+                    if let Err(e) = undo_res {
+                        let mut txns = self.txns.lock().unwrap();
+                        if let Some(ctx) = txns.get_mut(&txn_id) {
+                            ctx.last_lsn = last_lsn;
+                            if last_lsn != lsn_before || self.wal.is_none() {
+                                ctx.rollback_poisoned = true;
+                            }
+                        }
+                        return Err(e);
+                    }
+                    let skey = Self::scoped_key(&tree, &key);
+                    {
+                        let mut versions = self.mvcc_versions.lock().unwrap();
+                        if let Some(chain) = versions.get_mut(&skey) {
+                            if earlier.contains(&skey) {
+                                if let Some(last) = chain.last_mut()
+                                    && last.xmin == txn_id
+                                {
+                                    last.value = old_value.clone();
+                                }
+                            } else {
+                                chain.retain(|v| v.xmin != txn_id);
+                                for v in chain.iter_mut() {
+                                    if v.xmax == Some(txn_id) {
+                                        v.xmax = None;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    undone = true;
+                }
+            }
+            {
+                let mut txns = self.txns.lock().unwrap();
+                if let Some(ctx) = txns.get_mut(&txn_id) {
+                    ctx.last_lsn = last_lsn;
+                    ctx.write_set.pop();
+                }
+            }
+        }
+
+        if undone {
+            let mut versions = self.mvcc_versions.lock().unwrap();
+            versions.retain(|_, chain| !chain.is_empty());
+            self.chain_epoch.fetch_add(1, Ordering::SeqCst);
+            versions.rebuild_tree_index();
+        }
+        Ok(())
+    }
+
     pub fn abort(&self, txn_id: TxnId) -> Result<()> {
         let mut last_lsn = {
             let mut txns = self.txns.lock().unwrap();

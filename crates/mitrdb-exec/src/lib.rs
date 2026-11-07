@@ -974,7 +974,9 @@ impl Executor {
             }
             PhysicalPlan::Insert { schema, values } => {
                 let (tid, auto_commit) = Self::ensure_txn(txn_mgr, *active_txn, default_isolation)?;
+                let mark = Self::stmt_mark(txn_mgr, tid, auto_commit);
                 let res = self.exec_insert(catalog, txn_mgr, tid, &schema, &values);
+                let res = Self::stmt_rollback_on_err(txn_mgr, tid, mark, active_txn, res);
                 if auto_commit {
                     match res {
                         Ok(_) => {
@@ -992,6 +994,7 @@ impl Executor {
             }
             PhysicalPlan::InsertMany { schema, rows } => {
                 let (tid, auto_commit) = Self::ensure_txn(txn_mgr, *active_txn, default_isolation)?;
+                let mark = Self::stmt_mark(txn_mgr, tid, auto_commit);
                 let mut res: Result<ExecutionResult> = Ok(ExecutionResult::Affected(rows.len()));
                 for values in &rows {
                     if let Err(e) = self.exec_insert(catalog, txn_mgr, tid, &schema, values) {
@@ -999,6 +1002,7 @@ impl Executor {
                         break;
                     }
                 }
+                let res = Self::stmt_rollback_on_err(txn_mgr, tid, mark, active_txn, res);
                 if auto_commit {
                     match res {
                         Ok(_) => {
@@ -1021,6 +1025,7 @@ impl Executor {
                 filter,
             } => {
                 let (tid, auto_commit) = Self::ensure_txn(txn_mgr, *active_txn, default_isolation)?;
+                let mark = Self::stmt_mark(txn_mgr, tid, auto_commit);
                 let res = self.exec_update(
                     catalog,
                     txn_mgr,
@@ -1030,6 +1035,7 @@ impl Executor {
                     &increments,
                     filter.as_ref(),
                 );
+                let res = Self::stmt_rollback_on_err(txn_mgr, tid, mark, active_txn, res);
                 if auto_commit {
                     match res {
                         Ok(_) => {
@@ -1071,7 +1077,9 @@ impl Executor {
             }
             PhysicalPlan::Delete { schema, filter } => {
                 let (tid, auto_commit) = Self::ensure_txn(txn_mgr, *active_txn, default_isolation)?;
+                let mark = Self::stmt_mark(txn_mgr, tid, auto_commit);
                 let res = self.exec_delete(catalog, txn_mgr, tid, &schema, filter.as_ref());
+                let res = Self::stmt_rollback_on_err(txn_mgr, tid, mark, active_txn, res);
                 if auto_commit {
                     match res {
                         Ok(_) => {
@@ -1761,6 +1769,32 @@ impl Executor {
             Some(tid) => Ok((tid, false)),
             None => Ok((txn_mgr.begin_with_isolation(default_isolation)?, true)),
         }
+    }
+
+    fn stmt_mark(txn_mgr: &TxnManager, tid: TxnId, auto_commit: bool) -> Option<usize> {
+        if auto_commit {
+            None
+        } else {
+            txn_mgr.write_mark(tid).ok()
+        }
+    }
+
+    /// Explicit txn: a failed statement must not leave partial writes behind.
+    fn stmt_rollback_on_err(
+        txn_mgr: &TxnManager,
+        tid: TxnId,
+        mark: Option<usize>,
+        active_txn: &mut Option<TxnId>,
+        res: Result<ExecutionResult>,
+    ) -> Result<ExecutionResult> {
+        if res.is_err()
+            && let Some(m) = mark
+            && txn_mgr.rollback_to_mark(tid, m).is_err()
+            && txn_mgr.abort(tid).is_ok()
+        {
+            *active_txn = None;
+        }
+        res
     }
 
     fn primary_key_index(schema: &TableSchema) -> usize {
