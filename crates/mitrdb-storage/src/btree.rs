@@ -1075,6 +1075,13 @@ impl BPlusTree {
     ) -> Result<()> {
         let profile_started = mitrdb_observe::profiling_enabled().then(std::time::Instant::now);
         let total_len = left_leaf.keys.len();
+        // Old next leaf ko pehle padho (new_page aur sab writes se pehle): read fail ho to
+        // na WAL record bane, na page leak ho, na tree aadha badle.
+        let old_next_leaf = if left_leaf.next_leaf_page_id != INVALID_PAGE_ID {
+            Some(self.read_node(left_leaf.next_leaf_page_id)?)
+        } else {
+            None
+        };
         let mid_profile_started = mitrdb_observe::profiling_enabled().then(std::time::Instant::now);
         // Precompute entry sizes once. The previous implementation recomputed both
         // sides for every candidate midpoint, making split selection O(n^2).
@@ -1157,8 +1164,7 @@ impl BPlusTree {
             self.last_leaf_hint.store(right_id, Ordering::Relaxed);
         }
 
-        if old_next_id != INVALID_PAGE_ID {
-            let mut next_leaf = self.read_node(old_next_id)?;
+        if let Some(mut next_leaf) = old_next_leaf {
             next_leaf.prev_leaf_page_id = right_id;
             self.write_node(&next_leaf, txn_id, prev_lsn)?;
         }
