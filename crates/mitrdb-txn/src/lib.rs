@@ -883,6 +883,7 @@ pub struct TxnManager {
     bpm: Option<Arc<BufferPoolManager>>,
     lock_manager: Arc<LockManager>,
     txns: Mutex<HashMap<TxnId, TransactionContext>>,
+    poisoned_commits: std::sync::atomic::AtomicUsize,
     mvcc_versions: Mutex<MvccVersionStore>,
     chain_epoch: AtomicU64,
 }
@@ -896,6 +897,7 @@ impl TxnManager {
             bpm: None,
             lock_manager: Arc::new(LockManager::new()),
             txns: Mutex::new(HashMap::new()),
+            poisoned_commits: std::sync::atomic::AtomicUsize::new(0),
             mvcc_versions: Mutex::new(MvccVersionStore::default()),
             chain_epoch: AtomicU64::new(0),
         }
@@ -922,6 +924,7 @@ impl TxnManager {
             bpm: Some(bpm),
             lock_manager: Arc::new(LockManager::new()),
             txns: Mutex::new(HashMap::new()),
+            poisoned_commits: std::sync::atomic::AtomicUsize::new(0),
             mvcc_versions: Mutex::new(MvccVersionStore::default()),
             chain_epoch: AtomicU64::new(0),
         }
@@ -2225,6 +2228,7 @@ impl TxnManager {
                     if let Some(ctx) = self.txns.lock().unwrap().get_mut(&txn_id) {
                         ctx.commit_poisoned = true;
                         ctx.poisoned_commit_lsn = Some(lsn);
+                        self.poisoned_commits.fetch_add(1, Ordering::SeqCst);
                     }
                     return Err(Error::TransactionError(format!(
                         "Transaction {} commit is poisoned after WAL flush failure; restart/crash recovery required to resolve in-doubt state: {}",
@@ -2274,6 +2278,32 @@ impl TxnManager {
         self.finish_commit(txn_id, Some(lsn), None)
     }
 
+    pub fn poisoned_commit_count(&self) -> usize {
+        self.poisoned_commits.load(Ordering::Relaxed)
+    }
+
+    /// Sweep: har poisoned commit par resolve_poisoned_commit ek baar try karta hai.
+    /// Flush `txns` lock ke bahar hota hai. Kitne resolve hue wo count lautata hai.
+    pub fn resolve_poisoned_commits(&self) -> usize {
+        if self.poisoned_commits.load(Ordering::Relaxed) == 0 {
+            return 0;
+        }
+        let ids: Vec<TxnId> = {
+            let txns = self.txns.lock().unwrap();
+            txns.iter()
+                .filter(|(_, c)| c.state == TxnState::Committing && c.commit_poisoned)
+                .map(|(id, _)| *id)
+                .collect()
+        };
+        let mut done = 0;
+        for id in ids {
+            if self.resolve_poisoned_commit(id).is_ok() {
+                done += 1;
+            }
+        }
+        done
+    }
+
     fn finish_commit(
         &self,
         txn_id: TxnId,
@@ -2298,6 +2328,9 @@ impl TxnManager {
         let commit_ts = self.oracle_ts.fetch_add(1, Ordering::SeqCst) + 1;
         ctx.state = TxnState::Committed { commit_ts };
         ctx.commit_ts = Some(commit_ts);
+        if ctx.commit_poisoned {
+            self.poisoned_commits.fetch_sub(1, Ordering::SeqCst);
+        }
         ctx.commit_poisoned = false;
         ctx.poisoned_commit_lsn = None;
         ctx.write_set.clear();

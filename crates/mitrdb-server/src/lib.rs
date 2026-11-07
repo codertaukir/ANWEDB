@@ -317,6 +317,10 @@ impl Server {
             }
             _ => {}
         }
+        // Poisoned commit (WAL flush failure) ho to WAL theek hote hi statement se pehle resolve try karo.
+        if self.txn_mgr.poisoned_commit_count() > 0 {
+            self.txn_mgr.resolve_poisoned_commits();
+        }
         let execution_started = profiling.then(std::time::Instant::now);
         let result = self.executor.execute_plan_with_isolation(
             plan,
