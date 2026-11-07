@@ -140,3 +140,63 @@ fn auto_checkpoint_with_active_txn_stays_correct() {
     drop(srv);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// Auto-checkpoint takes the buffer-pool exclusive op lock: several sessions at once must not deadlock.
+#[test]
+fn auto_checkpoint_under_concurrent_sessions() {
+    use std::sync::{mpsc, Arc};
+    use std::time::Duration;
+
+    let (dir, srv) = open("conc");
+    srv.set_auto_checkpoint_wal_bytes(3 * SEG);
+    let srv = Arc::new(srv);
+    let (tx, rx) = mpsc::channel::<Result<(), String>>();
+    let mut handles = Vec::new();
+    for t in 0..4i64 {
+        let srv = Arc::clone(&srv);
+        let tx = tx.clone();
+        handles.push(std::thread::spawn(move || {
+            let sid = srv.create_session_with_isolation(IsolationLevel::Serializable);
+            let base = t * 100_000;
+            let n = 1000i64;
+            let run = || -> Result<(), String> {
+                let mut i = 0;
+                while i < n {
+                    let end = (i + 250).min(n);
+                    let vals: Vec<String> = (i..end).map(|k| format!("({},'u_{}')", base + k, k)).collect();
+                    srv.execute_in_session(sid, &format!("INSERT INTO t VALUES {}", vals.join(",")))
+                        .map_err(|e| format!("t{t} insert: {e:?}"))?;
+                    i = end;
+                }
+                for k in 0..n {
+                    srv.execute_in_session(sid, &format!("DELETE FROM t WHERE id = {}", base + k))
+                        .map_err(|e| format!("t{t} delete {k}: {e:?}"))?;
+                }
+                for k in 0..n {
+                    srv.execute_in_session(sid, &format!("INSERT INTO t VALUES ({}, 'u_{}')", base + k, k))
+                        .map_err(|e| format!("t{t} reinsert {k}: {e:?}"))?;
+                }
+                Ok(())
+            };
+            let _ = tx.send(run());
+        }));
+    }
+    drop(tx);
+    for _ in 0..4 {
+        match rx.recv_timeout(Duration::from_secs(90)) {
+            Ok(r) => r.unwrap(),
+            Err(e) => panic!("no result within 90s (deadlock?): {e:?}"),
+        }
+    }
+    for h in handles {
+        h.join().unwrap();
+    }
+    eprintln!("CONC segments at end = {}", seg(&srv));
+    assert_eq!(count(&srv), 4000);
+    drop(srv);
+
+    let (srv, _) = Server::open_with_segment_size(dir.join("t.db"), dir.join("t.wal"), 256, SEG).unwrap();
+    assert_eq!(count(&srv), 4000);
+    drop(srv);
+    let _ = std::fs::remove_dir_all(&dir);
+}

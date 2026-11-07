@@ -18,7 +18,7 @@ Status tracker. `[x]` = done and measured/tested, `[ ]` = pending.
 - [ ] Commit limitation (dobara verify karna hai, statement rollback ke baad badla ho sakta hai): write beech mein fail + explicit COMMIT par bina fsync commit ho sakta hai; `ctx.last_lsn` update nahi hota (durability)
 - [ ] Explicit-txn bench: perf_bench autocommit hai, `write_mark` ka mutex measure nahi hua (earlier.contains branch aur LockTimeout ke baad statement rollback ke tests ho chuke, stmt_atomicity.rs)
 - [ ] `flush_up_to` fail par txn `Committing` + `commit_poisoned` mein atka rehta hai, locks restart tak pakde (design se in-doubt, par availability ka sawal; andaza: baaki sessions un keys par LockTimeout khayenge)
-- [ ] Auto-checkpoint: concurrent threads ke saath test nahi hua; checkpoint ki error chup-chaap ignore hoti hai (metric nahi); floor backoff ki checkpoint-ginti measure nahi hui
+- [ ] Auto-checkpoint: concurrent test (4 sessions, auto-checkpoint baar-baar trigger) pass; checkpoint ki error chup-chaap ignore hoti hai (metric nahi); floor backoff ki checkpoint-ginti measure nahi hui
 - [ ] Delete memory: N=10000 bulk delete par VmHWM 153MB (measured). Streaming ya beech mein flush; storage core hai, crash tests + A/B zaroori
 
 ## Performance
