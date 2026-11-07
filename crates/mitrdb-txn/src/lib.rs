@@ -2206,7 +2206,18 @@ impl TxnManager {
                 }
             };
             // Read-only txn ke paas durable karne ko kuch nahi: commit record buffer mein jata hai, fsync skip.
-            let flush_res = if has_writes { wal.flush_up_to(lsn) } else { Ok(()) };
+            let mut flush_res = if has_writes { wal.flush_up_to(lsn) } else { Ok(()) };
+            // Error branch only: WAL flush error sticky nahi hai aur pending bytes bache rehte hain,
+            // to bounded retry transient I/O failure ko poison hone se pehle resolve kar deta hai.
+            if flush_res.is_err() {
+                for attempt in 0..5u32 {
+                    std::thread::sleep(std::time::Duration::from_millis(10u64 << attempt));
+                    flush_res = wal.flush_up_to(lsn);
+                    if flush_res.is_ok() {
+                        break;
+                    }
+                }
+            }
             if let Err(err) = flush_res {
                 if wal.flushed_lsn() < lsn {
                     if let Some(ctx) = self.txns.lock().unwrap().get_mut(&txn_id) {
