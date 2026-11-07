@@ -745,7 +745,7 @@ impl Executor {
                 let tid = active_txn.take().ok_or_else(|| {
                     Error::TransactionError("No active transaction to commit".to_string())
                 })?;
-                txn_mgr.commit(tid)?;
+                Self::commit_or_abort(txn_mgr, tid)?;
                 catalog.sync_roots()?;
                 Ok(ExecutionResult::Ok)
             }
@@ -980,7 +980,7 @@ impl Executor {
                 if auto_commit {
                     match res {
                         Ok(_) => {
-                            txn_mgr.commit(tid)?;
+                            Self::commit_or_abort(txn_mgr, tid)?;
                             catalog.sync_roots()?;
                         }
                         Err(e) => {
@@ -1006,7 +1006,7 @@ impl Executor {
                 if auto_commit {
                     match res {
                         Ok(_) => {
-                            txn_mgr.commit(tid)?;
+                            Self::commit_or_abort(txn_mgr, tid)?;
                             catalog.sync_roots()?;
                         }
                         Err(e) => {
@@ -1039,7 +1039,7 @@ impl Executor {
                 if auto_commit {
                     match res {
                         Ok(_) => {
-                            txn_mgr.commit(tid)?;
+                            Self::commit_or_abort(txn_mgr, tid)?;
                             catalog.sync_roots()?;
                         }
                         Err(e) => {
@@ -1065,7 +1065,7 @@ impl Executor {
                 if auto_commit {
                     match res {
                         Ok(_) => {
-                            txn_mgr.commit(tid)?;
+                            Self::commit_or_abort(txn_mgr, tid)?;
                         }
                         Err(e) => {
                             txn_mgr.abort(tid)?;
@@ -1083,7 +1083,7 @@ impl Executor {
                 if auto_commit {
                     match res {
                         Ok(_) => {
-                            txn_mgr.commit(tid)?;
+                            Self::commit_or_abort(txn_mgr, tid)?;
                             catalog.sync_roots()?;
                         }
                         Err(e) => {
@@ -1795,6 +1795,18 @@ impl Executor {
             *active_txn = None;
         }
         res
+    }
+
+    /// A failed commit must not leak the txn (and its locks): roll it back, keep the original error.
+    /// abort() refuses non-Active txns (poisoned / already committed); that Err is ignored on purpose.
+    fn commit_or_abort(txn_mgr: &TxnManager, tid: TxnId) -> Result<u64> {
+        match txn_mgr.commit(tid) {
+            Ok(ts) => Ok(ts),
+            Err(e) => {
+                let _ = txn_mgr.abort(tid);
+                Err(e)
+            }
+        }
     }
 
     fn primary_key_index(schema: &TableSchema) -> usize {

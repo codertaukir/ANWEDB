@@ -172,3 +172,33 @@ fn lock_timeout_statement_rollback_keeps_txn_alive() {
     drop(srv);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// COMMIT that fails (serializable conflict) must not leak the txn or its locks.
+#[test]
+fn failed_commit_does_not_leak_txn_or_locks() {
+    let (dir, srv) = open("cl");
+    let s1 = srv.create_session_with_isolation(IsolationLevel::Serializable);
+    let s2 = srv.create_session_with_isolation(IsolationLevel::Serializable);
+
+    srv.execute_in_session(s1, "BEGIN").unwrap();
+    // s2 commits a change to key 100 after s1's snapshot
+    srv.execute_in_session(s2, "UPDATE s SET v = 1 WHERE id = 100").unwrap();
+    // s1 reads key 100 (read-set) and writes key 7
+    srv.execute_in_session(s1, "SELECT v FROM s WHERE id = 100").unwrap();
+    srv.execute_in_session(s1, "INSERT INTO s VALUES (7, 7)").unwrap();
+    let r = srv.execute_in_session(s1, "COMMIT");
+    eprintln!("COMMIT={r:?}");
+    assert!(r.is_err(), "premise: commit must fail with a serializable conflict");
+
+    // a leaked txn would still hold key 7 -> LockTimeout here
+    srv.execute_in_session(s2, "INSERT INTO s VALUES (7, 8)").unwrap();
+    assert_eq!(ids(&srv), vec![Value::Int64(7), Value::Int64(100)]);
+    assert_eq!(v_of(&srv, 7), 8);
+    assert_eq!(v_of(&srv, 100), 1);
+
+    // s1 slot is clean: can start a new txn
+    srv.execute_in_session(s1, "BEGIN").unwrap();
+    srv.execute_in_session(s1, "ROLLBACK").unwrap();
+    drop(srv);
+    let _ = std::fs::remove_dir_all(&dir);
+}
