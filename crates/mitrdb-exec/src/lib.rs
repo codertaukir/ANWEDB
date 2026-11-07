@@ -2711,9 +2711,26 @@ impl Executor {
         let tree = catalog.table_tree(schema.table_id).ok_or_else(|| {
             Error::TransactionError("Table storage B+Tree not initialized".to_string())
         })?;
-        let entries = txn_mgr.scan_unlocked(txn_id, &tree)?;
         let indexes = catalog.get_table_indexes(schema.table_id);
         let pk_idx = Self::primary_key_index(schema);
+        // Narrow the scan when the filter bounds the primary key (range set is sound;
+        // bf.evaluate below still filters every row). Otherwise full scan as before.
+        let pk_ranges =
+            filter.and_then(|bf| QueryEngine::extract_column_ranges(&bf.predicate, pk_idx));
+        let entries = if let Some(ranges) = pk_ranges {
+            let mut seen_pks = HashSet::new();
+            let mut out = Vec::new();
+            for r in &ranges {
+                for (k, v) in txn_mgr.range_scan(txn_id, &tree, r)? {
+                    if seen_pks.insert(k.clone()) {
+                        out.push((k, v));
+                    }
+                }
+            }
+            out
+        } else {
+            txn_mgr.scan_unlocked(txn_id, &tree)?
+        };
 
         let mut to_delete = Vec::new();
         for (pk_bytes, row_bytes) in entries {
