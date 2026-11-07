@@ -9,9 +9,11 @@ Status tracker. `[x]` = done and measured/tested, `[ ]` = pending.
 - [x] Batch free_pages: N=5000 delete fsync 249 -> 9, delete 3.4-3.8s -> ~0.4s (38066d1)
 - [x] DELETE ko PK range par narrow karna: autocommit delete 594-6045us (N ke saath badhta) -> 57-88us flat, tmpfs. Bulk delete A/B noise (N=10000, 3 rounds) (1e20f9d)
 - [x] Delete probes (delete_probe, delete_autocommit_probe) + delete_pk_fastpath tests (417d5bd)
+- [x] Explicit txn statement atomicity: failed DML statement ab sirf apne writes undo karta hai, txn zinda rehta hai (`write_mark` / `rollback_to_mark`, WAL-logged undo). stmt_atomicity 3 tests + txn/exec/server/storage crash suites pass. Insert A/B 3 rounds x 5 runs: noise (c83ca6b)
 
 ## P0: Production se pehle
-- [ ] Commit limitation: write beech mein fail + explicit COMMIT par bina fsync commit ho sakta hai; `ctx.last_lsn` update nahi hota (durability)
+- [ ] Commit error par txn leak (I/O error par hi; statement atomicity se alag). Commit limitation: write beech mein fail + explicit COMMIT par bina fsync commit ho sakta hai; `ctx.last_lsn` update nahi hota (durability)
+- [ ] Statement rollback ke untested paths: (a) failed statement jo isi txn ki pehle likhi key chhue (`earlier.contains` branch), (b) `LockTimeout` ke baad statement rollback ka direct test, (c) explicit-txn bench (perf_bench autocommit hai, `write_mark` ka mutex measure nahi hua)
 - [ ] WAL growth / auto-checkpoint: non-test code mein auto-checkpoint nahi. Measured: 2000 delete + 2000 reinsert ke baad t.wal 13.4MB
 - [ ] `exec_update` ka `scan_unlocked` (O(N) autocommit UPDATE ... WHERE id = k). Code-confirmed, latency measure nahi hua
 - [ ] Delete memory: N=10000 bulk delete par VmHWM 153MB (measured). Streaming ya beech mein flush; storage core hai, crash tests + A/B zaroori
