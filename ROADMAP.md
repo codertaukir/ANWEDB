@@ -13,7 +13,7 @@ Status tracker. `[x]` = done and measured/tested, `[ ]` = pending.
 
 ## P0: Production se pehle
 - [ ] Commit error par txn leak (I/O error par hi; statement atomicity se alag). Commit limitation: write beech mein fail + explicit COMMIT par bina fsync commit ho sakta hai; `ctx.last_lsn` update nahi hota (durability)
-- [ ] Statement rollback ke untested paths: (a) failed statement jo isi txn ki pehle likhi key chhue (`earlier.contains` branch), (b) `LockTimeout` ke baad statement rollback ka direct test, (c) explicit-txn bench (perf_bench autocommit hai, `write_mark` ka mutex measure nahi hua)
+- [ ] Explicit-txn bench: perf_bench autocommit hai, `write_mark` ka mutex measure nahi hua (earlier.contains branch aur LockTimeout ke baad statement rollback ke tests ho chuke, stmt_atomicity.rs)
 - [ ] WAL growth / auto-checkpoint: non-test code mein auto-checkpoint nahi. Measured: 2000 delete + 2000 reinsert ke baad t.wal 13.4MB
 - [ ] `exec_update` ka `scan_unlocked` (O(N) autocommit UPDATE ... WHERE id = k). Code-confirmed, latency measure nahi hua
 - [ ] Delete memory: N=10000 bulk delete par VmHWM 153MB (measured). Streaming ya beech mein flush; storage core hai, crash tests + A/B zaroori
