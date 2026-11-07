@@ -49,6 +49,11 @@ impl Default for DatabaseSession {
     }
 }
 
+/// Auto-checkpoint: trigger when total WAL bytes (segments * max segment size) reach this.
+const DEFAULT_AUTO_CHECKPOINT_WAL_BYTES: u64 = 256 * 1024 * 1024;
+/// Only look at the WAL every N statements, so the hot path pays one atomic add.
+const AUTO_CHECKPOINT_CHECK_EVERY: u64 = 256;
+
 pub struct Server {
     catalog: Arc<Catalog>,
     txn_mgr: Arc<TxnManager>,
@@ -62,6 +67,10 @@ pub struct Server {
     next_session_id: AtomicU64,
     sessions: Mutex<HashMap<SessionId, Arc<DatabaseSession>>>,
     backup_lock: Mutex<()>,
+    auto_ckpt_wal_bytes: AtomicU64,
+    auto_ckpt_tick: AtomicU64,
+    auto_ckpt_floor: AtomicU64,
+    auto_ckpt_running: std::sync::atomic::AtomicBool,
 }
 
 impl Server {
@@ -83,6 +92,10 @@ impl Server {
             next_session_id: AtomicU64::new(1),
             sessions: Mutex::new(HashMap::new()),
             backup_lock: Mutex::new(()),
+            auto_ckpt_wal_bytes: AtomicU64::new(0),
+            auto_ckpt_tick: AtomicU64::new(0),
+            auto_ckpt_floor: AtomicU64::new(0),
+            auto_ckpt_running: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -131,6 +144,10 @@ impl Server {
                 next_session_id: AtomicU64::new(1),
                 sessions: Mutex::new(HashMap::new()),
                 backup_lock: Mutex::new(()),
+                auto_ckpt_wal_bytes: AtomicU64::new(DEFAULT_AUTO_CHECKPOINT_WAL_BYTES),
+                auto_ckpt_tick: AtomicU64::new(0),
+                auto_ckpt_floor: AtomicU64::new(0),
+                auto_ckpt_running: std::sync::atomic::AtomicBool::new(false),
             },
             report,
         ))
@@ -314,7 +331,50 @@ impl Server {
                 started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
             );
         }
+        self.maybe_auto_checkpoint();
         result
+    }
+
+    /// Auto-checkpoint threshold in total WAL bytes; 0 disables it.
+    pub fn set_auto_checkpoint_wal_bytes(&self, bytes: u64) {
+        self.auto_ckpt_wal_bytes
+            .store(bytes, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn maybe_auto_checkpoint(&self) {
+        use std::sync::atomic::Ordering::Relaxed;
+        let threshold = self.auto_ckpt_wal_bytes.load(Relaxed);
+        if threshold == 0 {
+            return;
+        }
+        if !self
+            .auto_ckpt_tick
+            .fetch_add(1, Relaxed)
+            .is_multiple_of(AUTO_CHECKPOINT_CHECK_EVERY)
+        {
+            return;
+        }
+        let Some(wal) = self.wal_mgr.as_ref() else {
+            return;
+        };
+        let wal_bytes = (wal.segment_count() as u64).saturating_mul(wal.max_segment_bytes());
+        // Back off when a long txn keeps the WAL pinned: next trigger needs real growth.
+        let floor = self.auto_ckpt_floor.load(Relaxed);
+        if wal_bytes < threshold || wal_bytes < floor.saturating_add(threshold / 2) {
+            return;
+        }
+        if self
+            .auto_ckpt_running
+            .compare_exchange(false, true, Relaxed, Relaxed)
+            .is_err()
+        {
+            return;
+        }
+        // A failed auto-checkpoint must not fail the user's statement.
+        let _ = self.checkpoint_with_meta();
+        let after = (wal.segment_count() as u64).saturating_mul(wal.max_segment_bytes());
+        self.auto_ckpt_floor.store(after, Relaxed);
+        self.auto_ckpt_running.store(false, Relaxed);
     }
 
     pub fn checkpoint(&self) -> Result<()> {
