@@ -872,6 +872,7 @@ pub struct TransactionContext {
     in_rollback: bool,
     rollback_poisoned: bool,
     commit_poisoned: bool,
+    poisoned_commit_lsn: Option<Lsn>,
     abort_lsn_logged: Option<Lsn>,
 }
 
@@ -1082,6 +1083,7 @@ impl TxnManager {
             in_rollback: false,
             rollback_poisoned: false,
             commit_poisoned: false,
+            poisoned_commit_lsn: None,
             abort_lsn_logged: None,
         };
 
@@ -2222,6 +2224,7 @@ impl TxnManager {
                 if wal.flushed_lsn() < lsn {
                     if let Some(ctx) = self.txns.lock().unwrap().get_mut(&txn_id) {
                         ctx.commit_poisoned = true;
+                        ctx.poisoned_commit_lsn = Some(lsn);
                     }
                     return Err(Error::TransactionError(format!(
                         "Transaction {} commit is poisoned after WAL flush failure; restart/crash recovery required to resolve in-doubt state: {}",
@@ -2234,6 +2237,49 @@ impl TxnManager {
             None
         };
 
+        self.finish_commit(txn_id, commit_lsn, commit_started)
+    }
+
+    /// Poisoned commit (WAL flush kept failing) ko aage badhane ka raasta: commit record dobara
+    /// flush karo, durable ho jaye to commit pura karo (commit_ts, locks release).
+    /// Abort kabhi nahi: record durable ho sakta hai (doosre txn ka flush use likh deta hai).
+    pub fn resolve_poisoned_commit(&self, txn_id: TxnId) -> Result<u64> {
+        let lsn = {
+            let txns = self.txns.lock().unwrap();
+            let ctx = txns.get(&txn_id).ok_or_else(|| {
+                Error::TransactionError(format!("Unknown transaction ID {}", txn_id))
+            })?;
+            if ctx.state != TxnState::Committing || !ctx.commit_poisoned {
+                return Err(Error::TransactionError(format!(
+                    "Transaction {} has no poisoned commit to resolve",
+                    txn_id
+                )));
+            }
+            ctx.poisoned_commit_lsn.ok_or_else(|| {
+                Error::TransactionError(format!("Transaction {} has no recorded commit LSN", txn_id))
+            })?
+        };
+        let wal = self
+            .wal
+            .as_ref()
+            .ok_or_else(|| Error::TransactionError("no WAL attached".to_string()))?;
+        if let Err(err) = wal.flush_up_to(lsn) {
+            if wal.flushed_lsn() < lsn {
+                return Err(Error::TransactionError(format!(
+                    "Transaction {} commit is still poisoned: {}",
+                    txn_id, err
+                )));
+            }
+        }
+        self.finish_commit(txn_id, Some(lsn), None)
+    }
+
+    fn finish_commit(
+        &self,
+        txn_id: TxnId,
+        commit_lsn: Option<Lsn>,
+        commit_started: Option<std::time::Instant>,
+    ) -> Result<u64> {
         let txn_lock_started = std::time::Instant::now();
         let mut txns = self.txns.lock().unwrap();
         GLOBAL_METRICS.record_txn_mutex_wait_ns(
@@ -2242,12 +2288,18 @@ impl TxnManager {
         let ctx = txns.get_mut(&txn_id).ok_or_else(|| {
             Error::TransactionError(format!("Transaction {} disappeared during commit", txn_id))
         })?;
+        if let TxnState::Committed { commit_ts } = ctx.state {
+            // already completed (e.g. concurrent resolve_poisoned_commit)
+            return Ok(commit_ts);
+        }
         if let Some(lsn) = commit_lsn {
             ctx.last_lsn = lsn;
         }
         let commit_ts = self.oracle_ts.fetch_add(1, Ordering::SeqCst) + 1;
         ctx.state = TxnState::Committed { commit_ts };
         ctx.commit_ts = Some(commit_ts);
+        ctx.commit_poisoned = false;
+        ctx.poisoned_commit_lsn = None;
         ctx.write_set.clear();
         ctx.read_keys.clear();
         ctx.read_ranges.clear();
