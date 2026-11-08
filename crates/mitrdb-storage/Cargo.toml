@@ -11,3 +11,11 @@ mitrdb-observe = { path = "../mitrdb-observe" }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 io-uring = "0.7"
+
+[features]
+# Test-only failure injection (DiskManager::set_fail_alloc_after). Off by default.
+fault-injection = []
+
+[[test]]
+name = "btree_newpage_fail_probe2"
+required-features = ["fault-injection"]

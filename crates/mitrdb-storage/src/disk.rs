@@ -2,6 +2,8 @@ use std::collections::{BTreeSet, HashMap};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+#[cfg(feature = "fault-injection")]
+use std::sync::atomic::{AtomicI64, Ordering as AtomicOrdering};
 use std::sync::{Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use std::os::unix::io::AsRawFd;
@@ -21,6 +23,8 @@ pub struct DiskManager {
     pending_free_pages: Mutex<HashMap<TxnId, Vec<PageId>>>,
     backup_dirty_pages: Mutex<Option<BTreeSet<PageId>>>,
     ring: Mutex<Option<io_uring::IoUring>>,
+    #[cfg(feature = "fault-injection")]
+    fail_alloc_after: AtomicI64,
 }
 
 fn sync_parent_dir(path: &Path) -> Result<()> {
@@ -176,6 +180,8 @@ impl DiskManager {
             pending_free_pages: Mutex::new(HashMap::new()),
             backup_dirty_pages: Mutex::new(None),
             ring: Mutex::new(io_uring::IoUring::new(64).ok()),
+            #[cfg(feature = "fault-injection")]
+            fail_alloc_after: AtomicI64::new(-1),
         })
     }
 
@@ -202,6 +208,12 @@ impl DiskManager {
         if let Some(ref mut set) = *tracker {
             set.insert(page_id);
         }
+    }
+
+    /// Test hook: allow `n` more allocations, then fail one (-1 = off).
+    #[cfg(feature = "fault-injection")]
+    pub fn set_fail_alloc_after(&self, n: i64) {
+        self.fail_alloc_after.store(n, AtomicOrdering::Relaxed);
     }
 
     pub fn num_pages(&self) -> u32 {
@@ -486,6 +498,17 @@ impl DiskManager {
     where
         F: Fn(PageId) -> bool,
     {
+        #[cfg(feature = "fault-injection")]
+        {
+            let inj = self.fail_alloc_after.load(AtomicOrdering::Relaxed);
+            if inj >= 0 {
+                if inj == 0 {
+                    self.fail_alloc_after.store(-1, AtomicOrdering::Relaxed);
+                    return Err(Error::Io("injected allocation failure".to_string()));
+                }
+                self.fail_alloc_after.store(inj - 1, AtomicOrdering::Relaxed);
+            }
+        }
         let mut num_pages = self.num_pages.lock().unwrap();
         let mut free_pages = self.free_pages.lock().unwrap();
         let pending = self.pending_free_pages.lock().unwrap();
