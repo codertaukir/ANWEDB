@@ -1051,6 +1051,9 @@ impl BPlusTree {
             return Ok(old_value);
         }
 
+        // Split branch only: split chain ke saare reads pehle karo, taaki read fail ho to
+        // koi new_page / WAL record / page write na ho chuka ho.
+        self.preflight_split_reads(&leaf)?;
         self.split_leaf(&mut root_guard, leaf, txn_id, prev_lsn)?;
         Ok(old_value)
     }
@@ -1064,6 +1067,32 @@ impl BPlusTree {
     ) -> Result<()> {
         self.insert_or_replace_logged(txn_id, prev_lsn, key, value)
             .map(|_| ())
+    }
+
+    /// Leaf split ke chain mein jo nodes padhe jaate hain unhe write se pehle padh lo (conservative).
+    /// Ancestor split hoga to split_internal uske saare children padhta hai, wo bhi yahan padhe jaate hain.
+    fn preflight_split_reads(&self, leaf: &BTreeNode) -> Result<()> {
+        let sep = leaf
+            .keys
+            .iter()
+            .max_by_key(|k| k.len())
+            .cloned()
+            .unwrap_or_default();
+        let mut pid = leaf.parent_page_id;
+        while pid != INVALID_PAGE_ID {
+            let node = self.read_node(pid)?;
+            let mut sim = node.clone();
+            sim.keys.push(sep.clone());
+            sim.children.push(INVALID_PAGE_ID);
+            if sim.keys.len() <= (self.max_keys as usize) && sim.fits_in_page() {
+                break;
+            }
+            for &c in &node.children {
+                self.read_node(c)?;
+            }
+            pid = node.parent_page_id;
+        }
+        Ok(())
     }
 
     fn split_leaf(
