@@ -279,6 +279,34 @@ impl Table<'_> {
             ))
             .map(|_| ())
     }
+
+    /// Add NOT NULL to a column. Fails (naming the first bad primary key) if any row has NULL.
+    /// With `default`, NULL rows are first backfilled in their own transaction (int/text/bool);
+    /// the backfill and the flip are not atomic and not safe against concurrent writers.
+    pub fn set_not_null(&self, name: &str, default: Option<Value>) -> Result<()> {
+        self.check_name()?;
+        if !valid_ident(name) {
+            return Err(bad("bad column name"));
+        }
+        if let Some(d) = default {
+            let lit = match d {
+                Value::Int64(n) => n.to_string(),
+                Value::Text(t) => format!("'{}'", t.replace('\'', "''")),
+                Value::Bool(b) => String::from(if b { "TRUE" } else { "FALSE" }),
+                _ => return Err(bad("default must be an int, text or bool value")),
+            };
+            self.server.execute_sql(&format!(
+                "UPDATE {} SET {} = {} WHERE {} IS NULL",
+                self.name, name, lit, name
+            ))?;
+        }
+        self.server
+            .execute_sql(&format!(
+                "ALTER TABLE {} ALTER COLUMN {} SET NOT NULL",
+                self.name, name
+            ))
+            .map(|_| ())
+    }
 }
 
 use crate::{ExecutionResult, PhysicalPlan, Value};

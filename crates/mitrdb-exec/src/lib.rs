@@ -726,6 +726,7 @@ impl Executor {
                     | PhysicalPlan::AlterTableRenameColumn { .. }
                     | PhysicalPlan::AlterTableDropColumn { .. }
                     | PhysicalPlan::AlterTableSetNullable { .. }
+                    | PhysicalPlan::AlterTableSetNotNull { .. }
             )
         {
             return Err(Error::TransactionError(
@@ -1000,6 +1001,65 @@ impl Executor {
                     }
                 }
                 catalog.set_nullable(&table_name, &column_name)?;
+                catalog.sync_roots()?;
+                Ok(ExecutionResult::Ok)
+            }
+            PhysicalPlan::AlterTableSetNotNull {
+                table_name,
+                column_name,
+            } => {
+                let schema = catalog.get_table_schema(&table_name)?.ok_or_else(|| {
+                    Error::TransactionError(format!("Table '{}' not found", table_name))
+                })?;
+                let col_pos = schema
+                    .columns
+                    .iter()
+                    .position(|c| !c.is_dropped() && c.name.eq_ignore_ascii_case(&column_name))
+                    .ok_or_else(|| {
+                        Error::TransactionError(format!(
+                            "Column '{}' not found in table '{}'",
+                            column_name, table_name
+                        ))
+                    })?;
+                let tree = catalog.table_tree(schema.table_id).ok_or_else(|| {
+                    Error::TransactionError("Table storage B+Tree not initialized".to_string())
+                })?;
+                let mut table_trees = vec![tree.clone()];
+                for idx_meta in catalog.get_table_indexes(schema.table_id) {
+                    if let Some(it) = catalog.index_tree(idx_meta.index_id) {
+                        table_trees.push(it);
+                    }
+                }
+                if table_trees
+                    .iter()
+                    .any(|t| txn_mgr.has_active_tree_references(t))
+                {
+                    return Err(Error::WriteConflict(format!(
+                        "Cannot alter table '{}' while referenced by an active transaction",
+                        table_name
+                    )));
+                }
+                // Validate: no row (incl. rows padded by ADD COLUMN) may hold NULL here.
+                let pk_idx = Self::primary_key_index(&schema);
+                let tid = txn_mgr.begin_with_isolation(default_isolation)?;
+                let scan: Result<()> = (|| {
+                    for (_pk, row_bytes) in txn_mgr.scan_unlocked(tid, &tree)? {
+                        let tuple =
+                            Tuple::deserialize_for_table(&row_bytes, schema.columns.len())?;
+                        if matches!(tuple.get(col_pos), Some(Value::Null)) {
+                            return Err(Error::TransactionError(format!(
+                                "Cannot set NOT NULL on '{}.{}': row with primary key {:?} has NULL",
+                                table_name,
+                                column_name,
+                                tuple.get(pk_idx)
+                            )));
+                        }
+                    }
+                    Ok(())
+                })();
+                let _ = txn_mgr.abort(tid);
+                scan?;
+                catalog.set_not_null(&table_name, &column_name)?;
                 catalog.sync_roots()?;
                 Ok(ExecutionResult::Ok)
             }

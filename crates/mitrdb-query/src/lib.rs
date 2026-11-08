@@ -517,6 +517,10 @@ pub enum Statement {
         table_name: String,
         column_name: String,
     },
+    AlterTableSetNotNull {
+        table_name: String,
+        column_name: String,
+    },
     CreateIndex {
         index_name: String,
         table_name: String,
@@ -708,6 +712,10 @@ pub enum PhysicalPlan {
         column_name: String,
     },
     AlterTableSetNullable {
+        table_name: String,
+        column_name: String,
+    },
+    AlterTableSetNotNull {
         table_name: String,
         column_name: String,
     },
@@ -1259,6 +1267,18 @@ impl QueryEngine {
                     Error::TransactionError(format!("Table '{}' not found", table_name))
                 })?;
                 Ok(PhysicalPlan::AlterTableSetNullable {
+                    table_name,
+                    column_name,
+                })
+            }
+            Statement::AlterTableSetNotNull {
+                table_name,
+                column_name,
+            } => {
+                let _ = self.catalog.get_table_schema(&table_name)?.ok_or_else(|| {
+                    Error::TransactionError(format!("Table '{}' not found", table_name))
+                })?;
+                Ok(PhysicalPlan::AlterTableSetNotNull {
                     table_name,
                     column_name,
                 })
@@ -2275,6 +2295,12 @@ impl QueryEngine {
                 let action = tokens[1..].join(" ").to_uppercase();
                 if action == "DROP NOT NULL" {
                     return Ok(Statement::AlterTableSetNullable {
+                        table_name,
+                        column_name,
+                    });
+                }
+                if action == "SET NOT NULL" {
+                    return Ok(Statement::AlterTableSetNotNull {
                         table_name,
                         column_name,
                     });
