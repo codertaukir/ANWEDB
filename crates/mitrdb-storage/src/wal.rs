@@ -19,6 +19,8 @@ const SYS_TXN_ID_MIN: TxnId = 1_000_000_000;
 const LOG_RECORD_FIXED_HEADER: usize = 4 + 8 + 8 + 8 + 1 + 4 + 2 + 8 + 2 + 2;
 /// Initial capacity of the pending-bytes arena.
 const PENDING_ARENA_INITIAL_CAPACITY: usize = 64 * 1024;
+/// Above this capacity an emptied arena is shrunk back (a bulk statement can grow it to tens of MB).
+const ARENA_SHRINK_MIN_CAPACITY: usize = 4 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CheckpointMetadata {
@@ -498,6 +500,13 @@ impl WalInner {
         self.pending.drain(0..count);
         self.pending_bytes.drain(0..total as usize);
         self.pending_base += total;
+        // Vec::drain never returns capacity; give it back once the arena is mostly empty.
+        if self.pending_bytes.capacity() > ARENA_SHRINK_MIN_CAPACITY
+            && self.pending_bytes.len() < self.pending_bytes.capacity() / 4
+        {
+            let keep = self.pending_bytes.len().max(PENDING_ARENA_INITIAL_CAPACITY);
+            self.pending_bytes.shrink_to(keep);
+        }
     }
 
     fn track_record(&mut self, record: &LogRecord) {
@@ -2035,6 +2044,39 @@ mod tests {
         let bytes = rec.serialize();
         let decoded = LogRecord::deserialize(&bytes).unwrap();
         assert_eq!(decoded, rec);
+    }
+
+    #[test]
+    fn test_wal_arena_capacity_released_after_bulk_flush() {
+        let dir = std::env::temp_dir().join(format!("mitrdb_wal_arena_cap_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let wal = WalManager::open_or_create(dir.join("t.wal")).unwrap();
+        let target = 18 * 1024 * 1024;
+        while wal.pending_bytes_len() < target {
+            wal.append_record(LogRecord::new_update(0, 1, 0, 1, 0, vec![7u8; 1000], Vec::new()))
+                .unwrap();
+        }
+        let cap_before = wal.inner.lock().unwrap().pending_bytes.capacity();
+        wal.flush_all().unwrap();
+        let (len_after, cap_after) = {
+            let g = wal.inner.lock().unwrap();
+            (g.pending_bytes.len(), g.pending_bytes.capacity())
+        };
+        println!(
+            "ARENA before_flush cap={}MB after_flush len={}B cap={}MB",
+            cap_before / (1024 * 1024),
+            len_after,
+            cap_after / (1024 * 1024)
+        );
+        assert_eq!(len_after, 0);
+        assert!(
+            cap_after < 4 * 1024 * 1024,
+            "arena capacity stayed at {} bytes after flush",
+            cap_after
+        );
+        drop(wal);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
