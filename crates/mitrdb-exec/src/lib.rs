@@ -2318,6 +2318,9 @@ impl Executor {
 
         let mut updated = 0;
         for (old_pk_bytes, old_tuple, new_pk_bytes, new_tuple) in &planned_updates {
+            if updated % 64 == 63 {
+                txn_mgr.relieve_wal_pressure(16 * 1024 * 1024)?;
+            }
             let new_row_bytes = Tuple::serialize(new_tuple);
             txn_mgr.put(txn_id, &tree, new_pk_bytes, &new_row_bytes)?;
 
