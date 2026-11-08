@@ -9,3 +9,11 @@ license = "Apache-2.0"
 mitrdb-common = { path = "../mitrdb-common" }
 mitrdb-observe = { path = "../mitrdb-observe" }
 mitrdb-storage = { path = "../mitrdb-storage" }
+
+[features]
+# Test-only: forwards storage failure injection (DiskManager::set_fail_alloc_after).
+fault-injection = ["mitrdb-storage/fault-injection"]
+
+[[test]]
+name = "txn_newpage_fail_atomicity"
+required-features = ["fault-injection"]
