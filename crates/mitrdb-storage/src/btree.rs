@@ -14,6 +14,14 @@ use mitrdb_observe::GLOBAL_METRICS;
 
 static NEXT_TREE_ID: AtomicU64 = AtomicU64::new(1);
 
+/// Plan for one leaf split, computed before the first write: exact split point,
+/// the already-read old next leaf, and how many new pages the whole chain needs.
+struct SplitPlan {
+    mid: usize,
+    old_next: Option<BTreeNode>,
+    pages_needed: usize,
+}
+
 pub(crate) const NODE_KIND_LEAF: u8 = 1;
 pub(crate) const NODE_KIND_INTERNAL: u8 = 2;
 pub(crate) const NODE_KIND_FREE: u8 = 0xFF;
@@ -1051,10 +1059,25 @@ impl BPlusTree {
             return Ok(old_value);
         }
 
-        // Split branch only: split chain ke saare reads pehle karo, taaki read fail ho to
-        // koi new_page / WAL record / page write na ho chuka ho.
-        self.preflight_split_reads(&leaf)?;
-        self.split_leaf(&mut root_guard, leaf, txn_id, prev_lsn)?;
+        // Split branch only: saare reads + saari page allocation kisi bhi write se pehle,
+        // taaki read/alloc fail ho to na WAL record bane, na tree aadha badle.
+        let plan = self.plan_split(&leaf)?;
+        let mut pages = self.alloc_split_pages(plan.pages_needed)?;
+        let res = self.split_leaf(
+            &mut root_guard,
+            leaf,
+            plan.mid,
+            plan.old_next,
+            &mut pages,
+            txn_id,
+            prev_lsn,
+        );
+        debug_assert!(
+            res.is_err() || pages.is_empty(),
+            "split plan allocated more pages than the split used"
+        );
+        self.release_split_pages(&mut pages);
+        res?;
         Ok(old_value)
     }
 
@@ -1069,66 +1092,18 @@ impl BPlusTree {
             .map(|_| ())
     }
 
-    /// Leaf split ke chain mein jo nodes padhe jaate hain unhe write se pehle padh lo (conservative).
-    /// Ancestor split hoga to split_internal uske saare children padhta hai, wo bhi yahan padhe jaate hain.
-    fn preflight_split_reads(&self, leaf: &BTreeNode) -> Result<()> {
-        let sep = leaf
-            .keys
-            .iter()
-            .max_by_key(|k| k.len())
-            .cloned()
-            .unwrap_or_default();
-        let mut pid = leaf.parent_page_id;
-        while pid != INVALID_PAGE_ID {
-            let node = self.read_node(pid)?;
-            let mut sim = node.clone();
-            sim.keys.push(sep.clone());
-            sim.children.push(INVALID_PAGE_ID);
-            if sim.keys.len() <= (self.max_keys as usize) && sim.fits_in_page() {
-                break;
-            }
-            for &c in &node.children {
-                self.read_node(c)?;
-            }
-            pid = node.parent_page_id;
-        }
-        Ok(())
-    }
-
-    fn split_leaf(
-        &self,
-        root_guard: &mut PageId,
-        mut left_leaf: BTreeNode,
-        txn_id: TxnId,
-        prev_lsn: &mut Lsn,
-    ) -> Result<()> {
-        let profile_started = mitrdb_observe::profiling_enabled().then(std::time::Instant::now);
-        let total_len = left_leaf.keys.len();
-        // Old next leaf ko pehle padho (new_page aur sab writes se pehle): read fail ho to
-        // na WAL record bane, na page leak ho, na tree aadha badle.
-        let old_next_leaf = if left_leaf.next_leaf_page_id != INVALID_PAGE_ID {
-            Some(self.read_node(left_leaf.next_leaf_page_id)?)
-        } else {
-            None
-        };
-        let mid_profile_started = mitrdb_observe::profiling_enabled().then(std::time::Instant::now);
-        // Precompute entry sizes once. The previous implementation recomputed both
-        // sides for every candidate midpoint, making split selection O(n^2).
-        let entry_sizes: Vec<usize> = left_leaf
-            .keys
-            .iter()
-            .zip(left_leaf.values.iter())
-            .map(|(k, v)| 4 + k.len() + v.len())
-            .collect();
+    /// Split point of an (already overfull) leaf. Pure: used by both the plan and the real split.
+    fn choose_leaf_mid(leaf: &BTreeNode) -> usize {
+        let total_len = leaf.keys.len();
         let mut prefix_bytes = Vec::with_capacity(total_len + 1);
         prefix_bytes.push(0usize);
-        for size in &entry_sizes {
-            prefix_bytes.push(prefix_bytes.last().copied().unwrap_or(0) + size);
+        for (k, v) in leaf.keys.iter().zip(leaf.values.iter()) {
+            prefix_bytes.push(prefix_bytes.last().copied().unwrap_or(0) + 4 + k.len() + v.len());
         }
         let total_bytes = *prefix_bytes.last().unwrap_or(&0);
         let mut mid = total_len / 2;
         // Rightmost leaf: split near the end so sequential appends leave full leaves.
-        let first_try = if left_leaf.next_leaf_page_id == INVALID_PAGE_ID {
+        let first_try = if leaf.next_leaf_page_id == INVALID_PAGE_ID {
             total_len.saturating_sub(1)
         } else {
             total_len / 2
@@ -1146,22 +1121,150 @@ impl BPlusTree {
                 break;
             }
         }
+        mid
+    }
 
-        if let Some(started) = mid_profile_started {
+    /// Split point of an (already overfull) internal node. Pure.
+    fn choose_internal_mid(node: &BTreeNode) -> usize {
+        let total_len = node.keys.len();
+        let mut prefix_bytes = Vec::with_capacity(total_len + 1);
+        prefix_bytes.push(0usize);
+        for k in &node.keys {
+            prefix_bytes.push(prefix_bytes.last().copied().unwrap_or(0) + 2 + k.len() + 4);
+        }
+        let mut mid = total_len / 2;
+        for cand_mid in std::iter::once(total_len / 2).chain(1..total_len.saturating_sub(1)) {
+            if cand_mid >= total_len {
+                continue;
+            }
+            let left_body = 2 + 4 + prefix_bytes[cand_mid];
+            let right_body = 2 + 4 + prefix_bytes[total_len] - prefix_bytes[cand_mid + 1];
+            if BTREE_NODE_BODY_OFFSET + left_body <= PAGE_SIZE
+                && BTREE_NODE_BODY_OFFSET + right_body <= PAGE_SIZE
+            {
+                mid = cand_mid;
+                break;
+            }
+        }
+        mid
+    }
+
+    /// Read everything the split chain will read and count the exact number of new pages
+    /// (1 leaf + 1 per splitting ancestor + 1 if the root splits), before any write.
+    fn plan_split(&self, leaf: &BTreeNode) -> Result<SplitPlan> {
+        let old_next = if leaf.next_leaf_page_id != INVALID_PAGE_ID {
+            Some(self.read_node(leaf.next_leaf_page_id)?)
+        } else {
+            None
+        };
+        let mid_started = mitrdb_observe::profiling_enabled().then(std::time::Instant::now);
+        let mid = Self::choose_leaf_mid(leaf);
+        if let Some(started) = mid_started {
             mitrdb_observe::record_profile_duration(
                 mitrdb_observe::ProfilePhase::SplitMidSelection,
                 started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
             );
         }
+        let mut sep = leaf.keys[mid].clone();
+        let mut pages_needed = 1usize;
+        let mut left_id = leaf.page_id;
+        let mut pid = leaf.parent_page_id;
+        loop {
+            if pid == INVALID_PAGE_ID {
+                pages_needed += 1; // new root
+                break;
+            }
+            let node = self.read_node(pid)?;
+            let pos = node
+                .children
+                .iter()
+                .position(|&c| c == left_id)
+                .ok_or_else(|| {
+                    Error::PageCorrupted("Left child not found in B+Tree parent".to_string())
+                })?;
+            // Common case (parent has room): pure arithmetic, no node clone.
+            if node.keys.len() < (self.max_keys as usize)
+                && BTREE_NODE_BODY_OFFSET + node.serialized_body_size() + 2 + sep.len() + 4
+                    <= PAGE_SIZE
+            {
+                break;
+            }
+            let mut sim = node.clone();
+            sim.keys.insert(pos, sep.clone());
+            sim.children.insert(pos + 1, INVALID_PAGE_ID);
+            for &c in &node.children {
+                self.read_node(c)?;
+            }
+            pages_needed += 1;
+            let m = Self::choose_internal_mid(&sim);
+            sep = sim.keys[m].clone();
+            left_id = pid;
+            pid = node.parent_page_id;
+        }
+        Ok(SplitPlan {
+            mid,
+            old_next,
+            pages_needed,
+        })
+    }
+
+    /// Allocate all pages of a split up front. On failure everything allocated so far is freed.
+    /// Returned order: pop() gives the leaf page first, then internal pages.
+    fn alloc_split_pages(&self, n: usize) -> Result<Vec<PageId>> {
         let alloc_started = mitrdb_observe::profiling_enabled().then(std::time::Instant::now);
-        let (right_id, _) = self.bpm.new_page(PAGE_TYPE_BTREE_LEAF)?;
-        self.bpm.unpin_page(right_id, false)?;
+        let mut pages: Vec<PageId> = Vec::with_capacity(n);
+        for i in 0..n {
+            let ptype = if i == 0 {
+                PAGE_TYPE_BTREE_LEAF
+            } else {
+                PAGE_TYPE_BTREE_INTERNAL
+            };
+            match self.bpm.new_page(ptype) {
+                Ok((id, _)) => {
+                    pages.push(id);
+                    if let Err(e) = self.bpm.unpin_page(id, false) {
+                        self.release_split_pages(&mut pages);
+                        return Err(e);
+                    }
+                }
+                Err(e) => {
+                    self.release_split_pages(&mut pages);
+                    return Err(e);
+                }
+            }
+        }
+        pages.reverse();
         if let Some(started) = alloc_started {
             mitrdb_observe::record_profile_duration(
                 mitrdb_observe::ProfilePhase::SplitPageAllocation,
                 started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
             );
         }
+        Ok(pages)
+    }
+
+    /// Give back pages that were allocated for a split but never used (error path only).
+    fn release_split_pages(&self, pages: &mut Vec<PageId>) {
+        for id in pages.drain(..) {
+            let _ = self.bpm.free_page_in_op(id);
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn split_leaf(
+        &self,
+        root_guard: &mut PageId,
+        mut left_leaf: BTreeNode,
+        mid: usize,
+        old_next_leaf: Option<BTreeNode>,
+        pages: &mut Vec<PageId>,
+        txn_id: TxnId,
+        prev_lsn: &mut Lsn,
+    ) -> Result<()> {
+        let profile_started = mitrdb_observe::profiling_enabled().then(std::time::Instant::now);
+        let right_id = pages
+            .pop()
+            .ok_or_else(|| Error::PageCorrupted("split page pool exhausted".to_string()))?;
 
         let redistribution_started =
             mitrdb_observe::profiling_enabled().then(std::time::Instant::now);
@@ -1200,6 +1303,7 @@ impl BPlusTree {
 
         let result = self.insert_into_parent(
             root_guard,
+            pages,
             left_leaf.parent_page_id,
             left_leaf.page_id,
             separator_key,
@@ -1226,6 +1330,7 @@ impl BPlusTree {
     fn insert_into_parent(
         &self,
         root_guard: &mut PageId,
+        pages: &mut Vec<PageId>,
         parent_id: PageId,
         left_child_id: PageId,
         separator_key: Vec<u8>,
@@ -1234,8 +1339,9 @@ impl BPlusTree {
         prev_lsn: &mut Lsn,
     ) -> Result<()> {
         if parent_id == INVALID_PAGE_ID {
-            let (new_root_id, _) = self.bpm.new_page(PAGE_TYPE_BTREE_INTERNAL)?;
-            self.bpm.unpin_page(new_root_id, false)?;
+            let new_root_id = pages
+                .pop()
+                .ok_or_else(|| Error::PageCorrupted("split page pool exhausted".to_string()))?;
 
             let mut new_root = BTreeNode::new_internal(new_root_id, self.max_keys);
             new_root.keys.push(separator_key);
@@ -1272,57 +1378,22 @@ impl BPlusTree {
             return Ok(());
         }
 
-        self.split_internal(root_guard, parent, txn_id, prev_lsn)
+        self.split_internal(root_guard, parent, pages, txn_id, prev_lsn)
     }
 
     fn split_internal(
         &self,
         root_guard: &mut PageId,
         mut left_internal: BTreeNode,
+        pages: &mut Vec<PageId>,
         txn_id: TxnId,
         prev_lsn: &mut Lsn,
     ) -> Result<()> {
         let profile_started = mitrdb_observe::profiling_enabled().then(std::time::Instant::now);
-        let total_len = left_internal.keys.len();
-        let mid_profile_started = mitrdb_observe::profiling_enabled().then(std::time::Instant::now);
-        // Cache each encoded key size and use prefix sums so all candidate checks
-        // are O(1), rather than repeatedly summing both slices (O(n^2)).
-        let key_sizes: Vec<usize> = left_internal.keys.iter().map(|k| 2 + k.len() + 4).collect();
-        let mut prefix_bytes = Vec::with_capacity(total_len + 1);
-        prefix_bytes.push(0usize);
-        for size in &key_sizes {
-            prefix_bytes.push(prefix_bytes.last().copied().unwrap_or(0) + size);
-        }
-        let mut mid = total_len / 2;
-        for cand_mid in std::iter::once(total_len / 2).chain(1..total_len.saturating_sub(1)) {
-            if cand_mid >= total_len {
-                continue;
-            }
-            let left_body = 2 + 4 + prefix_bytes[cand_mid];
-            let right_body = 2 + 4 + prefix_bytes[total_len] - prefix_bytes[cand_mid + 1];
-            if BTREE_NODE_BODY_OFFSET + left_body <= PAGE_SIZE
-                && BTREE_NODE_BODY_OFFSET + right_body <= PAGE_SIZE
-            {
-                mid = cand_mid;
-                break;
-            }
-        }
-
-        if let Some(started) = mid_profile_started {
-            mitrdb_observe::record_profile_duration(
-                mitrdb_observe::ProfilePhase::SplitMidSelection,
-                started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
-            );
-        }
-        let alloc_started = mitrdb_observe::profiling_enabled().then(std::time::Instant::now);
-        let (right_id, _) = self.bpm.new_page(PAGE_TYPE_BTREE_INTERNAL)?;
-        self.bpm.unpin_page(right_id, false)?;
-        if let Some(started) = alloc_started {
-            mitrdb_observe::record_profile_duration(
-                mitrdb_observe::ProfilePhase::SplitPageAllocation,
-                started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
-            );
-        }
+        let mid = Self::choose_internal_mid(&left_internal);
+        let right_id = pages
+            .pop()
+            .ok_or_else(|| Error::PageCorrupted("split page pool exhausted".to_string()))?;
 
         let redistribution_started =
             mitrdb_observe::profiling_enabled().then(std::time::Instant::now);
@@ -1357,6 +1428,7 @@ impl BPlusTree {
 
         let result = self.insert_into_parent(
             root_guard,
+            pages,
             left_internal.parent_page_id,
             left_internal.page_id,
             promoted_key,

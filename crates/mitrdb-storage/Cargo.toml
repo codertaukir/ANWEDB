@@ -19,3 +19,7 @@ fault-injection = []
 [[test]]
 name = "btree_newpage_fail_probe2"
 required-features = ["fault-injection"]
+
+[[test]]
+name = "btree_newpage_fail_atomicity"
+required-features = ["fault-injection"]
