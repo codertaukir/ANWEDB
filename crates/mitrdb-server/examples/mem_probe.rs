@@ -80,8 +80,10 @@ fn main() -> Result<(), String> {
             }
             s.execute_sql("BEGIN;").map_err(|e| format!("begin: {e:?}"))?;
             let base = CUR.load(Relaxed);
+            let m0 = s.metrics_snapshot();
             PEAK.store(base, Relaxed);
             s.execute_sql(sql).map_err(|e| format!("stmt {kind}: {e:?}"))?;
+            let m1 = s.metrics_snapshot();
             let retained = CUR.load(Relaxed).saturating_sub(base);
             let peak = PEAK.load(Relaxed).saturating_sub(base);
             s.execute_sql("COMMIT;").map_err(|e| format!("commit: {e:?}"))?;
@@ -92,6 +94,10 @@ fn main() -> Result<(), String> {
                 mb(peak), peak / n as usize,
                 mb(after), after / n as usize,
             );
+            println!("{kind:<12} n={n:<6} stmt: wal_flushes={} wal_syncs={} sync_ms={:.1}",
+                m1.wal_flushes - m0.wal_flushes,
+                m1.wal_sync_count - m0.wal_sync_count,
+                (m1.wal_sync_total_ns - m0.wal_sync_total_ns) as f64 / 1e6);
             drop(s);
         }
     }
