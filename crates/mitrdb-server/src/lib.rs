@@ -153,6 +153,14 @@ impl Server {
         ))
     }
 
+    /// Test hook (fault-injection feature only): allow `n` more page ops, then fail one (-1 = off).
+    #[cfg(feature = "fault-injection")]
+    pub fn set_fail_page_op_after(&self, n: i64) {
+        if let Some(ref bpm) = self.bpm {
+            bpm.set_fail_page_op_after(n);
+        }
+    }
+
     pub fn start(&self) -> Result<()> {
         Ok(())
     }

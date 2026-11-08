@@ -18,3 +18,11 @@ mitrdb-txn = { path = "../mitrdb-txn" }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 zeroize = "1.9"
 getrandom = "0.2"
+
+[features]
+# Test-only: forwards storage failure injection (Server::set_fail_page_op_after). Off by default.
+fault-injection = ["mitrdb-storage/fault-injection"]
+
+[[test]]
+name = "alter_type_inject"
+required-features = ["fault-injection"]
