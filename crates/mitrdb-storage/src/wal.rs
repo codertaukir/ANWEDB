@@ -562,6 +562,9 @@ pub struct WalManager {
     ring: Mutex<Option<io_uring::IoUring>>,
     /// Pages whose page_lsn is <= this value get a full-page image on their next logged write.
     ckpt_full_image_threshold: std::sync::atomic::AtomicU64,
+    /// Test-only: allow n appends, then fail one (-1 = off).
+    #[cfg(feature = "fault-injection")]
+    fail_append_after: std::sync::atomic::AtomicI64,
 }
 
 impl WalManager {
@@ -605,6 +608,8 @@ impl WalManager {
             active_segment_file: Mutex::new(None),
             ring: Mutex::new(io_uring::IoUring::new(16).ok()),
             ckpt_full_image_threshold: std::sync::atomic::AtomicU64::new(0),
+            #[cfg(feature = "fault-injection")]
+            fail_append_after: std::sync::atomic::AtomicI64::new(-1),
         };
         let _ = mgr.truncate_torn_tail()?;
         let startup_ckpt = mgr
@@ -632,6 +637,27 @@ impl WalManager {
             inner = self.flush_cv.wait(inner).unwrap();
         }
         inner
+    }
+
+    /// Test hook: allow `n` more appends, then fail one (-1 = off).
+    #[cfg(feature = "fault-injection")]
+    pub fn set_fail_append_after(&self, n: i64) {
+        self.fail_append_after
+            .store(n, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    #[cfg(feature = "fault-injection")]
+    fn inject_append_fail(&self) -> Result<()> {
+        use std::sync::atomic::Ordering::Relaxed;
+        let inj = self.fail_append_after.load(Relaxed);
+        if inj >= 0 {
+            if inj == 0 {
+                self.fail_append_after.store(-1, Relaxed);
+                return Err(Error::Io("injected wal append failure".to_string()));
+            }
+            self.fail_append_after.store(inj - 1, Relaxed);
+        }
+        Ok(())
     }
 
     /// True if the next logged write to a page with this LSN must carry a full-page image
@@ -1152,6 +1178,8 @@ impl WalManager {
     pub fn append_record(&self, mut record: LogRecord) -> Result<Lsn> {
         let profiling = mitrdb_observe::profiling_enabled();
         let append_started = profiling.then(std::time::Instant::now);
+        #[cfg(feature = "fault-injection")]
+        self.inject_append_fail()?;
         let mut inner = self.inner.lock().unwrap();
         let assigned_lsn = inner.next_lsn;
         let next_lsn = assigned_lsn

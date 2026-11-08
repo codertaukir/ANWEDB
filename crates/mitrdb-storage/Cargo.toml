@@ -13,7 +13,8 @@ mitrdb-observe = { path = "../mitrdb-observe" }
 io-uring = "0.7"
 
 [features]
-# Test-only failure injection (DiskManager::set_fail_alloc_after). Off by default.
+# Test-only failure injection (DiskManager::set_fail_alloc_after, WalManager::set_fail_append_after,
+# BufferPoolManager::set_fail_page_op_after). Off by default.
 fault-injection = []
 
 [[test]]
@@ -22,4 +23,8 @@ required-features = ["fault-injection"]
 
 [[test]]
 name = "btree_newpage_fail_atomicity"
+required-features = ["fault-injection"]
+
+[[test]]
+name = "btree_io_fail_probe"
 required-features = ["fault-injection"]

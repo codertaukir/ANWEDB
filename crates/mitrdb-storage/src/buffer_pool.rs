@@ -25,6 +25,13 @@ pub struct BufferPoolManager {
     clock_hand: Mutex<usize>,
     pool_size: usize,
     wal_check_fn: Mutex<Option<WalCheckHook>>,
+    /// Test-only: allow n page ops (fetch/mutate/update), then fail one (-1 = off).
+    #[cfg(feature = "fault-injection")]
+    fail_page_op_after: std::sync::atomic::AtomicI64,
+    #[cfg(feature = "fault-injection")]
+    last_injection_trace: Mutex<Option<String>>,
+    #[cfg(feature = "fault-injection")]
+    fail_miss_after: std::sync::atomic::AtomicI64,
 }
 
 impl BufferPoolManager {
@@ -48,6 +55,12 @@ impl BufferPoolManager {
             clock_hand: Mutex::new(0),
             pool_size,
             wal_check_fn: Mutex::new(None),
+            #[cfg(feature = "fault-injection")]
+            fail_page_op_after: std::sync::atomic::AtomicI64::new(-1),
+            #[cfg(feature = "fault-injection")]
+            last_injection_trace: Mutex::new(None),
+            #[cfg(feature = "fault-injection")]
+            fail_miss_after: std::sync::atomic::AtomicI64::new(-1),
         }
     }
 
@@ -71,7 +84,61 @@ impl BufferPoolManager {
         self.pool_size
     }
 
+    /// Test hook: allow `n` more page ops (fetch/mutate/update), then fail one (-1 = off).
+    #[cfg(feature = "fault-injection")]
+    pub fn set_fail_page_op_after(&self, n: i64) {
+        self.fail_page_op_after
+            .store(n, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Test hook: backtrace captured at the last injected page-op failure.
+    #[cfg(feature = "fault-injection")]
+    pub fn take_injection_trace(&self) -> Option<String> {
+        self.last_injection_trace.lock().unwrap().take()
+    }
+
+    #[cfg(feature = "fault-injection")]
+    fn inject_page_op_fail(&self) -> Result<()> {
+        use std::sync::atomic::Ordering::Relaxed;
+        let inj = self.fail_page_op_after.load(Relaxed);
+        if inj >= 0 {
+            if inj == 0 {
+                self.fail_page_op_after.store(-1, Relaxed);
+                *self.last_injection_trace.lock().unwrap() =
+                    Some(std::backtrace::Backtrace::force_capture().to_string());
+                return Err(Error::Io("injected page op failure".to_string()));
+            }
+            self.fail_page_op_after.store(inj - 1, Relaxed);
+        }
+        Ok(())
+    }
+
+    /// Test hook: allow `n` more cache MISSES (disk-read path), then fail one (-1 = off).
+    #[cfg(feature = "fault-injection")]
+    pub fn set_fail_miss_after(&self, n: i64) {
+        self.fail_miss_after
+            .store(n, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    #[cfg(feature = "fault-injection")]
+    fn inject_page_op_fail_miss(&self) -> Result<()> {
+        use std::sync::atomic::Ordering::Relaxed;
+        let inj = self.fail_miss_after.load(Relaxed);
+        if inj >= 0 {
+            if inj == 0 {
+                self.fail_miss_after.store(-1, Relaxed);
+                *self.last_injection_trace.lock().unwrap() =
+                    Some(std::backtrace::Backtrace::force_capture().to_string());
+                return Err(Error::Io("injected page read failure (miss)".to_string()));
+            }
+            self.fail_miss_after.store(inj - 1, Relaxed);
+        }
+        Ok(())
+    }
+
     pub fn fetch_page(&self, page_id: PageId) -> Result<Page> {
+        #[cfg(feature = "fault-injection")]
+        self.inject_page_op_fail()?;
         let mut page_table = self.page_table.lock().unwrap();
         let mut frames = self.frames.lock().unwrap();
         if self.disk_manager.is_page_free(page_id) {
@@ -87,6 +154,8 @@ impl BufferPoolManager {
         }
 
         GLOBAL_METRICS.record_miss();
+        #[cfg(feature = "fault-injection")]
+        self.inject_page_op_fail_miss()?;
         let page_on_disk = self.disk_manager.read_page(page_id)?;
         let victim_idx = self.find_victim_frame(&mut frames, &mut page_table)?;
 
@@ -137,6 +206,8 @@ impl BufferPoolManager {
     where
         F: FnOnce(&mut Page) -> Result<R>,
     {
+        #[cfg(feature = "fault-injection")]
+        self.inject_page_op_fail()?;
         let mut page_table = self.page_table.lock().unwrap();
         let mut frames = self.frames.lock().unwrap();
         if self.disk_manager.is_page_free(page_id) {
@@ -150,6 +221,8 @@ impl BufferPoolManager {
             idx
         } else {
             GLOBAL_METRICS.record_miss();
+            #[cfg(feature = "fault-injection")]
+            self.inject_page_op_fail_miss()?;
             let page_on_disk = self.disk_manager.read_page(page_id)?;
             let victim_idx = self.find_victim_frame(&mut frames, &mut page_table)?;
             let frame = &mut frames[victim_idx];
@@ -193,6 +266,8 @@ impl BufferPoolManager {
     where
         F: FnOnce(&mut Page) -> Result<R>,
     {
+        #[cfg(feature = "fault-injection")]
+        self.inject_page_op_fail()?;
         let mut page_table = self.page_table.lock().unwrap();
         let mut frames = self.frames.lock().unwrap();
         if self.disk_manager.is_page_free(page_id) {
@@ -206,6 +281,8 @@ impl BufferPoolManager {
             idx
         } else {
             GLOBAL_METRICS.record_miss();
+            #[cfg(feature = "fault-injection")]
+            self.inject_page_op_fail_miss()?;
             let page_on_disk = self.disk_manager.read_page(page_id)?;
             let victim_idx = self.find_victim_frame(&mut frames, &mut page_table)?;
             let frame = &mut frames[victim_idx];
