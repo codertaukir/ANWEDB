@@ -910,6 +910,60 @@ impl Catalog {
         }
     }
 
+    /// Remove the NOT NULL constraint from a column (catalog flag only, rows untouched).
+    pub fn set_nullable(&self, table_name: &str, col_name: &str) -> Result<()> {
+        let mut state = self.state.write().unwrap();
+        let table_id = *state.table_names.get(table_name).ok_or_else(|| {
+            Error::TransactionError(format!("Table '{}' does not exist", table_name))
+        })?;
+        let schema = state.schemas.get(&table_id).unwrap();
+        let col_pos = schema
+            .columns
+            .iter()
+            .position(|c| !c.is_dropped() && c.name.eq_ignore_ascii_case(col_name))
+            .ok_or_else(|| {
+                Error::TransactionError(format!(
+                    "Column '{}' not found in table '{}'",
+                    col_name, table_name
+                ))
+            })?;
+        if schema.columns[col_pos].is_primary_key {
+            return Err(Error::TransactionError(
+                "Cannot make primary key column nullable".to_string(),
+            ));
+        }
+        if schema.columns[col_pos].nullable {
+            return Ok(());
+        }
+        let mut updated_schema = schema.clone();
+        updated_schema.columns[col_pos].nullable = true;
+
+        let (sys_tid, mut prev_lsn) = self.begin_sys_txn(&mut state)?;
+        let op_res: Result<()> = (|| {
+            if let Some(ref cat_tree) = state.catalog_tree {
+                let key = format!("tbl:{:08}", table_id);
+                cat_tree.insert_logged(
+                    sys_tid,
+                    &mut prev_lsn,
+                    key.as_bytes(),
+                    &updated_schema.serialize(),
+                )?;
+            }
+            self.finish_sys_txn(sys_tid, prev_lsn)?;
+            Ok(())
+        })();
+        match op_res {
+            Ok(()) => {
+                state.schemas.insert(table_id, updated_schema);
+                Ok(())
+            }
+            Err(e) => {
+                self.abort_sys_txn(&state, sys_tid, prev_lsn);
+                Err(e)
+            }
+        }
+    }
+
     pub fn drop_column(&self, table_name: &str, col_name: &str) -> Result<()> {
         let mut state = self.state.write().unwrap();
         let table_id = *state.table_names.get(table_name).ok_or_else(|| {

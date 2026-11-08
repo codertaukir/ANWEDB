@@ -513,6 +513,10 @@ pub enum Statement {
         table_name: String,
         column_name: String,
     },
+    AlterTableSetNullable {
+        table_name: String,
+        column_name: String,
+    },
     CreateIndex {
         index_name: String,
         table_name: String,
@@ -700,6 +704,10 @@ pub enum PhysicalPlan {
         new_name: String,
     },
     AlterTableDropColumn {
+        table_name: String,
+        column_name: String,
+    },
+    AlterTableSetNullable {
         table_name: String,
         column_name: String,
     },
@@ -1243,6 +1251,18 @@ impl QueryEngine {
                 table_name,
                 column_name,
             }),
+            Statement::AlterTableSetNullable {
+                table_name,
+                column_name,
+            } => {
+                let _ = self.catalog.get_table_schema(&table_name)?.ok_or_else(|| {
+                    Error::TransactionError(format!("Table '{}' not found", table_name))
+                })?;
+                Ok(PhysicalPlan::AlterTableSetNullable {
+                    table_name,
+                    column_name,
+                })
+            }
             Statement::AlterTableAddColumn { table_name, column } => {
                 let _ = self.catalog.get_table_schema(&table_name)?.ok_or_else(|| {
                     Error::TransactionError(format!("Table '{}' not found", table_name))
@@ -2235,6 +2255,36 @@ impl QueryEngine {
         let add_pos = Self::find_top_level_keyword(rest, " ADD ");
         let rename_pos = Self::find_top_level_keyword(rest, " RENAME ");
         let drop_pos = Self::find_top_level_keyword(rest, " DROP ");
+        let alter_pos = Self::find_top_level_keyword(rest, " ALTER ");
+
+        // ALTER COLUMN must be checked before DROP: "... DROP NOT NULL" contains " DROP ".
+        if let Some(pos) = alter_pos {
+            let after = rest[pos + 7..].trim_start();
+            if after.len() >= 7
+                && after.is_char_boundary(7)
+                && after[..7].eq_ignore_ascii_case("COLUMN ")
+            {
+                let table_name = rest[..pos].trim().to_string();
+                let tokens: Vec<&str> = after[7..].split_whitespace().collect();
+                if tokens.len() < 2 {
+                    return Err(Error::TransactionError(
+                        "Invalid ALTER TABLE ALTER COLUMN syntax".to_string(),
+                    ));
+                }
+                let column_name = tokens[0].to_string();
+                let action = tokens[1..].join(" ").to_uppercase();
+                if action == "DROP NOT NULL" {
+                    return Ok(Statement::AlterTableSetNullable {
+                        table_name,
+                        column_name,
+                    });
+                }
+                return Err(Error::TransactionError(format!(
+                    "Unsupported ALTER COLUMN operation: {}",
+                    action
+                )));
+            }
+        }
 
         if let Some(pos) = drop_pos {
             let table_name = rest[..pos].trim().to_string();

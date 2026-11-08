@@ -265,6 +265,20 @@ impl Table<'_> {
             ))
             .map(|_| ())
     }
+
+    /// Remove NOT NULL from a column (catalog flag only, no row rewrite). Refuses PK columns.
+    pub fn set_nullable(&self, name: &str) -> Result<()> {
+        self.check_name()?;
+        if !valid_ident(name) {
+            return Err(bad("bad column name"));
+        }
+        self.server
+            .execute_sql(&format!(
+                "ALTER TABLE {} ALTER COLUMN {} DROP NOT NULL",
+                self.name, name
+            ))
+            .map(|_| ())
+    }
 }
 
 use crate::{ExecutionResult, PhysicalPlan, Value};

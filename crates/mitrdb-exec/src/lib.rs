@@ -725,6 +725,7 @@ impl Executor {
                     | PhysicalPlan::AlterTableAddColumn { .. }
                     | PhysicalPlan::AlterTableRenameColumn { .. }
                     | PhysicalPlan::AlterTableDropColumn { .. }
+                    | PhysicalPlan::AlterTableSetNullable { .. }
             )
         {
             return Err(Error::TransactionError(
@@ -971,6 +972,34 @@ impl Executor {
                     }
                 }
                 catalog.drop_column(&table_name, &column_name)?;
+                catalog.sync_roots()?;
+                Ok(ExecutionResult::Ok)
+            }
+            PhysicalPlan::AlterTableSetNullable {
+                table_name,
+                column_name,
+            } => {
+                if let Some(schema) = catalog.get_table_schema(&table_name)? {
+                    let mut table_trees = Vec::new();
+                    if let Some(table_tree) = catalog.table_tree(schema.table_id) {
+                        table_trees.push(table_tree);
+                    }
+                    for idx_meta in catalog.get_table_indexes(schema.table_id) {
+                        if let Some(it) = catalog.index_tree(idx_meta.index_id) {
+                            table_trees.push(it);
+                        }
+                    }
+                    if table_trees
+                        .iter()
+                        .any(|t| txn_mgr.has_active_tree_references(t))
+                    {
+                        return Err(Error::WriteConflict(format!(
+                            "Cannot alter table '{}' while referenced by an active transaction",
+                            table_name
+                        )));
+                    }
+                }
+                catalog.set_nullable(&table_name, &column_name)?;
                 catalog.sync_roots()?;
                 Ok(ExecutionResult::Ok)
             }
