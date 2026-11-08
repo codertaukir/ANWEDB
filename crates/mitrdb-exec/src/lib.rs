@@ -16,6 +16,8 @@ const CHUNKED_PK_TAG: u8 = 0xFD;
 /// Overflow key prefix: [tag] + head_key + [chunk_no u16 BE]. Real key tags are 0..=4.
 const OVERFLOW_KEY_TAG: u8 = 0xFE;
 const IDX_CHUNK_BUDGET: usize = 2048;
+/// Bulk DELETE/UPDATE: flush the WAL arena mid-statement once it holds more than this many bytes.
+const WAL_PRESSURE_LIMIT_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExecutionResult {
@@ -2319,7 +2321,7 @@ impl Executor {
         let mut updated = 0;
         for (old_pk_bytes, old_tuple, new_pk_bytes, new_tuple) in &planned_updates {
             if updated % 64 == 63 {
-                txn_mgr.relieve_wal_pressure(16 * 1024 * 1024)?;
+                txn_mgr.relieve_wal_pressure(WAL_PRESSURE_LIMIT_BYTES)?;
             }
             let new_row_bytes = Tuple::serialize(new_tuple);
             txn_mgr.put(txn_id, &tree, new_pk_bytes, &new_row_bytes)?;
@@ -2857,7 +2859,7 @@ impl Executor {
         let mut deleted = 0;
         for (pk_bytes, tuple) in to_delete {
             if deleted % 64 == 63 {
-                txn_mgr.relieve_wal_pressure(16 * 1024 * 1024)?;
+                txn_mgr.relieve_wal_pressure(WAL_PRESSURE_LIMIT_BYTES)?;
             }
             if txn_mgr.delete(txn_id, &tree, &pk_bytes)? {
                 for (col_pos, idx_tree) in &idx_trees {
