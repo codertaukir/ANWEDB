@@ -2853,6 +2853,9 @@ impl Executor {
 
         let mut deleted = 0;
         for (pk_bytes, tuple) in to_delete {
+            if deleted % 64 == 63 {
+                txn_mgr.relieve_wal_pressure(16 * 1024 * 1024)?;
+            }
             if txn_mgr.delete(txn_id, &tree, &pk_bytes)? {
                 for (col_pos, idx_tree) in &idx_trees {
                     let idx_key = tuple[*col_pos].to_key_bytes();

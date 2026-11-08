@@ -1077,6 +1077,11 @@ impl WalManager {
             .collect()
     }
 
+    /// Flush ka intezaar karte (buffered) WAL bytes. Bulk statements isse memory pressure dekhte hain.
+    pub fn pending_bytes_len(&self) -> usize {
+        self.inner.lock().unwrap().pending_bytes.len()
+    }
+
     pub fn segment_count(&self) -> usize {
         self.inner.lock().unwrap().segments.len()
     }

@@ -2278,6 +2278,20 @@ impl TxnManager {
         self.finish_commit(txn_id, Some(lsn), None)
     }
 
+    /// Bulk statement ke beech WAL arena `limit_bytes` se bada ho to abhi flush karo. Uncommitted records
+    /// flush karna safe hai (recovery loser txn ko undo karta hai); memory N se independent rehti hai.
+    pub fn relieve_wal_pressure(&self, limit_bytes: usize) -> Result<()> {
+        if let Some(ref wal) = self.wal
+            && wal.pending_bytes_len() > limit_bytes
+        {
+            let last = wal.next_lsn().saturating_sub(1);
+            if last > 0 {
+                wal.flush_up_to(last)?;
+            }
+        }
+        Ok(())
+    }
+
     pub fn poisoned_commit_count(&self) -> usize {
         self.poisoned_commits.load(Ordering::Relaxed)
     }
