@@ -17,7 +17,7 @@ Status tracker. `[x]` = done and measured/tested, `[ ]` = pending.
 - [x] commit(): transient WAL flush failure ab 5 baar retry hota hai (10..160ms backoff, sirf error branch). commit_flush_retry; negative control: transient test FAIL bina fix. Insert A/B: noise (wahi binary khud se 5.0% alag, new prev2 se 0.1%)
 - [x] `resolve_poisoned_commit(txn)`: poisoned commit ka commit LSN yaad rehta hai; WAL theek hone par dobara flush + commit pura (commit_ts, locks release), abort kabhi nahi. commit() ka tail `finish_commit` helper mein. poisoned_commit_resolve 2 tests; Insert A/B: noise (new +0.8%, identical-binary control -0.1%)
 - [x] Poisoned commit sweep: server har statement se pehle (sirf poisoned count > 0 par) resolve_poisoned_commits chalata hai; WAL theek hote hi atke locks chhoot jaate hain. txn-level + server-level test (next WAL segment path block karke), negative control: HEAD par server test FAIL. Insert A/B: noise (new -0.4%, identical-binary control +0.3%)
-- [x] Leaf split se pehle poora split chain padha jaata hai (preflight_split_reads): split_internal child-read failure par ab koi WAL record/page write nahi, keys gayab nahi. btree_split_atomicity2; negative control FAIL bina fix. Insert A/B: noise (new -2.9%, identical-binary control -3.0%)
+- [x] Leaf split se pehle poora split chain padha jaata hai (ab `plan_split` mein, btree.rs): split_internal child-read failure par ab koi WAL record/page write nahi, keys gayab nahi. btree_split_atomicity2; negative control FAIL bina fix. Insert A/B: noise (new -2.9%, identical-binary control -3.0%)
 
 ## P0: Production se pehle
 - [x] new_page failure atomicity: leaf split / parent full / root split / split_internal mein new_page fail par ab tree aadha nahi badalta. `plan_split` poori chain padhke exact new-page count nikalta hai, `alloc_split_pages` saare pages kisi write se PEHLE allocate karta hai, fail par free. Probe v2 (btree level, max_keys=4, permuted inserts) measured: pehle committed keys 2-3 / 8-10 / 23-31 gayab (k=1/2/3), failed insert kabhi visible, baad ke inserts bina error. btree_newpage_fail_atomicity (feature `fault-injection`, k=0..4 sweep + split_plan_is_exact_without_injection); negative control: HEAD par FAIL (k=1 pre=8 ins#6: prev_lsn moved). split_bench (bina fsync, max_keys=64, n=100000) 20 rounds A/B: seq -1.4..-3.7%, rand -0.8..-1.9% (floor <1.5%); allocs seq -0.92% / rand -0.81%; instructions:u seq -0.08% / rand +0.34%; perf_bench parity (best column inconclusive). Txn-level (engine undo sirf key-level, failed put ka write_set entry push hi nahi hota) measured: 4134a64 par rollback_to_mark/abort ke baad bhi keys gayab (stmt_rollback k=1 pre=400 final_lost=226 phantom=97; abort k=4 pre=128 lost=74 phantom=43), sab silent (rb_err=0, end=ok), 20/35 stmt_rollback + 20/35 abort configs bad; HEAD par 1705 injected failures, 0 lost, 0 phantom. txn_newpage_fail_atomicity (9f6b5d8); negative control: 4134a64 par FAIL. Hook: feature-gated `DiskManager::set_fail_alloc_after` (4134a64) (75800ba)
@@ -57,9 +57,9 @@ Status tracker. `[x]` = done and measured/tested, `[ ]` = pending.
 - [ ] README measured limits mein naya delete number (57-88us autocommit)
 - [ ] CI badge + repo naam ANWEDB -> MITRDB
 - [ ] free_pages_batch crash-injection test (blank pages likhe, freelist save se pehle process mare)
-- [ ] ~/mitrdb_ab/delprev worktree saaf karna
+- [x] ~/mitrdb_ab/delprev worktree hataya (git worktree remove + prune, clean tha)
 - [ ] Repo fmt-clean karna (alag commit, logic ke saath nahi)
-- [ ] 14 `.bak*` files (btree/buffer_pool/disk/recovery/wal) source dir se hatao (git-ignored, par grep ko gandha karti hain)
+- [x] `.bak*` files source dirs se hataye (ROADMAP mein 14 likha tha, measured 20: btree/buffer_pool/disk/recovery/wal + network, txn, cli test, perf_bench; sab git-ignored the)
 
 ## Rules (short)
 Perf girni nahi chahiye (A/B 3 rounds, 3% se kam = noise). Hot path (`exec_insert`, `allocate_page`) par A/B zaroori. Har step ek commit, push maintainer ke kehne par.
