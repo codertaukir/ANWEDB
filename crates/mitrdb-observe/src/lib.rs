@@ -46,6 +46,7 @@ pub struct MetricsSnapshot {
     pub wal_rotations: u64,
     pub wal_segments_reclaimed: u64,
     pub checkpoints_created: u64,
+    pub checkpoint_errors: u64,
     pub backups_created: u64,
     pub backups_restored: u64,
 }
@@ -95,6 +96,7 @@ pub struct Metrics {
     pub wal_rotations: AtomicU64,
     pub wal_segments_reclaimed: AtomicU64,
     pub checkpoints_created: AtomicU64,
+    pub checkpoint_errors: AtomicU64,
     pub backups_created: AtomicU64,
     pub backups_restored: AtomicU64,
 }
@@ -146,6 +148,7 @@ impl Metrics {
             wal_rotations: AtomicU64::new(0),
             wal_segments_reclaimed: AtomicU64::new(0),
             checkpoints_created: AtomicU64::new(0),
+            checkpoint_errors: AtomicU64::new(0),
             backups_created: AtomicU64::new(0),
             backups_restored: AtomicU64::new(0),
         }
@@ -364,6 +367,7 @@ impl Metrics {
             wal_rotations: self.wal_rotations.load(Ordering::Relaxed),
             wal_segments_reclaimed: self.wal_segments_reclaimed.load(Ordering::Relaxed),
             checkpoints_created: self.checkpoints_created.load(Ordering::Relaxed),
+            checkpoint_errors: self.checkpoint_errors.load(Ordering::Relaxed),
             backups_created: self.backups_created.load(Ordering::Relaxed),
             backups_restored: self.backups_restored.load(Ordering::Relaxed),
         }

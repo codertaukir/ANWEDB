@@ -374,8 +374,10 @@ impl Server {
         {
             return;
         }
-        // A failed auto-checkpoint must not fail the user's statement.
-        let _ = self.checkpoint_with_meta();
+        // A failed auto-checkpoint must not fail the user's statement; it is counted instead.
+        if self.checkpoint_with_meta().is_err() {
+            GLOBAL_METRICS.checkpoint_errors.fetch_add(1, Relaxed);
+        }
         let after = (wal.segment_count() as u64).saturating_mul(wal.max_segment_bytes());
         self.auto_ckpt_floor.store(after, Relaxed);
         self.auto_ckpt_running.store(false, Relaxed);
