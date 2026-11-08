@@ -8,7 +8,7 @@ use mitrdb_query::{
     BoundPredicate, BoundSelectItem, Catalog, ColumnDef, CompareOp, DataType, JoinProjSource,
     JoinType, PhysicalPlan, QueryEngine, TableSchema, Value,
 };
-use mitrdb_txn::{IsolationLevel, KeyRange, TxnManager};
+use mitrdb_txn::{IsolationLevel, KeyBound, KeyRange, TxnManager};
 
 const MULTI_PK_TAG: u8 = 0xFF;
 /// Index head value whose PK list continues in overflow keys: [tag][n_overflow u16 LE][first chunk].
@@ -2136,6 +2136,82 @@ impl Executor {
         Ok(ExecutionResult::Affected(1))
     }
 
+    /// Candidate rows for UPDATE/DELETE. PK ranges when the filter bounds the PK;
+    /// else a secondary index, but only when every extracted range is a single
+    /// point (`= k`, `IS NULL`, OR of points); else full scan. The caller's
+    /// bf.evaluate still filters every row, so a superset is sound.
+    fn narrow_dml_entries(
+        catalog: &Catalog,
+        txn_mgr: &TxnManager,
+        txn_id: TxnId,
+        schema: &TableSchema,
+        tree: &Arc<mitrdb_txn::BPlusTree>,
+        filter: Option<&BoundFilter>,
+        pk_idx: usize,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        if let Some(bf) = filter {
+            if let Some(ranges) = QueryEngine::extract_column_ranges(&bf.predicate, pk_idx) {
+                let mut seen_pks = HashSet::new();
+                let mut out = Vec::new();
+                for r in &ranges {
+                    for (k, v) in txn_mgr.range_scan(txn_id, tree, r)? {
+                        if seen_pks.insert(k.clone()) {
+                            out.push((k, v));
+                        }
+                    }
+                }
+                return Ok(out);
+            }
+            let is_point = |r: &KeyRange| {
+                matches!((&r.start, &r.end), (KeyBound::Included(a), KeyBound::Included(b)) if a == b)
+            };
+            let indexes = catalog.get_table_indexes(schema.table_id);
+            for idx_meta in &indexes {
+                let Some(col_pos) = schema
+                    .columns
+                    .iter()
+                    .position(|c| c.name == idx_meta.column_name)
+                else {
+                    continue;
+                };
+                let Some(idx_tree) = catalog.index_tree(idx_meta.index_id) else {
+                    continue;
+                };
+                let Some(ranges) = QueryEngine::extract_column_ranges(&bf.predicate, col_pos)
+                else {
+                    continue;
+                };
+                if ranges.is_empty() || !ranges.iter().all(is_point) {
+                    continue;
+                }
+                let mut seen_pks = HashSet::new();
+                let mut out = Vec::new();
+                for r in &ranges {
+                    for (idx_key, encoded) in txn_mgr.range_scan(txn_id, &idx_tree, r)? {
+                        if idx_key.first() == Some(&OVERFLOW_KEY_TAG) {
+                            continue;
+                        }
+                        let pks = Self::idx_decode_entry(
+                            txn_mgr, txn_id, &idx_tree, &idx_key, &encoded, None,
+                        )?;
+                        for pk in pks {
+                            if !seen_pks.insert(pk.clone()) {
+                                continue;
+                            }
+                            if let Some(row) = txn_mgr.get(txn_id, tree, &pk)? {
+                                out.push((pk, row));
+                            }
+                        }
+                    }
+                }
+                // keep PK order, same as the full-scan / PK-range paths
+                out.sort_by(|a, b| a.0.cmp(&b.0));
+                return Ok(out);
+            }
+        }
+        txn_mgr.scan_unlocked(txn_id, tree)
+    }
+
     fn exec_update(
         &self,
         catalog: &Catalog,
@@ -2159,24 +2235,10 @@ impl Executor {
             Error::TransactionError("Table storage B+Tree not initialized".to_string())
         })?;
         let pk_idx = Self::primary_key_index(schema);
-        // Narrow the scan when the filter bounds the primary key (same as exec_delete);
+        // Narrow the scan (PK ranges, else point lookups on a secondary index);
         // bf.evaluate below still filters every row. Otherwise full scan as before.
-        let pk_ranges =
-            filter.and_then(|bf| QueryEngine::extract_column_ranges(&bf.predicate, pk_idx));
-        let entries = if let Some(ranges) = pk_ranges {
-            let mut seen_pks = HashSet::new();
-            let mut out = Vec::new();
-            for r in &ranges {
-                for (k, v) in txn_mgr.range_scan(txn_id, &tree, r)? {
-                    if seen_pks.insert(k.clone()) {
-                        out.push((k, v));
-                    }
-                }
-            }
-            out
-        } else {
-            txn_mgr.scan_unlocked(txn_id, &tree)?
-        };
+        let entries =
+            Self::narrow_dml_entries(catalog, txn_mgr, txn_id, schema, &tree, filter, pk_idx)?;
         let indexes = catalog.get_table_indexes(schema.table_id);
 
         let mut planned_updates = Vec::new();
@@ -2781,24 +2843,10 @@ impl Executor {
         })?;
         let indexes = catalog.get_table_indexes(schema.table_id);
         let pk_idx = Self::primary_key_index(schema);
-        // Narrow the scan when the filter bounds the primary key (range set is sound;
-        // bf.evaluate below still filters every row). Otherwise full scan as before.
-        let pk_ranges =
-            filter.and_then(|bf| QueryEngine::extract_column_ranges(&bf.predicate, pk_idx));
-        let entries = if let Some(ranges) = pk_ranges {
-            let mut seen_pks = HashSet::new();
-            let mut out = Vec::new();
-            for r in &ranges {
-                for (k, v) in txn_mgr.range_scan(txn_id, &tree, r)? {
-                    if seen_pks.insert(k.clone()) {
-                        out.push((k, v));
-                    }
-                }
-            }
-            out
-        } else {
-            txn_mgr.scan_unlocked(txn_id, &tree)?
-        };
+        // Narrow the scan (PK ranges, else point lookups on a secondary index);
+        // bf.evaluate below still filters every row. Otherwise full scan as before.
+        let entries =
+            Self::narrow_dml_entries(catalog, txn_mgr, txn_id, schema, &tree, filter, pk_idx)?;
 
         let mut to_delete = Vec::new();
         for (pk_bytes, row_bytes) in entries {
