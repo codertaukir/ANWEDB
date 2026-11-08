@@ -24,7 +24,8 @@ Status tracker. `[x]` = done and measured/tested, `[ ]` = pending.
 - [ ] Explicit-txn bench: perf_bench autocommit hai, `write_mark` ka mutex measure nahi hua (earlier.contains branch aur LockTimeout ke baad statement rollback ke tests ho chuke, stmt_atomicity.rs)
 - [ ] Poisoned commit ke baaki tukde: retry window worst case ~310ms (LockTimeout 50ms se zyada); WalCorrupted label galat (IO error hai); client ko Err milta hai par commit baad mein ho sakta hai (in-doubt, by design); sweep sirf agle statement par chalta hai (idle server par nahi); explicit COMMIT par session slot take() ho chuka hota hai (tid kho jata hai, sweep use resolve karta hai)
 - [ ] Auto-checkpoint: concurrent test (4 sessions, auto-checkpoint baar-baar trigger) pass; checkpoint ki error chup-chaap ignore hoti hai (metric nahi); floor backoff ki checkpoint-ginti measure nahi hui
-- [ ] Delete memory: N=10000 bulk delete par VmHWM 153MB (measured). Streaming ya beech mein flush; storage core hai, crash tests + A/B zaroori
+- [x] Bulk delete memory: WAL arena beech mein flush (har 64 rows par, pending > 16MB). N=20000 VmHWM delta 259MB -> 59MB (measured); crash test wal_pressure_flush, A/B delete probe noise ke andar (9a5a857)
+- [ ] Bulk delete mein ab bhi ~28MB (N=20000, andaza: baseline ~31MB hata ke) N ke saath badhta hai: entries, to_delete, lock_targets, MVCC chains, undo write_set (kaun kitna, measure nahi hua). Update aur insert_many par WAL pressure hook abhi nahi (andaza, probe-first)
 
 ## Performance
 - [ ] Non-PK indexed column par delete/update (`WHERE g = 5`) abhi full scan (andaza: sirf PK ke liye ranges lagi)
