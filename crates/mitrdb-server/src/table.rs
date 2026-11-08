@@ -124,7 +124,20 @@ impl Table<'_> {
     }
 
     /// Make the table match `spec`, keeping data. Returns the SQL it ran.
+    /// Handles new nullable columns, NOT NULL <-> nullable (SET NOT NULL fails naming the first
+    /// bad primary key if a row holds NULL) and unique/index. Column type changes are refused
+    /// here (they rewrite every row): use `sync_allow_type_change`.
     pub fn sync(&self, spec: &str) -> Result<Vec<String>> {
+        self.sync_inner(spec, false)
+    }
+
+    /// Like `sync`, but a changed column type is applied too (rows rewritten through a hidden
+    /// shadow column; strict casts, first bad row aborts). Refuses PK and indexed columns.
+    pub fn sync_allow_type_change(&self, spec: &str) -> Result<Vec<String>> {
+        self.sync_inner(spec, true)
+    }
+
+    fn sync_inner(&self, spec: &str, allow_type_change: bool) -> Result<Vec<String>> {
         self.check_name()?;
         let wanted = parse_columns(spec)?;
         let mut plan: Vec<String> = Vec::new();
@@ -151,14 +164,53 @@ impl Table<'_> {
                 for w in &wanted {
                     match schema.columns.iter().find(|c| c.name == w.name) {
                         Some(old) => {
-                            if old.data_type != w.data_type
-                                || old.is_primary_key != w.is_primary_key
-                                || old.nullable != w.nullable
-                            {
+                            if old.is_primary_key != w.is_primary_key {
                                 return Err(bad(format!(
-                                    "column '{}' changed (type/primary key/not null); this is not supported yet",
+                                    "column '{}': changing the primary key is not supported yet (needs a rebuild of the table and all indexes)",
                                     w.name
                                 )));
+                            }
+                            if old.data_type != w.data_type {
+                                if !allow_type_change {
+                                    return Err(bad(format!(
+                                        "column '{}' changed type ({} -> {}); this rewrites every row, call sync_allow_type_change() to do it",
+                                        w.name,
+                                        type_sql(old.data_type),
+                                        type_sql(w.data_type)
+                                    )));
+                                }
+                                if old.is_primary_key {
+                                    return Err(bad(format!(
+                                        "column '{}': changing the type of a primary key is not supported yet",
+                                        w.name
+                                    )));
+                                }
+                                if self
+                                    .server
+                                    .catalog()
+                                    .get_table_indexes(schema.table_id)
+                                    .iter()
+                                    .any(|i| i.column_name == w.name)
+                                {
+                                    return Err(bad(format!(
+                                        "column '{}' has an index; remove it before changing the type",
+                                        w.name
+                                    )));
+                                }
+                                plan.push(format!(
+                                    "ALTER TABLE {} ALTER COLUMN {} TYPE {}",
+                                    self.name,
+                                    w.name,
+                                    type_sql(w.data_type)
+                                ));
+                            }
+                            if old.nullable != w.nullable {
+                                plan.push(format!(
+                                    "ALTER TABLE {} ALTER COLUMN {} {}",
+                                    self.name,
+                                    w.name,
+                                    if w.nullable { "DROP NOT NULL" } else { "SET NOT NULL" }
+                                ));
                             }
                         }
                         None => {
