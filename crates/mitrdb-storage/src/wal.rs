@@ -1318,13 +1318,12 @@ impl WalManager {
                     // another batch of appends may still need a flush.
                 }
                 Err(e) => {
-                    let msg = format!("{e}");
                     inner.flush_in_progress = false;
                     self.flush_cv.notify_all();
                     GLOBAL_METRICS.record_wal_flush_total_ns(
                         flush_started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
                     );
-                    return Err(Error::WalCorrupted(msg));
+                    return Err(e);
                 }
             }
         }
