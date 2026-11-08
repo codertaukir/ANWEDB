@@ -48,7 +48,12 @@ Status tracker. `[x]` = done and measured/tested, `[ ]` = pending.
 - [ ] (parked) Freelist save on reuse: measured sirf 3-4% fsync, low priority
 
 ## Features
-- [ ] P0: column type / nullable / PK change ka explicit API (pehle design)
+- [x] P0: nullable / NOT NULL / column type change ka explicit API + `sync()` wiring. `ALTER TABLE t ALTER COLUMN c DROP NOT NULL` / `SET NOT NULL` / `TYPE <t>`; `Table::set_nullable` (d77d4c3), `set_not_null(col, default)` (validate scan, pehli bad PK error mein; default diya to pehle backfill; d67e425), `change_type(col, ty)` (hidden shadow column `__dropped_shadow_<col>`, backfill ek txn mein, verify scan, ek sys txn mein swap; strict cast Int<->Text, Int<->Bool 0/1, Text<->Bytes UTF-8; PK aur indexed column par refuse; ef89dfe). Crash/retry tests bina injection ke (drop = crash, 1f535de). Page-op failure injection (server feature `fault-injection`): 140 points, 86 par ALTER fail hua, har point par shape/value intact, retry ok, reopen ke baad naya type persist (7773d67). `Table::sync` ab NOT NULL <-> nullable khud lagata hai; type change sirf `sync_allow_type_change`; PK change alag error ke saath refuse (a068428). Rule 4 suites + release warning-free, hot path untouched, A/B nahi (DDL)
+- [ ] ALTER limitations (measured/design): type change par column list ke END mein chala jaata hai (positional INSERT ka order badalta hai); `set_not_null(default)` ka backfill aur flip atomic nahi (flip fail ho to backfill rahega); concurrent writers ke saath safe nahi (point-in-time `has_active_tree_references` check + verify scan pakadta hai, rokta nahi); badi table par ek txn ka memory/WAL pressure measure nahi hua (insert_many/bulk wale item se jodna)
+- [ ] PK change (naye key se table tree + saare secondary indexes rebuild); abhi `sync()` explicit error deta hai
+- [ ] Concurrent-DDL locking (ALTER ke dauran writers ko rokna); abhi sirf point-in-time check
+- [ ] Indexed column par type change (index rebuild); abhi refuse
+- [ ] ALTER TYPE ka fail-injection sirf page-op par hua; WAL append fail aur fsync fail abhi test nahi hue ("safe" nahi, sirf page-op par measured)
 - [ ] P1: query planner (JOIN mein WHERE pushdown nahi)
 - [ ] P1: concurrent read/write
 - [ ] P2: Rust API docs, SQL REPL, backup/restore CLI, better errors, release packaging
