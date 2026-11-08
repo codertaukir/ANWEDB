@@ -521,6 +521,11 @@ pub enum Statement {
         table_name: String,
         column_name: String,
     },
+    AlterTableChangeType {
+        table_name: String,
+        column_name: String,
+        new_type: DataType,
+    },
     CreateIndex {
         index_name: String,
         table_name: String,
@@ -718,6 +723,11 @@ pub enum PhysicalPlan {
     AlterTableSetNotNull {
         table_name: String,
         column_name: String,
+    },
+    AlterTableChangeType {
+        table_name: String,
+        column_name: String,
+        new_type: DataType,
     },
     Distinct {
         input: Box<PhysicalPlan>,
@@ -1281,6 +1291,20 @@ impl QueryEngine {
                 Ok(PhysicalPlan::AlterTableSetNotNull {
                     table_name,
                     column_name,
+                })
+            }
+            Statement::AlterTableChangeType {
+                table_name,
+                column_name,
+                new_type,
+            } => {
+                let _ = self.catalog.get_table_schema(&table_name)?.ok_or_else(|| {
+                    Error::TransactionError(format!("Table '{}' not found", table_name))
+                })?;
+                Ok(PhysicalPlan::AlterTableChangeType {
+                    table_name,
+                    column_name,
+                    new_type,
                 })
             }
             Statement::AlterTableAddColumn { table_name, column } => {
@@ -2303,6 +2327,30 @@ impl QueryEngine {
                     return Ok(Statement::AlterTableSetNotNull {
                         table_name,
                         column_name,
+                    });
+                }
+                let words: Vec<&str> = action.split_whitespace().collect();
+                let ty_tok = match words.as_slice() {
+                    ["TYPE", t] | ["SET", "DATA", "TYPE", t] => Some(*t),
+                    _ => None,
+                };
+                if let Some(t) = ty_tok {
+                    let new_type = match t {
+                        "INT" | "INT64" | "BIGINT" | "INTEGER" => DataType::Int64,
+                        "TEXT" | "VARCHAR" | "STRING" => DataType::Text,
+                        "BOOL" | "BOOLEAN" => DataType::Bool,
+                        "BYTES" | "BLOB" => DataType::Bytes,
+                        other => {
+                            return Err(Error::TransactionError(format!(
+                                "Unknown column type in ALTER TABLE: {}",
+                                other
+                            )));
+                        }
+                    };
+                    return Ok(Statement::AlterTableChangeType {
+                        table_name,
+                        column_name,
+                        new_type,
                     });
                 }
                 return Err(Error::TransactionError(format!(

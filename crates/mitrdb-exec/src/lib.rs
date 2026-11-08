@@ -727,6 +727,7 @@ impl Executor {
                     | PhysicalPlan::AlterTableDropColumn { .. }
                     | PhysicalPlan::AlterTableSetNullable { .. }
                     | PhysicalPlan::AlterTableSetNotNull { .. }
+                    | PhysicalPlan::AlterTableChangeType { .. }
             )
         {
             return Err(Error::TransactionError(
@@ -1060,6 +1061,99 @@ impl Executor {
                 let _ = txn_mgr.abort(tid);
                 scan?;
                 catalog.set_not_null(&table_name, &column_name)?;
+                catalog.sync_roots()?;
+                Ok(ExecutionResult::Ok)
+            }
+            PhysicalPlan::AlterTableChangeType {
+                table_name,
+                column_name,
+                new_type,
+            } => {
+                let schema = catalog.get_table_schema(&table_name)?.ok_or_else(|| {
+                    Error::TransactionError(format!("Table '{}' not found", table_name))
+                })?;
+                let tree = catalog.table_tree(schema.table_id).ok_or_else(|| {
+                    Error::TransactionError("Table storage B+Tree not initialized".to_string())
+                })?;
+                let mut table_trees = vec![tree.clone()];
+                for idx_meta in catalog.get_table_indexes(schema.table_id) {
+                    if let Some(it) = catalog.index_tree(idx_meta.index_id) {
+                        table_trees.push(it);
+                    }
+                }
+                if table_trees
+                    .iter()
+                    .any(|t| txn_mgr.has_active_tree_references(t))
+                {
+                    return Err(Error::WriteConflict(format!(
+                        "Cannot alter table '{}' while referenced by an active transaction",
+                        table_name
+                    )));
+                }
+                let (src_pos, shadow_pos) = match catalog.prepare_type_shadow(
+                    &table_name,
+                    &column_name,
+                    new_type.clone(),
+                )? {
+                    Some(p) => p,
+                    None => return Ok(ExecutionResult::Ok),
+                };
+                catalog.sync_roots()?;
+                let schema = catalog.get_table_schema(&table_name)?.ok_or_else(|| {
+                    Error::TransactionError(format!("Table '{}' not found", table_name))
+                })?;
+                let pk_idx = Self::primary_key_index(&schema);
+
+                // Backfill the shadow column in one normal txn; any bad row aborts all of it.
+                let tid = txn_mgr.begin_with_isolation(default_isolation)?;
+                let fill: Result<()> = (|| {
+                    for (pk, row_bytes) in txn_mgr.scan_unlocked(tid, &tree)? {
+                        let mut tuple =
+                            Tuple::deserialize_for_table(&row_bytes, schema.columns.len())?;
+                        match Self::cast_value(&tuple[src_pos], &new_type) {
+                            Ok(v) => tuple[shadow_pos] = v,
+                            Err(m) => {
+                                return Err(Error::TransactionError(format!(
+                                    "Cannot change type of '{}.{}': row with primary key {:?}: {}",
+                                    table_name,
+                                    column_name,
+                                    tuple.get(pk_idx),
+                                    m
+                                )));
+                            }
+                        }
+                        txn_mgr.put(tid, &tree, &pk, &Tuple::serialize(&tuple))?;
+                    }
+                    Ok(())
+                })();
+                if let Err(e) = fill {
+                    txn_mgr.abort(tid)?;
+                    catalog.sync_roots()?;
+                    return Err(e);
+                }
+                Self::commit_or_abort(txn_mgr, tid)?;
+                catalog.sync_roots()?;
+
+                // Verify: a row written meanwhile (source set, shadow still NULL) blocks the swap.
+                let vtid = txn_mgr.begin_with_isolation(default_isolation)?;
+                let verify: Result<()> = (|| {
+                    for (_pk, row_bytes) in txn_mgr.scan_unlocked(vtid, &tree)? {
+                        let tuple =
+                            Tuple::deserialize_for_table(&row_bytes, schema.columns.len())?;
+                        if !matches!(tuple[src_pos], Value::Null)
+                            && matches!(tuple[shadow_pos], Value::Null)
+                        {
+                            return Err(Error::TransactionError(format!(
+                                "Table '{}' was written during type change of '{}'; retry",
+                                table_name, column_name
+                            )));
+                        }
+                    }
+                    Ok(())
+                })();
+                let _ = txn_mgr.abort(vtid);
+                verify?;
+                catalog.commit_type_swap(&table_name, &column_name, src_pos, shadow_pos)?;
                 catalog.sync_roots()?;
                 Ok(ExecutionResult::Ok)
             }
@@ -2108,6 +2202,29 @@ impl Executor {
     ) -> Result<()> {
         Self::acquire_pre_scan_range_locks(catalog, txn_mgr, txn_id, schema, table_tree, filter)?;
         Self::lock_matched_row_keys(catalog, txn_mgr, txn_id, schema, table_tree, matched_rows)
+    }
+
+    /// Strict value conversion for ALTER COLUMN TYPE (NULL stays NULL).
+    fn cast_value(v: &Value, to: &DataType) -> std::result::Result<Value, String> {
+        match (v, to) {
+            (Value::Null, _) => Ok(Value::Null),
+            (Value::Int64(n), DataType::Text) => Ok(Value::Text(n.to_string())),
+            (Value::Text(s), DataType::Int64) => s
+                .parse::<i64>()
+                .map(Value::Int64)
+                .map_err(|_| format!("{:?} is not a valid integer", s)),
+            (Value::Int64(n), DataType::Bool) => match n {
+                0 => Ok(Value::Bool(false)),
+                1 => Ok(Value::Bool(true)),
+                _ => Err(format!("{} is not 0 or 1", n)),
+            },
+            (Value::Bool(b), DataType::Int64) => Ok(Value::Int64(i64::from(*b))),
+            (Value::Text(s), DataType::Bytes) => Ok(Value::Bytes(s.as_bytes().to_vec())),
+            (Value::Bytes(b), DataType::Text) => String::from_utf8(b.clone())
+                .map(Value::Text)
+                .map_err(|_| "bytes are not valid UTF-8".to_string()),
+            _ => Err("unsupported type conversion".to_string()),
+        }
     }
 
     fn validate_column_value(table_name: &str, col: &ColumnDef, val: &Value) -> Result<()> {

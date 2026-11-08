@@ -307,6 +307,26 @@ impl Table<'_> {
             ))
             .map(|_| ())
     }
+
+    /// Change a column's type (`ty`: "int", "text", "bool", "bytes"), rewriting rows through a
+    /// hidden shadow column. Strict casts (int<->text, int<->bool 0/1, text<->bytes UTF-8);
+    /// the first bad row aborts the whole change. The column moves to the end of the column
+    /// list. Refuses PK / indexed columns. Not safe against concurrent writers.
+    pub fn change_type(&self, name: &str, ty: &str) -> Result<()> {
+        self.check_name()?;
+        if !valid_ident(name) {
+            return Err(bad("bad column name"));
+        }
+        if ty.is_empty() || !ty.chars().all(|c| c.is_ascii_alphanumeric()) {
+            return Err(bad("bad type name"));
+        }
+        self.server
+            .execute_sql(&format!(
+                "ALTER TABLE {} ALTER COLUMN {} TYPE {}",
+                self.name, name, ty
+            ))
+            .map(|_| ())
+    }
 }
 
 use crate::{ExecutionResult, PhysicalPlan, Value};

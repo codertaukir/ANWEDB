@@ -1014,6 +1014,155 @@ impl Catalog {
         }
     }
 
+    /// Step 1 of a column type change: make sure a hidden, nullable shadow column of the new
+    /// type exists (name = DROPPED_PREFIX + "shadow_" + column, so SELECT/INSERT ignore it).
+    /// Returns (source position, shadow position), or None if the type is already `new_type`.
+    /// Refuses PK and indexed columns. A leftover shadow of the same type is reused; one of a
+    /// different type is retired (renamed to a plain dropped name) and a fresh one is added.
+    pub fn prepare_type_shadow(
+        &self,
+        table_name: &str,
+        col_name: &str,
+        new_type: DataType,
+    ) -> Result<Option<(usize, usize)>> {
+        let mut state = self.state.write().unwrap();
+        let table_id = *state.table_names.get(table_name).ok_or_else(|| {
+            Error::TransactionError(format!("Table '{}' does not exist", table_name))
+        })?;
+        let schema = state.schemas.get(&table_id).unwrap();
+        let src_pos = schema
+            .columns
+            .iter()
+            .position(|c| !c.is_dropped() && c.name.eq_ignore_ascii_case(col_name))
+            .ok_or_else(|| {
+                Error::TransactionError(format!(
+                    "Column '{}' not found in table '{}'",
+                    col_name, table_name
+                ))
+            })?;
+        if schema.columns[src_pos].is_primary_key {
+            return Err(Error::TransactionError(
+                "Cannot change type of primary key column".to_string(),
+            ));
+        }
+        if state
+            .indexes
+            .values()
+            .any(|i| i.table_id == table_id && i.column_name.eq_ignore_ascii_case(col_name))
+        {
+            return Err(Error::TransactionError(format!(
+                "Column '{}' has an index; DROP INDEX first",
+                col_name
+            )));
+        }
+        if schema.columns[src_pos].data_type == new_type {
+            return Ok(None);
+        }
+        let shadow_name = format!("{}shadow_{}", DROPPED_PREFIX, schema.columns[src_pos].name);
+        let mut updated_schema = schema.clone();
+        if let Some(p) = updated_schema.columns.iter().position(|c| c.name == shadow_name) {
+            if updated_schema.columns[p].data_type == new_type {
+                return Ok(Some((src_pos, p)));
+            }
+            updated_schema.columns[p].name = format!("{}{}", DROPPED_PREFIX, p);
+        }
+        updated_schema.columns.push(ColumnDef {
+            name: shadow_name,
+            data_type: new_type,
+            nullable: true,
+            is_primary_key: false,
+        });
+        let shadow_pos = updated_schema.columns.len() - 1;
+
+        let (sys_tid, mut prev_lsn) = self.begin_sys_txn(&mut state)?;
+        let op_res: Result<()> = (|| {
+            if let Some(ref cat_tree) = state.catalog_tree {
+                let key = format!("tbl:{:08}", table_id);
+                cat_tree.insert_logged(
+                    sys_tid,
+                    &mut prev_lsn,
+                    key.as_bytes(),
+                    &updated_schema.serialize(),
+                )?;
+            }
+            self.finish_sys_txn(sys_tid, prev_lsn)?;
+            Ok(())
+        })();
+        match op_res {
+            Ok(()) => {
+                state.schemas.insert(table_id, updated_schema);
+                Ok(Some((src_pos, shadow_pos)))
+            }
+            Err(e) => {
+                self.abort_sys_txn(&state, sys_tid, prev_lsn);
+                Err(e)
+            }
+        }
+    }
+
+    /// Step 2 of a column type change (after the backfill): in ONE catalog txn the old column
+    /// becomes a dropped column and the shadow takes over its name and nullability.
+    pub fn commit_type_swap(
+        &self,
+        table_name: &str,
+        col_name: &str,
+        src_pos: usize,
+        shadow_pos: usize,
+    ) -> Result<()> {
+        let mut state = self.state.write().unwrap();
+        let table_id = *state.table_names.get(table_name).ok_or_else(|| {
+            Error::TransactionError(format!("Table '{}' does not exist", table_name))
+        })?;
+        let schema = state.schemas.get(&table_id).unwrap();
+        let stale = || {
+            Error::TransactionError(format!(
+                "Table '{}' changed during type change of '{}'; retry",
+                table_name, col_name
+            ))
+        };
+        if src_pos >= schema.columns.len() || shadow_pos >= schema.columns.len() {
+            return Err(stale());
+        }
+        let orig = schema.columns[src_pos].clone();
+        let shadow_name = format!("{}shadow_{}", DROPPED_PREFIX, orig.name);
+        if orig.is_dropped()
+            || !orig.name.eq_ignore_ascii_case(col_name)
+            || schema.columns[shadow_pos].name != shadow_name
+        {
+            return Err(stale());
+        }
+        let mut updated_schema = schema.clone();
+        updated_schema.columns[shadow_pos].name = orig.name.clone();
+        updated_schema.columns[shadow_pos].nullable = orig.nullable;
+        updated_schema.columns[src_pos].name = format!("{}{}", DROPPED_PREFIX, src_pos);
+        updated_schema.columns[src_pos].nullable = true;
+
+        let (sys_tid, mut prev_lsn) = self.begin_sys_txn(&mut state)?;
+        let op_res: Result<()> = (|| {
+            if let Some(ref cat_tree) = state.catalog_tree {
+                let key = format!("tbl:{:08}", table_id);
+                cat_tree.insert_logged(
+                    sys_tid,
+                    &mut prev_lsn,
+                    key.as_bytes(),
+                    &updated_schema.serialize(),
+                )?;
+            }
+            self.finish_sys_txn(sys_tid, prev_lsn)?;
+            Ok(())
+        })();
+        match op_res {
+            Ok(()) => {
+                state.schemas.insert(table_id, updated_schema);
+                Ok(())
+            }
+            Err(e) => {
+                self.abort_sys_txn(&state, sys_tid, prev_lsn);
+                Err(e)
+            }
+        }
+    }
+
     pub fn drop_column(&self, table_name: &str, col_name: &str) -> Result<()> {
         let mut state = self.state.write().unwrap();
         let table_id = *state.table_names.get(table_name).ok_or_else(|| {
