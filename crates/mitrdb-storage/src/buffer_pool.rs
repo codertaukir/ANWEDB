@@ -202,6 +202,45 @@ impl BufferPoolManager {
         result
     }
 
+    /// Read-only inspection of a page inside buffer pool without allocating or cloning the Page.
+    pub fn with_page<F, R>(&self, page_id: PageId, f: F) -> Result<R>
+    where
+        F: FnOnce(&Page) -> Result<R>,
+    {
+        #[cfg(feature = "fault-injection")]
+        self.inject_page_op_fail()?;
+        let mut page_table = self.page_table.lock().unwrap();
+        let mut frames = self.frames.lock().unwrap();
+        if self.disk_manager.is_page_free(page_id) {
+            return Err(Error::InvalidPageId(page_id));
+        }
+
+        let frame_idx = if let Some(&idx) = page_table.get(&page_id) {
+            frames[idx].pin_count += 1;
+            frames[idx].ref_bit = true;
+            GLOBAL_METRICS.record_hit();
+            idx
+        } else {
+            GLOBAL_METRICS.record_miss();
+            #[cfg(feature = "fault-injection")]
+            self.inject_page_op_fail_miss()?;
+            let page_on_disk = self.disk_manager.read_page(page_id)?;
+            let victim_idx = self.find_victim_frame(&mut frames, &mut page_table)?;
+            let frame = &mut frames[victim_idx];
+            frame.page = page_on_disk;
+            frame.page_id = Some(page_id);
+            frame.pin_count = 1;
+            frame.is_dirty = false;
+            frame.ref_bit = true;
+            page_table.insert(page_id, victim_idx);
+            victim_idx
+        };
+
+        let res = f(&frames[frame_idx].page);
+        frames[frame_idx].pin_count -= 1;
+        res
+    }
+
     pub fn update_page_data<F, R>(&self, page_id: PageId, f: F) -> Result<R>
     where
         F: FnOnce(&mut Page) -> Result<R>,

@@ -643,8 +643,8 @@ impl BPlusTree {
             let new_len = node.encoded_size().min(PAGE_SIZE - PAGE_HEADER_SIZE);
             new_payload.truncate(new_len);
 
-            // Step 1: mutate_page se bina frame clone kiye in-place old_payload nikalo aur new data likho
-            let (old_payload, type_changed) = self.bpm.mutate_page(node.page_id, |page| {
+            // Step 1: Inspect page in-place (read-only, no dirty bit, zero page clone)
+            let (old_payload, type_changed) = self.bpm.with_page(node.page_id, |page| {
                 let page_body = &page.data[PAGE_HEADER_SIZE..PAGE_SIZE];
                 let old_len = Self::get_page_payload_len(page_body);
                 let type_changed =
@@ -654,31 +654,20 @@ impl BPlusTree {
                 } else {
                     page_body[..old_len].to_vec()
                 };
-
-                page.set_page_type(target_ptype);
-                page.set_flags(0);
-                page.data[PAGE_HEADER_SIZE..PAGE_HEADER_SIZE + new_len]
-                    .copy_from_slice(&new_payload);
-                page.data[PAGE_HEADER_SIZE + new_len..PAGE_SIZE].fill(0);
                 Ok((old_data, type_changed))
             })?;
 
-            // Type-changing writes are logged full-length so recovery can restore the page header type.
             if type_changed {
                 new_payload.resize(PAGE_SIZE - PAGE_HEADER_SIZE, 0);
             }
 
-            // Step 2: WAL append karo
-            // Only the changed byte ranges are logged. Type-changing writes stay full-length
-            // so recovery can restore the page header type.
+            // Step 2: Calculate byte delta ranges and append WAL records
             let ranges = if type_changed {
                 vec![(0usize, PAGE_SIZE - PAGE_HEADER_SIZE)]
             } else {
                 Self::changed_ranges(&old_payload, &new_payload)
             };
 
-            // Debug builds verify that the ranges exactly reproduce the new payload (redo)
-            // and the old payload (undo).
             #[cfg(debug_assertions)]
             {
                 let n = old_payload.len().max(new_payload.len());
@@ -713,9 +702,14 @@ impl BPlusTree {
                 *prev_lsn = lsn;
             }
 
-            // Step 3: LSN stamp karo aur single checksum update
+            // Step 3: Single atomic mutation applying payload + LSN stamp + checksum
             let profile_started = mitrdb_observe::profiling_enabled().then(std::time::Instant::now);
             let res = self.bpm.mutate_page(node.page_id, |page| {
+                page.set_page_type(target_ptype);
+                page.set_flags(0);
+                page.data[PAGE_HEADER_SIZE..PAGE_HEADER_SIZE + new_len]
+                    .copy_from_slice(&new_payload[..new_len]);
+                page.data[PAGE_HEADER_SIZE + new_len..PAGE_SIZE].fill(0);
                 page.set_page_lsn(lsn);
                 page.update_checksum();
                 Ok(())
