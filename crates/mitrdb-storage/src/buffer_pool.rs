@@ -421,6 +421,7 @@ impl BufferPoolManager {
                     || (frames[existing_idx].is_dirty
                         && (frames[existing_idx].page.flags() & PAGE_FLAG_FREE) == 0)
                 {
+                    let _ = self.disk_manager.free_page(new_page_id);
                     return Err(Error::Io(format!(
                         "Allocated page {} conflicts with pinned or dirty active frame",
                         new_page_id
@@ -1239,6 +1240,49 @@ mod tests {
         assert_eq!(reused_p1, p1);
         bpm.unpin_page(reused_p1, false).unwrap();
 
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_new_page_conflict_reclaims_allocated_page_to_freelist() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "mitrdb_bp_test_conflict_leak_guard_{}",
+            std::process::id()
+        ));
+        let db_path = temp_dir.join("test.db");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+
+        let disk = Arc::new(DiskManager::open_or_create(db_path.as_path()).unwrap());
+        let bpm = BufferPoolManager::new(disk.clone(), 4);
+
+        let (p0, _) = bpm.new_page(PAGE_TYPE_SLOTTED).unwrap();
+        assert_eq!(p0, 0);
+        bpm.unpin_page(p0, false).unwrap();
+
+        let (p1, _) = bpm.new_page(PAGE_TYPE_SLOTTED).unwrap();
+        assert_eq!(p1, 1);
+        bpm.unpin_page(p1, false).unwrap();
+
+        let (p2, _) = bpm.new_page(PAGE_TYPE_SLOTTED).unwrap();
+        assert_eq!(p2, 2);
+        bpm.unpin_page(p2, false).unwrap();
+
+        // Free p1 and p2 to disk freelist
+        disk.free_page(p1).unwrap();
+        disk.free_page(p2).unwrap();
+        assert!(disk.is_page_free(p1));
+        assert!(disk.is_page_free(p2));
+
+        // Allocating new pages correctly reuses from freelist without leakage
+        let (p_reused_1, _) = bpm.new_page(PAGE_TYPE_SLOTTED).unwrap();
+        let (p_reused_2, _) = bpm.new_page(PAGE_TYPE_SLOTTED).unwrap();
+        assert!(!disk.is_page_free(p_reused_1));
+        assert!(!disk.is_page_free(p_reused_2));
+        assert!(p_reused_1 == p1 || p_reused_1 == p2);
+        assert!(p_reused_2 == p1 || p_reused_2 == p2);
+
+        bpm.unpin_page(p_reused_1, false).unwrap();
+        bpm.unpin_page(p_reused_2, false).unwrap();
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
 }
