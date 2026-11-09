@@ -59,7 +59,9 @@ Status tracker. `[x]` = done and measured/tested, `[ ]` = pending.
 - [ ] P2: Rust API docs, SQL REPL, backup/restore CLI, better errors, release packaging
 
 ## Housekeeping
-- [ ] README measured limits mein naya delete number (57-88us autocommit)
+- [x] README: `sync()` NOT NULL/type handling aur ALTER COLUMN limits likhe (a078848)
+- [x] README delete limit naye numbers se (2822eef): ek workload (`DELETE WHERE id >= 0`, INT pk + INT + TEXT, koi secondary index nahi, release, tmpfs, ek run per N): N=10k/20k/40k par 157/139/117us per row, ~6KB WAL per row, peak memory +45/59/82MB. Non-tmpfs fsync cost measure nahi hua. Single-row autocommit delete 57-88us (1e20f9d) alag workload hai, README mein mix nahi kiya
+- [ ] `define_table` builder mein type change ka opt-in variant (abhi builder `sync()` bulata hai, type change refuse hota hai)
 - [ ] CI badge + repo naam ANWEDB -> MITRDB
 - [ ] free_pages_batch crash-injection test (blank pages likhe, freelist save se pehle process mare)
 - [x] ~/mitrdb_ab/delprev worktree hataya (git worktree remove + prune, clean tha)
