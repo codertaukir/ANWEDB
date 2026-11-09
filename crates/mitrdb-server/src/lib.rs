@@ -407,6 +407,12 @@ impl Server {
         Ok(None)
     }
 
+    /// Finish poisoned commits (WAL flush failed earlier) now, without waiting for the next
+    /// statement. Call it from an idle loop. Returns how many were resolved.
+    pub fn resolve_poisoned(&self) -> usize {
+        self.txn_mgr.resolve_poisoned_commits()
+    }
+
     pub fn vacuum(&self) -> VacuumReport {
         self.txn_mgr.vacuum()
     }
