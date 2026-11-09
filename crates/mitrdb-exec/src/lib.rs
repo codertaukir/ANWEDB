@@ -3150,10 +3150,21 @@ impl Executor {
                 }
             }
         }
+        let mut seen_lock_targets: HashSet<(usize, Vec<u8>)> = HashSet::new();
+        for (t, k) in &lock_targets {
+            seen_lock_targets.insert((Arc::as_ptr(t) as usize, k.clone()));
+        }
         for (pk_bytes, tuple) in &to_delete {
-            lock_targets.push((&tree, pk_bytes.clone()));
+            let tree_ptr = Arc::as_ptr(&tree) as usize;
+            if seen_lock_targets.insert((tree_ptr, pk_bytes.clone())) {
+                lock_targets.push((&tree, pk_bytes.clone()));
+            }
             for (col_pos, idx_tree) in &idx_trees {
-                lock_targets.push((idx_tree, tuple[*col_pos].to_key_bytes()));
+                let idx_k = tuple[*col_pos].to_key_bytes();
+                let idx_ptr = Arc::as_ptr(idx_tree) as usize;
+                if seen_lock_targets.insert((idx_ptr, idx_k.clone())) {
+                    lock_targets.push((idx_tree, idx_k));
+                }
             }
         }
         txn_mgr.acquire_exclusive_keys(txn_id, &lock_targets)?;
@@ -3161,14 +3172,26 @@ impl Executor {
         let pk_slices: Vec<&[u8]> = to_delete.iter().map(|(pk, _)| pk.as_slice()).collect();
         let deleted = txn_mgr.delete_batch(txn_id, &tree, &pk_slices)?;
 
+        // Group index removals per distinct (tree, idx_key) so duplicate index keys
+        // undergo exactly one read-modify-write cycle instead of O(N) writes.
+        let mut idx_removals: std::collections::HashMap<(usize, Vec<u8>), HashSet<Vec<u8>>> =
+            std::collections::HashMap::new();
         for (pk_bytes, tuple) in &to_delete {
-            for (col_pos, idx_tree) in &idx_trees {
+            for (idx_pos, (col_pos, _)) in idx_trees.iter().enumerate() {
                 let idx_key = tuple[*col_pos].to_key_bytes();
-                let (mut pks, old_raw) = Self::idx_read_all(txn_mgr, txn_id, idx_tree, &idx_key)?;
-                if !pks.is_empty() {
-                    pks.retain(|pk| pk != pk_bytes);
-                    Self::idx_write_all(txn_mgr, txn_id, idx_tree, &idx_key, &pks, &old_raw)?;
-                }
+                idx_removals
+                    .entry((idx_pos, idx_key))
+                    .or_default()
+                    .insert(pk_bytes.clone());
+            }
+        }
+
+        for ((idx_pos, idx_key), pks_to_remove) in idx_removals {
+            let (_, idx_tree) = &idx_trees[idx_pos];
+            let (mut pks, old_raw) = Self::idx_read_all(txn_mgr, txn_id, idx_tree, &idx_key)?;
+            if !pks.is_empty() {
+                pks.retain(|pk| !pks_to_remove.contains(pk));
+                Self::idx_write_all(txn_mgr, txn_id, idx_tree, &idx_key, &pks, &old_raw)?;
             }
         }
 
