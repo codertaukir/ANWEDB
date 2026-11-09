@@ -1453,8 +1453,6 @@ impl BPlusTree {
     pub fn delete_logged(&self, txn_id: TxnId, prev_lsn: &mut Lsn, key: &[u8]) -> Result<bool> {
         let _op_guard = self.bpm.acquire_op_shared();
         let mut root_guard = self.root_page_id.write().unwrap();
-        // Reset INSIDE the root write lock: an insert cannot re-set the hint between
-        // this reset and the structural changes below (merge/free of leaf pages).
         self.last_leaf_hint
             .store(INVALID_PAGE_ID, Ordering::Relaxed);
         let mut leaf = self.find_leaf_page(*root_guard, key)?;
@@ -1467,15 +1465,86 @@ impl BPlusTree {
         leaf.keys.remove(idx);
         leaf.values.remove(idx);
 
+        self.rebalance_leaf(&mut root_guard, leaf, txn_id, prev_lsn)?;
+        Ok(true)
+    }
+
+    pub fn delete_batch_logged(
+        &self,
+        txn_id: TxnId,
+        prev_lsn: &mut Lsn,
+        sorted_keys: &[&[u8]],
+    ) -> Result<usize> {
+        if sorted_keys.is_empty() {
+            return Ok(0);
+        }
+        let _op_guard = self.bpm.acquire_op_shared();
+        let mut root_guard = self.root_page_id.write().unwrap();
+        self.last_leaf_hint
+            .store(INVALID_PAGE_ID, Ordering::Relaxed);
+
+        let mut deleted_count = 0;
+        let mut key_idx = 0;
+
+        while key_idx < sorted_keys.len() {
+            let target_key = sorted_keys[key_idx];
+            let mut leaf = self.find_leaf_page(*root_guard, target_key)?;
+            let mut deleted_in_leaf = 0;
+
+            // Drain all keys from sorted_keys present in this leaf
+            while key_idx < sorted_keys.len() {
+                let current_k = sorted_keys[key_idx];
+                match leaf.keys.binary_search_by(|k| k.as_slice().cmp(current_k)) {
+                    Ok(pos) => {
+                        leaf.keys.remove(pos);
+                        leaf.values.remove(pos);
+                        deleted_in_leaf += 1;
+                        deleted_count += 1;
+                        key_idx += 1;
+                    }
+                    Err(_) => {
+                        // Check if current_k is strictly greater than all keys currently in leaf
+                        if let Some(last_k) = leaf.keys.last() {
+                            if current_k > last_k.as_slice() {
+                                break;
+                            }
+                        } else {
+                            // Leaf has become empty
+                            break;
+                        }
+                        // Non-matching key within range
+                        key_idx += 1;
+                    }
+                }
+            }
+
+            if deleted_in_leaf > 0 {
+                self.rebalance_leaf(&mut root_guard, leaf, txn_id, prev_lsn)?;
+            } else {
+                // If nothing was deleted from this leaf, advance to avoid re-evaluating the same key
+                key_idx += 1;
+            }
+        }
+
+        Ok(deleted_count)
+    }
+
+    fn rebalance_leaf(
+        &self,
+        root_guard: &mut PageId,
+        mut leaf: BTreeNode,
+        txn_id: TxnId,
+        prev_lsn: &mut Lsn,
+    ) -> Result<()> {
         if leaf.page_id == *root_guard {
             self.write_node(&leaf, txn_id, prev_lsn)?;
-            return Ok(true);
+            return Ok(());
         }
 
         let min_keys = (self.max_keys as usize / 2).max(1);
         if leaf.keys.len() >= min_keys {
             self.write_node(&leaf, txn_id, prev_lsn)?;
-            return Ok(true);
+            return Ok(());
         }
 
         let parent = self.read_node(leaf.parent_page_id)?;
@@ -1508,7 +1577,7 @@ impl BPlusTree {
                     self.write_node(&cand_left, txn_id, prev_lsn)?;
                     self.write_node(&cand_leaf, txn_id, prev_lsn)?;
                     self.write_node(&cand_parent, txn_id, prev_lsn)?;
-                    return Ok(true);
+                    return Ok(());
                 }
             }
         }
@@ -1534,7 +1603,7 @@ impl BPlusTree {
                     self.write_node(&cand_right, txn_id, prev_lsn)?;
                     self.write_node(&cand_leaf, txn_id, prev_lsn)?;
                     self.write_node(&cand_parent, txn_id, prev_lsn)?;
-                    return Ok(true);
+                    return Ok(());
                 }
             }
         }
@@ -1564,8 +1633,7 @@ impl BPlusTree {
                 next_parent.children.remove(leaf_idx);
 
                 self.free_btree_page(leaf.page_id, txn_id, prev_lsn)?;
-                self.rebalance_internal(&mut root_guard, next_parent, txn_id, prev_lsn)?;
-                return Ok(true);
+                return self.rebalance_internal(root_guard, next_parent, txn_id, prev_lsn);
             }
         } else {
             let right_sibling_id = parent.children[1];
@@ -1593,14 +1661,13 @@ impl BPlusTree {
                 next_parent.children.remove(1);
 
                 self.free_btree_page(right_sibling.page_id, txn_id, prev_lsn)?;
-                self.rebalance_internal(&mut root_guard, next_parent, txn_id, prev_lsn)?;
-                return Ok(true);
+                return self.rebalance_internal(root_guard, next_parent, txn_id, prev_lsn);
             }
         }
 
         if !leaf.keys.is_empty() {
             self.write_node(&leaf, txn_id, prev_lsn)?;
-            return Ok(true);
+            return Ok(());
         }
 
         if leaf_idx > 0 {
@@ -1618,8 +1685,7 @@ impl BPlusTree {
             next_parent.keys.remove(leaf_idx - 1);
             next_parent.children.remove(leaf_idx);
             self.free_btree_page(leaf.page_id, txn_id, prev_lsn)?;
-            self.rebalance_internal(&mut root_guard, next_parent, txn_id, prev_lsn)?;
-            Ok(true)
+            self.rebalance_internal(root_guard, next_parent, txn_id, prev_lsn)
         } else {
             let right_sibling_id = parent.children[1];
             let right_sibling = self.read_node(right_sibling_id)?;
@@ -1637,8 +1703,7 @@ impl BPlusTree {
             next_parent.keys.remove(0);
             next_parent.children.remove(1);
             self.free_btree_page(right_sibling.page_id, txn_id, prev_lsn)?;
-            self.rebalance_internal(&mut root_guard, next_parent, txn_id, prev_lsn)?;
-            Ok(true)
+            self.rebalance_internal(root_guard, next_parent, txn_id, prev_lsn)
         }
     }
 
@@ -2182,6 +2247,38 @@ mod tests {
             assert!(!keys.contains(&b"key_03".to_vec()));
         }
 
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_btree_delete_batch_logged_multi_leaf() {
+        let temp_dir = std::env::temp_dir().join(format!("mitrdb_batch_del_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let _ = std::fs::create_dir_all(&temp_dir);
+        let dm = Arc::new(DiskManager::open_or_create(temp_dir.join("test.db")).unwrap());
+        let wm = Arc::new(WalManager::open_or_create(temp_dir.join("test.wal")).unwrap());
+        let bpm = Arc::new(BufferPoolManager::new(dm, 64));
+        let tree = BPlusTree::create(bpm, Some(wm), 64).unwrap();
+
+        let mut lsn = 0;
+        let keys: Vec<Vec<u8>> = (0..200).map(|i| format!("key_{:04}", i).into_bytes()).collect();
+        for k in &keys {
+            tree.insert_logged(1, &mut lsn, k, b"val").unwrap();
+        }
+
+        // Delete even keys in batch
+        let del_keys: Vec<Vec<u8>> = (0..200).filter(|i| i % 2 == 0).map(|i| format!("key_{:04}", i).into_bytes()).collect();
+        let del_slices: Vec<&[u8]> = del_keys.iter().map(|k| k.as_slice()).collect();
+        let deleted = tree.delete_batch_logged(1, &mut lsn, &del_slices).unwrap();
+        assert_eq!(deleted, 100);
+
+        for (i, k) in keys.iter().enumerate() {
+            let res = tree.get(k).unwrap();
+            if i % 2 == 0 {
+                assert!(res.is_none(), "Key {} should be deleted", i);
+            } else {
+                assert_eq!(res, Some(b"val".to_vec()), "Key {} should exist", i);
+            }
+        }
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
 

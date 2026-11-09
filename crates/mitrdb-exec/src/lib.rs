@@ -3158,21 +3158,17 @@ impl Executor {
         }
         txn_mgr.acquire_exclusive_keys(txn_id, &lock_targets)?;
 
-        let mut deleted = 0;
-        for (pk_bytes, tuple) in to_delete {
-            if deleted % 64 == 63 {
-                txn_mgr.relieve_wal_pressure(WAL_PRESSURE_LIMIT_BYTES)?;
-            }
-            if txn_mgr.delete(txn_id, &tree, &pk_bytes)? {
-                for (col_pos, idx_tree) in &idx_trees {
-                    let idx_key = tuple[*col_pos].to_key_bytes();
-                    let (mut pks, old_raw) = Self::idx_read_all(txn_mgr, txn_id, idx_tree, &idx_key)?;
-                    if !pks.is_empty() {
-                        pks.retain(|pk| pk != &pk_bytes);
-                        Self::idx_write_all(txn_mgr, txn_id, idx_tree, &idx_key, &pks, &old_raw)?;
-                    }
+        let pk_slices: Vec<&[u8]> = to_delete.iter().map(|(pk, _)| pk.as_slice()).collect();
+        let deleted = txn_mgr.delete_batch(txn_id, &tree, &pk_slices)?;
+
+        for (pk_bytes, tuple) in &to_delete {
+            for (col_pos, idx_tree) in &idx_trees {
+                let idx_key = tuple[*col_pos].to_key_bytes();
+                let (mut pks, old_raw) = Self::idx_read_all(txn_mgr, txn_id, idx_tree, &idx_key)?;
+                if !pks.is_empty() {
+                    pks.retain(|pk| pk != pk_bytes);
+                    Self::idx_write_all(txn_mgr, txn_id, idx_tree, &idx_key, &pks, &old_raw)?;
                 }
-                deleted += 1;
             }
         }
 

@@ -1963,6 +1963,110 @@ impl TxnManager {
         Ok(true)
     }
 
+    pub fn delete_batch(
+        &self,
+        txn_id: TxnId,
+        tree: &Arc<BPlusTree>,
+        keys: &[&[u8]],
+    ) -> Result<usize> {
+        if keys.is_empty() {
+            return Ok(0);
+        }
+        let (isolation, read_ts) = self.ensure_active_txn_info(txn_id)?;
+
+        // 1. Identify which keys exist and collect their visible values
+        let mut to_delete = Vec::new();
+        for &k in keys {
+            let skey = Self::scoped_key(tree, k);
+            let lock_delta = self.lock_manager.acquire_with_rollback(
+                txn_id,
+                LockKey::Key(skey.clone()),
+                LockMode::Exclusive,
+            )?;
+            let visible = match self.read_key_visible_value(txn_id, isolation, read_ts, tree, k, &skey) {
+                Ok(v) => v,
+                Err(e) => {
+                    self.lock_manager.rollback_delta(txn_id, lock_delta);
+                    return Err(e);
+                }
+            };
+            {
+                let mut txns = self.txns.lock().unwrap();
+                if let Some(ctx) = txns.get_mut(&txn_id) {
+                    ctx.read_keys.insert(skey.clone());
+                }
+            }
+            if visible.is_some() {
+                to_delete.push((k, skey));
+            }
+        }
+
+        if to_delete.is_empty() {
+            return Ok(0);
+        }
+
+        // 2. Sort keys to maximize B+Tree leaf locality
+        to_delete.sort_by(|a, b| a.0.cmp(b.0));
+        let sorted_keys: Vec<&[u8]> = to_delete.iter().map(|(k, _)| *k).collect();
+
+        // 3. Physical batch delete on BPlusTree
+        let mut last_lsn = {
+            let txns = self.txns.lock().unwrap();
+            txns.get(&txn_id).map(|ctx| ctx.last_lsn).unwrap_or(0)
+        };
+
+        // Collect old btree values for undo actions
+        let mut old_values = Vec::with_capacity(sorted_keys.len());
+        for &k in &sorted_keys {
+            old_values.push(tree.get(k)?);
+        }
+
+        tree.delete_batch_logged(txn_id, &mut last_lsn, &sorted_keys)?;
+
+        // 4. Update MVCC version chains & transaction write-set
+        {
+            let mut versions = self.mvcc_versions.lock().unwrap();
+            let mut txns = self.txns.lock().unwrap();
+            let ctx = txns.get_mut(&txn_id).ok_or_else(|| {
+                Error::TransactionError(format!("Transaction {} context missing", txn_id))
+            })?;
+            ctx.last_lsn = last_lsn;
+
+            for (i, (k, skey)) in to_delete.into_iter().enumerate() {
+                let old_val = old_values[i].clone();
+                let chain = versions.entry(skey).or_default();
+                if chain.is_empty() && let Some(ref baseline) = old_val {
+                    chain.push(VersionedValue {
+                        xmin: 0,
+                        xmax: Some(txn_id),
+                        value: Some(baseline.clone()),
+                    });
+                    chain.push(VersionedValue {
+                        xmin: txn_id,
+                        xmax: None,
+                        value: None,
+                    });
+                } else if let Some(prev) = chain.last_mut() && prev.xmax.is_none() {
+                    prev.xmax = Some(txn_id);
+                    chain.push(VersionedValue {
+                        xmin: txn_id,
+                        xmax: None,
+                        value: None,
+                    });
+                }
+                versions.index_tree_key(Self::tree_scope_prefix(tree), k);
+
+                ctx.write_set.push(UndoAction::BTreeKey {
+                    tree: tree.clone(),
+                    key: k.to_vec(),
+                    old_value: old_val,
+                });
+            }
+        }
+
+        Ok(sorted_keys.len())
+    }
+
     fn write_key_internal(
         &self,
         txn_id: TxnId,
