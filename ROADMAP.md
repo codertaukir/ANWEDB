@@ -43,6 +43,8 @@ Status tracker. `[x]` = done and measured/tested, `[ ]` = pending.
 - [x] ~/mitrdb_ab/delprev worktree hataya
 - [x] `.bak*` files source dirs se clean kiye
 
+- [x] Batch delete per leaf (4042419, fdc2679): `delete_batch_logged` (btree.rs) + `rebalance_leaf` isolation, `delete_batch` (mitrdb-txn), aur `exec_delete` wiring. N=5000 delete_probe: 257us/row, 81 page writes, 0 evictions; delete_autocommit_probe: N=2000 avg=741us, p50=718us, 32 page writes, 0 evictions
+
 ## P0: Production Readiness & Memory Safety
 - [x] `insert_many` par WAL pressure hook: `PhysicalPlan::InsertMany` mein har 64 rows par 16MB pressure check (`relieve_wal_pressure`); `wal_pressure_insert_flush` crash recovery test + `insert_many_wal_pressure_test` rollback test verified (bf0fc73)
 - [x] Flush payload single-copy: `collect_flush_work` (`wal.rs`) group-commit leader path refactored to ping-pong arena hand-off; duplicate heap vector allocation eliminated.
@@ -50,7 +52,7 @@ Status tracker. `[x]` = done and measured/tested, `[ ]` = pending.
 - [ ] Btree multi-write remaining edge cases (low priority): `free_btree_page`, delete merge/borrow/rebalance_internal error-path isolation aur buffer pool new_page conflict free-page leak guard.
 
 ## Performance
-- [x] Batch delete per leaf (4042419): `delete_batch_logged` (btree.rs) + `rebalance_leaf` isolation, `delete_batch` (mitrdb-txn), aur `exec_delete` wiring. N=5000 delete_probe: 257us/row, 81 page writes, 0 buffer pool evictions (pehle per-row rebalance aur multiple page writes the).
+- [x] Batch delete per leaf (4042419, fdc2679): `delete_batch_logged` (btree.rs) + `rebalance_leaf` isolation, `delete_batch` (mitrdb-txn), aur `exec_delete` wiring. N=5000 delete_probe: 257us/row, 81 page writes; delete_autocommit_probe: N=2000 avg=741us, p50=718us, 0 evictions (write amplification aur root traversal overhead eliminated).
 - [ ] Index write amplification (wide ranges): `u >= 0` par `ta_i` ka +20% slowdown measure karna aur DELETE lock loop verify karna.
 - [ ] btrfs autocommit fsync floor: ~13ms fdatasync floor ko concurrent group commit aggregation se mitigate karna.
 - [ ] (parked) Freelist reuse save: 3-4% fsync reduction (low priority).
