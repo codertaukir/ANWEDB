@@ -2551,6 +2551,10 @@ impl Executor {
             for (_, col_pos, idx_tree) in &idx_trees {
                 let old_idx_key = old_tuple[*col_pos].to_key_bytes();
                 let new_idx_key = new_tuple[*col_pos].to_key_bytes();
+                // Index entry is never written when key and pk are unchanged: no lock needed.
+                if new_idx_key == old_idx_key && new_pk_bytes == old_pk_bytes {
+                    continue;
+                }
                 lock_targets.push((idx_tree, old_idx_key.clone()));
                 if new_idx_key != old_idx_key {
                     lock_targets.push((idx_tree, new_idx_key));
