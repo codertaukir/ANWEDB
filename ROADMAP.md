@@ -50,7 +50,7 @@ Status tracker. `[x]` = done and measured/tested, `[ ]` = pending.
 - [ ] Btree multi-write remaining edge cases (low priority): `free_btree_page`, delete merge/borrow/rebalance_internal error-path isolation aur buffer pool new_page conflict free-page leak guard.
 
 ## Performance
-- [ ] Batch delete per leaf: single-row leaf shift se ~6KB WAL/row banta hai; per-leaf batch shift implement karke write amplification ghatana.
+- [x] Batch delete per leaf (4042419): `delete_batch_logged` (btree.rs) + `rebalance_leaf` isolation, `delete_batch` (mitrdb-txn), aur `exec_delete` wiring. N=5000 delete_probe: 257us/row, 81 page writes, 0 buffer pool evictions (pehle per-row rebalance aur multiple page writes the).
 - [ ] Index write amplification (wide ranges): `u >= 0` par `ta_i` ka +20% slowdown measure karna aur DELETE lock loop verify karna.
 - [ ] btrfs autocommit fsync floor: ~13ms fdatasync floor ko concurrent group commit aggregation se mitigate karna.
 - [ ] (parked) Freelist reuse save: 3-4% fsync reduction (low priority).
