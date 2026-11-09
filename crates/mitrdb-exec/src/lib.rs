@@ -2387,8 +2387,46 @@ impl Executor {
                 else {
                     continue;
                 };
-                if ranges.is_empty() || !ranges.iter().all(is_point) {
+                if ranges.is_empty() {
                     continue;
+                }
+                if !ranges.iter().all(is_point) {
+                    // Range predicate (`g > 5`, `g >= 0`, ...): collect PKs from the index first
+                    // (no table reads). Too many PKs means the full scan is cheaper: fall back.
+                    const RANGE_DML_PK_CAP: usize = 4096;
+                    let mut seen_pks = HashSet::new();
+                    let mut pks: Vec<Vec<u8>> = Vec::new();
+                    let mut over_cap = false;
+                    'collect: for r in &ranges {
+                        for (idx_key, encoded) in txn_mgr.range_scan(txn_id, &idx_tree, r)? {
+                            if idx_key.first() == Some(&OVERFLOW_KEY_TAG) {
+                                continue;
+                            }
+                            let ids = Self::idx_decode_entry(
+                                txn_mgr, txn_id, &idx_tree, &idx_key, &encoded, None,
+                            )?;
+                            for pk in ids {
+                                if seen_pks.insert(pk.clone()) {
+                                    pks.push(pk);
+                                    if pks.len() > RANGE_DML_PK_CAP {
+                                        over_cap = true;
+                                        break 'collect;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if over_cap {
+                        return txn_mgr.scan_unlocked(txn_id, tree);
+                    }
+                    pks.sort();
+                    let mut out = Vec::with_capacity(pks.len());
+                    for pk in pks {
+                        if let Some(row) = txn_mgr.get(txn_id, tree, &pk)? {
+                            out.push((pk, row));
+                        }
+                    }
+                    return Ok(out);
                 }
                 let mut seen_pks = HashSet::new();
                 let mut out = Vec::new();
