@@ -1181,7 +1181,13 @@ impl Executor {
                 let (tid, auto_commit) = Self::ensure_txn(txn_mgr, *active_txn, default_isolation)?;
                 let mark = Self::stmt_mark(txn_mgr, tid, auto_commit);
                 let mut res: Result<ExecutionResult> = Ok(ExecutionResult::Affected(rows.len()));
-                for values in &rows {
+                for (inserted, values) in rows.iter().enumerate() {
+                    if inserted % 64 == 63 {
+                        if let Err(e) = txn_mgr.relieve_wal_pressure(WAL_PRESSURE_LIMIT_BYTES) {
+                            res = Err(e);
+                            break;
+                        }
+                    }
                     if let Err(e) = self.exec_insert(catalog, txn_mgr, tid, &schema, values) {
                         res = Err(e);
                         break;
