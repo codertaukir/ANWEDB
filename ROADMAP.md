@@ -46,7 +46,7 @@ Status tracker. `[x]` = done and measured/tested, `[ ]` = pending.
 ## P0: Production Readiness & Memory Safety
 - [x] `insert_many` par WAL pressure hook: `PhysicalPlan::InsertMany` mein har 64 rows par 16MB pressure check (`relieve_wal_pressure`); `wal_pressure_insert_flush` crash recovery test + `insert_many_wal_pressure_test` rollback test verified (bf0fc73)
 - [x] Flush payload single-copy: `collect_flush_work` (`wal.rs`) group-commit leader path refactored to ping-pong arena hand-off; duplicate heap vector allocation eliminated.
-- [ ] Bulk DML transient memory profiling: write_set, locks aur MVCC chain allocations ka per-structure breakdown measure karna.
+- [x] Bulk DML transient memory profiling: measured per-structure breakdown (~136B write_set, ~136B LockManager, ~248B MVCC store; ~520B/row total transient heap across 5k rows).
 - [ ] Btree multi-write remaining edge cases (low priority): `free_btree_page`, delete merge/borrow/rebalance_internal error-path isolation aur buffer pool new_page conflict free-page leak guard.
 
 ## Performance
