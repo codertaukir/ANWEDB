@@ -254,6 +254,8 @@ fn accept_loop(
                 }
             }
             Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
+                // idle: finish poisoned commits (one atomic load when none are pending)
+                server.resolve_poisoned();
                 thread::sleep(Duration::from_millis(10));
             }
             Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
