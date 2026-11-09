@@ -452,14 +452,24 @@ struct PendingRecord {
     len: u32,
 }
 
-/// Work item describing one WAL segment's pending bytes for a group-commit flush.
+/// Work item describing one WAL segment's pending byte range in the flushed arena.
 struct FlushSegmentWork {
-    #[allow(dead_code)]
     segment_id: u64,
     path: PathBuf,
     prev_flushed_bytes: u64,
     existed_before: bool,
-    payload: Vec<u8>,
+    slice_start: usize,
+    slice_end: usize,
+}
+
+/// Standalone batch handed off to the group-commit flush leader.
+struct FlushBatch {
+    segments: Vec<FlushSegmentWork>,
+    arena: Vec<u8>,
+    #[allow(dead_code)]
+    target_lsn: Lsn,
+    drained_records: Vec<PendingRecord>,
+    bytes_by_seg: HashMap<u64, u64>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -479,6 +489,8 @@ struct WalInner {
     /// Invariant: `pending[0].start == pending_base` and the arena holds exactly
     /// the bytes of `pending` back to back.
     pending_bytes: Vec<u8>,
+    /// Standby arena for zero-copy ping-pong swap during group commits.
+    standby_arena: Vec<u8>,
     /// Absolute offset (in "all bytes ever appended" space) of `pending_bytes[0]`.
     pending_base: u64,
     checkpoint_meta: Option<CheckpointMetadata>,
@@ -593,6 +605,7 @@ impl WalManager {
                 flushed_lsn: 0,
                 pending: Vec::new(),
                 pending_bytes: Vec::with_capacity(PENDING_ARENA_INITIAL_CAPACITY),
+                standby_arena: Vec::with_capacity(PENDING_ARENA_INITIAL_CAPACITY),
                 pending_base: 0,
                 checkpoint_meta: None,
                 txn_trackers: HashMap::new(),
@@ -1339,22 +1352,45 @@ impl WalManager {
             let latest_appended_lsn = inner.next_lsn.saturating_sub(1);
             let flush_target = target_lsn.max(latest_appended_lsn);
 
-            // Snapshot pending records to write while holding the lock briefly.
-            let work = Self::collect_flush_work(&inner, flush_target);
+            let mut batch = Self::collect_flush_batch(&mut inner, flush_target);
             drop(inner);
 
-            let io_result = self.perform_flush_io(&work);
+            let io_result = self.perform_flush_io(&batch);
 
             inner = self.inner.lock().unwrap();
             match io_result {
                 Ok(()) => {
-                    Self::apply_flush_success(&mut inner, flush_target);
+                    for (seg_id, nbytes) in batch.bytes_by_seg {
+                        if let Some(seg) = inner.segments.iter_mut().find(|s| s.segment_id == seg_id) {
+                            seg.flushed_bytes = seg.flushed_bytes.saturating_add(nbytes);
+                        }
+                    }
+                    if let Some(last) = batch.drained_records.last() {
+                        inner.flushed_lsn = inner.flushed_lsn.max(last.lsn);
+                    }
+                    GLOBAL_METRICS.record_wal_flush();
+
+                    batch.arena.clear();
+                    if batch.arena.capacity() > ARENA_SHRINK_MIN_CAPACITY {
+                        batch.arena.shrink_to(PENDING_ARENA_INITIAL_CAPACITY);
+                    }
+                    inner.standby_arena = batch.arena;
+
                     inner.flush_in_progress = false;
                     self.flush_cv.notify_all();
-                    // Loop back: if our target is now durable we return; otherwise
-                    // another batch of appends may still need a flush.
                 }
                 Err(e) => {
+                    let drained_bytes: u64 = batch.drained_records.iter().map(|p| p.len as u64).sum();
+                    inner.pending_base = inner.pending_base.saturating_sub(drained_bytes);
+
+                    let current_records = std::mem::take(&mut inner.pending);
+                    inner.pending = batch.drained_records;
+                    inner.pending.extend(current_records);
+
+                    let current_bytes = std::mem::take(&mut inner.pending_bytes);
+                    batch.arena.extend_from_slice(&current_bytes);
+                    inner.pending_bytes = batch.arena;
+
                     inner.flush_in_progress = false;
                     self.flush_cv.notify_all();
                     GLOBAL_METRICS.record_wal_flush_total_ns(
@@ -1366,15 +1402,11 @@ impl WalManager {
         }
     }
 
-    /// Collect ordered pending records and segment metadata needed for a flush
-    /// up to `target_lsn`. Called under the WAL mutex.
-    ///
-    /// Pending records of one segment are contiguous in the arena, so each segment's
-    /// payload is built with a single `extend_from_slice` (one memcpy per segment run,
-    /// with the exact capacity reserved up front).
-    fn collect_flush_work(inner: &WalInner, target_lsn: Lsn) -> Vec<FlushSegmentWork> {
-        // (segment_id, absolute_start, absolute_end)
+    fn collect_flush_batch(inner: &mut WalInner, target_lsn: Lsn) -> FlushBatch {
         let mut runs: Vec<(u64, u64, u64)> = Vec::new();
+        let mut drained_count = 0usize;
+        let mut bytes_by_seg: HashMap<u64, u64> = HashMap::new();
+
         for item in &inner.pending {
             if item.lsn > target_lsn {
                 break;
@@ -1386,6 +1418,8 @@ impl WalManager {
                 }
                 _ => runs.push((item.segment_id, item.start, end)),
             }
+            *bytes_by_seg.entry(item.segment_id).or_insert(0) += item.len as u64;
+            drained_count += 1;
         }
 
         let mut by_seg: Vec<FlushSegmentWork> = Vec::with_capacity(runs.len());
@@ -1400,26 +1434,40 @@ impl WalManager {
             } else {
                 path.exists()
             };
-            let from = (start - inner.pending_base) as usize;
-            let to = (end - inner.pending_base) as usize;
-            let mut payload = Vec::with_capacity(to - from);
-            payload.extend_from_slice(&inner.pending_bytes[from..to]);
+            let slice_start = (start - inner.pending_base) as usize;
+            let slice_end = (end - inner.pending_base) as usize;
+
             by_seg.push(FlushSegmentWork {
                 segment_id,
                 path,
                 prev_flushed_bytes: flushed_bytes,
                 existed_before: existed,
-                payload,
+                slice_start,
+                slice_end,
             });
         }
-        by_seg
+
+        let mut batch_arena = std::mem::take(&mut inner.standby_arena);
+        std::mem::swap(&mut inner.pending_bytes, &mut batch_arena);
+
+        let drained_records: Vec<PendingRecord> = inner.pending.drain(0..drained_count).collect();
+        let total_bytes: u64 = drained_records.iter().map(|p| p.len as u64).sum();
+        inner.pending_base += total_bytes;
+
+        FlushBatch {
+            segments: by_seg,
+            arena: batch_arena,
+            target_lsn,
+            drained_records,
+            bytes_by_seg,
+        }
     }
 
-    fn perform_flush_io(&self, work: &[FlushSegmentWork]) -> Result<()> {
+    fn perform_flush_io(&self, batch: &FlushBatch) -> Result<()> {
         let mut active_slot = self.active_segment_file.lock().unwrap();
 
-        for seg in work {
-            if seg.payload.is_empty() {
+        for seg in &batch.segments {
+            if seg.slice_start == seg.slice_end {
                 continue;
             }
 
@@ -1441,7 +1489,7 @@ impl WalManager {
                 *active_slot = Some((seg.segment_id, file));
             }
             let file = &mut active_slot.as_mut().unwrap().1;
-            let payload: &[u8] = &seg.payload;
+            let payload: &[u8] = &batch.arena[seg.slice_start..seg.slice_end];
             let sync_started = std::time::Instant::now();
 
             file.seek(SeekFrom::Start(seg.prev_flushed_bytes))?;
@@ -1462,6 +1510,7 @@ impl WalManager {
         Ok(())
     }
 
+    #[allow(dead_code)]
     fn apply_flush_success(inner: &mut WalInner, target_lsn: Lsn) {
         let mut drained = 0usize;
         let mut max_lsn = inner.flushed_lsn;
