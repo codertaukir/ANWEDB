@@ -1790,74 +1790,185 @@ impl Executor {
                     .filter(|(_, _, op)| *op == mitrdb_query::CompareOp::Eq)
                     .map(|&(l, r, _)| (l, r))
                     .collect();
-                let use_hash = !eq_pairs.is_empty();
+                let non_eq_conditions: Vec<(usize, usize, mitrdb_query::CompareOp)> = join_conditions
+                    .iter()
+                    .filter(|(_, _, op)| *op != mitrdb_query::CompareOp::Eq)
+                    .copied()
+                    .collect();
+
                 let all_idx: Vec<usize> = (0..right_rows.len()).collect();
-                let no_match: Vec<usize> = Vec::new();
-                let mut hash_index: std::collections::HashMap<Vec<Value>, Vec<usize>> =
-                    std::collections::HashMap::new();
-                if use_hash {
+                let no_match: [usize; 0] = [];
+                let null_right: Vec<Value> = vec![Value::Null; right_schema.columns.len()];
+
+                if eq_pairs.len() == 1 {
+                    let (l_col, r_col) = eq_pairs[0];
+                    let mut single_hash: std::collections::HashMap<&Value, Vec<usize>> =
+                        std::collections::HashMap::with_capacity(right_rows.len());
+
+                    for (ri, rrow) in right_rows.iter().enumerate() {
+                        let val = &rrow[r_col];
+                        if !matches!(val, Value::Null) {
+                            single_hash.entry(val).or_default().push(ri);
+                        }
+                    }
+
+                    for left_row in &left_rows {
+                        let mut matched = false;
+                        let l_val = &left_row[l_col];
+                        let cands: &[usize] = if matches!(l_val, Value::Null) {
+                            &no_match
+                        } else {
+                            single_hash.get(l_val).map(|v| v.as_slice()).unwrap_or(&no_match)
+                        };
+
+                        for &ri in cands {
+                            let right_row = &right_rows[ri];
+                            let mut conds_met = true;
+                            for &(l_idx, r_idx, op) in &non_eq_conditions {
+                                if !op.evaluate(&left_row[l_idx], &right_row[r_idx]) {
+                                    conds_met = false;
+                                    break;
+                                }
+                            }
+                            if conds_met
+                                && filter
+                                    .as_ref()
+                                    .is_none_or(|f| f.evaluate(left_row, right_row))
+                            {
+                                matched = true;
+                                let mut tuple = Vec::with_capacity(projection.len());
+                                for item in &projection {
+                                    match item.source {
+                                        JoinProjSource::Left(i) => tuple.push(left_row[i].clone()),
+                                        JoinProjSource::Right(j) => tuple.push(right_row[j].clone()),
+                                    }
+                                }
+                                result_tuples.push(tuple);
+                            }
+                        }
+
+                        if !matched && join_type == JoinType::LeftOuter {
+                            if filter
+                                .as_ref()
+                                .is_none_or(|f| f.evaluate(left_row, &null_right))
+                            {
+                                let mut tuple = Vec::with_capacity(projection.len());
+                                for item in &projection {
+                                    match item.source {
+                                        JoinProjSource::Left(i) => tuple.push(left_row[i].clone()),
+                                        JoinProjSource::Right(_) => tuple.push(Value::Null),
+                                    }
+                                }
+                                result_tuples.push(tuple);
+                            }
+                        }
+                    }
+                } else if !eq_pairs.is_empty() {
+                    let mut multi_hash: std::collections::HashMap<Vec<Value>, Vec<usize>> =
+                        std::collections::HashMap::with_capacity(right_rows.len());
+
                     for (ri, rrow) in right_rows.iter().enumerate() {
                         let key: Vec<Value> = eq_pairs.iter().map(|&(_, r)| rrow[r].clone()).collect();
-                        if key.iter().any(|v| matches!(v, Value::Null)) {
-                            continue;
+                        if !key.iter().any(|v| matches!(v, Value::Null)) {
+                            multi_hash.entry(key).or_default().push(ri);
                         }
-                        hash_index.entry(key).or_default().push(ri);
                     }
-                }
-                for left_row in &left_rows {
-                    let mut matched = false;
-                    let cands: &[usize] = if use_hash {
-                        let key: Vec<Value> = eq_pairs.iter().map(|&(l, _)| left_row[l].clone()).collect();
-                        if key.iter().any(|v| matches!(v, Value::Null)) {
-                            no_match.as_slice()
+
+                    for left_row in &left_rows {
+                        let mut matched = false;
+                        let has_null = eq_pairs.iter().any(|&(l, _)| matches!(&left_row[l], Value::Null));
+                        let cands: &[usize] = if has_null {
+                            &no_match
                         } else {
-                            hash_index
-                                .get(&key)
-                                .map(|v| v.as_slice())
-                                .unwrap_or(no_match.as_slice())
-                        }
-                    } else {
-                        all_idx.as_slice()
-                    };
-                    for &ri in cands {
-                        let right_row = &right_rows[ri];
-                        let mut conds_met = true;
-                        for &(l_idx, r_idx, op) in &join_conditions {
-                            if !op.evaluate(&left_row[l_idx], &right_row[r_idx]) {
-                                conds_met = false;
-                                break;
-                            }
-                        }
-                        if conds_met
-                            && filter
-                                .as_ref()
-                                .is_none_or(|f| f.evaluate(left_row, right_row))
-                        {
-                            matched = true;
-                            let mut tuple = Vec::with_capacity(projection.len());
-                            for item in &projection {
-                                match item.source {
-                                    JoinProjSource::Left(i) => tuple.push(left_row[i].clone()),
-                                    JoinProjSource::Right(j) => tuple.push(right_row[j].clone()),
+                            let key: Vec<Value> = eq_pairs.iter().map(|&(l, _)| left_row[l].clone()).collect();
+                            multi_hash.get(&key).map(|v| v.as_slice()).unwrap_or(&no_match)
+                        };
+
+                        for &ri in cands {
+                            let right_row = &right_rows[ri];
+                            let mut conds_met = true;
+                            for &(l_idx, r_idx, op) in &non_eq_conditions {
+                                if !op.evaluate(&left_row[l_idx], &right_row[r_idx]) {
+                                    conds_met = false;
+                                    break;
                                 }
                             }
-                            result_tuples.push(tuple);
+                            if conds_met
+                                && filter
+                                    .as_ref()
+                                    .is_none_or(|f| f.evaluate(left_row, right_row))
+                            {
+                                matched = true;
+                                let mut tuple = Vec::with_capacity(projection.len());
+                                for item in &projection {
+                                    match item.source {
+                                        JoinProjSource::Left(i) => tuple.push(left_row[i].clone()),
+                                        JoinProjSource::Right(j) => tuple.push(right_row[j].clone()),
+                                    }
+                                }
+                                result_tuples.push(tuple);
+                            }
+                        }
+
+                        if !matched && join_type == JoinType::LeftOuter {
+                            if filter
+                                .as_ref()
+                                .is_none_or(|f| f.evaluate(left_row, &null_right))
+                            {
+                                let mut tuple = Vec::with_capacity(projection.len());
+                                for item in &projection {
+                                    match item.source {
+                                        JoinProjSource::Left(i) => tuple.push(left_row[i].clone()),
+                                        JoinProjSource::Right(_) => tuple.push(Value::Null),
+                                    }
+                                }
+                                result_tuples.push(tuple);
+                            }
                         }
                     }
-                    if !matched && join_type == JoinType::LeftOuter {
-                        let null_right: Vec<Value> = vec![Value::Null; right_schema.columns.len()];
-                        if filter
-                            .as_ref()
-                            .is_none_or(|f| f.evaluate(left_row, &null_right))
-                        {
-                            let mut tuple = Vec::with_capacity(projection.len());
-                            for item in &projection {
-                                match item.source {
-                                    JoinProjSource::Left(i) => tuple.push(left_row[i].clone()),
-                                    JoinProjSource::Right(_) => tuple.push(Value::Null),
+                } else {
+                    for left_row in &left_rows {
+                        let mut matched = false;
+                        for &ri in &all_idx {
+                            let right_row = &right_rows[ri];
+                            let mut conds_met = true;
+                            for &(l_idx, r_idx, op) in &join_conditions {
+                                if !op.evaluate(&left_row[l_idx], &right_row[r_idx]) {
+                                    conds_met = false;
+                                    break;
                                 }
                             }
-                            result_tuples.push(tuple);
+                            if conds_met
+                                && filter
+                                    .as_ref()
+                                    .is_none_or(|f| f.evaluate(left_row, right_row))
+                            {
+                                matched = true;
+                                let mut tuple = Vec::with_capacity(projection.len());
+                                for item in &projection {
+                                    match item.source {
+                                        JoinProjSource::Left(i) => tuple.push(left_row[i].clone()),
+                                        JoinProjSource::Right(j) => tuple.push(right_row[j].clone()),
+                                    }
+                                }
+                                result_tuples.push(tuple);
+                            }
+                        }
+
+                        if !matched && join_type == JoinType::LeftOuter {
+                            if filter
+                                .as_ref()
+                                .is_none_or(|f| f.evaluate(left_row, &null_right))
+                            {
+                                let mut tuple = Vec::with_capacity(projection.len());
+                                for item in &projection {
+                                    match item.source {
+                                        JoinProjSource::Left(i) => tuple.push(left_row[i].clone()),
+                                        JoinProjSource::Right(_) => tuple.push(Value::Null),
+                                    }
+                                }
+                                result_tuples.push(tuple);
+                            }
                         }
                     }
                 }
