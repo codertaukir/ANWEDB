@@ -2399,14 +2399,23 @@ impl Executor {
                 if !ranges.iter().all(is_point) {
                     // Range predicate (`g > 5`, `g >= 0`, ...): collect PKs from the index first
                     // (no table reads). Too many PKs means the full scan is cheaper: fall back.
-                    const RANGE_DML_PK_CAP: usize = 4096;
+                    // Tuning: threshold for secondary range scan vs full table scan.
+                    // If candidate entries exceed cap, break early before expensive
+                    // deserialization to prevent waste on wide range predicates.
+                    const RANGE_DML_PK_CAP: usize = 1024;
                     let mut seen_pks = HashSet::new();
                     let mut pks: Vec<Vec<u8>> = Vec::new();
+                    let mut raw_scanned = 0usize;
                     let mut over_cap = false;
                     'collect: for r in &ranges {
                         for (idx_key, encoded) in txn_mgr.range_scan(txn_id, &idx_tree, r)? {
                             if idx_key.first() == Some(&OVERFLOW_KEY_TAG) {
                                 continue;
+                            }
+                            raw_scanned += 1;
+                            if raw_scanned > RANGE_DML_PK_CAP {
+                                over_cap = true;
+                                break 'collect;
                             }
                             let ids = Self::idx_decode_entry(
                                 txn_mgr, txn_id, &idx_tree, &idx_key, &encoded, None,
