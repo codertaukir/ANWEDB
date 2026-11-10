@@ -1971,11 +1971,10 @@ impl BPlusTree {
         {
             let cur_page = self.bpm.fetch_page(page_id)?;
             let old_payload = cur_page.data[PAGE_HEADER_SIZE..PAGE_SIZE].to_vec();
-            self.bpm.unpin_page(page_id, false)?;
 
             let mut empty_payload = vec![0u8; PAGE_SIZE - PAGE_HEADER_SIZE];
             empty_payload[0] = NODE_KIND_FREE;
-            let lsn = wal.append_record(LogRecord::new_update(
+            let append_res = wal.append_record(LogRecord::new_update(
                 0,
                 txn_id,
                 *prev_lsn,
@@ -1983,8 +1982,20 @@ impl BPlusTree {
                 PAGE_HEADER_SIZE as u16,
                 empty_payload.clone(),
                 old_payload,
-            ))?;
-            *prev_lsn = lsn;
+            ));
+
+            let lsn = match append_res {
+                Ok(l) => {
+                    *prev_lsn = l;
+                    l
+                }
+                Err(e) => {
+                    let _ = self.bpm.unpin_page(page_id, false);
+                    return Err(e);
+                }
+            };
+
+            self.bpm.unpin_page(page_id, false)?;
 
             self.bpm.update_page_data(page_id, |page| {
                 page.set_page_type(PAGE_TYPE_RAW);
