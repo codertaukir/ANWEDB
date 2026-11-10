@@ -72,7 +72,7 @@ Status tracker. `[x]` = done and measured/tested, `[ ]` = pending.
 
 ## P2 & Housekeeping
 - [ ] `define_table` builder mein type change ka opt-in variant add karna.
-- [ ] `free_pages_batch` crash-injection test: blank pages write ke baad freelist persist se pehle crash scenario.
+- [x] `free_pages_batch` crash-injection test (dedb3e2): blank pages write ke baad stale/missing freelist crash scenario par disk rebuild recovery verified; page leaks eliminated aur allocator reuse validated.
 - [ ] Workspace `cargo fmt` clean run (isolated commit).
 - [ ] CI badge aur repository branding update (ANWEDB -> MITRDB).
 - [ ] Documentation: Rust API docs, SQL REPL guide, backup/restore CLI tooling, enhanced error context.
