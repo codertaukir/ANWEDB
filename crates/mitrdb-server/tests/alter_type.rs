@@ -67,10 +67,10 @@ fn change_type_casts_rows_atomically_and_persists() {
         assert!(s.execute_sql("ALTER TABLE t ALTER COLUMN nope TYPE int").is_err());
         assert!(s.execute_sql("ALTER TABLE t ALTER COLUMN c TYPE float").is_err());
 
-        // refusals: PK, indexed column, unsupported cast
+        // refusals: PK, unsupported cast (indexed column rebuilds automatically)
         assert!(s.execute_sql("ALTER TABLE t ALTER COLUMN id TYPE text").is_err());
         s.execute_sql("CREATE UNIQUE INDEX t_c_uq ON t (c)").unwrap();
-        assert!(s.execute_sql("ALTER TABLE t ALTER COLUMN c TYPE text").is_err());
+        s.execute_sql("ALTER TABLE t ALTER COLUMN c TYPE text").unwrap();
         s.execute_sql("CREATE TABLE u (id int primary key, f bool)").unwrap();
         s.execute_sql("INSERT INTO u VALUES (1, true)").unwrap();
         assert!(s.execute_sql("ALTER TABLE u ALTER COLUMN f TYPE text").is_err());

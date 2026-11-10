@@ -1045,16 +1045,7 @@ impl Catalog {
                 "Cannot change type of primary key column".to_string(),
             ));
         }
-        if state
-            .indexes
-            .values()
-            .any(|i| i.table_id == table_id && i.column_name.eq_ignore_ascii_case(col_name))
-        {
-            return Err(Error::TransactionError(format!(
-                "Column '{}' has an index; DROP INDEX first",
-                col_name
-            )));
-        }
+        // Indexes on col_name are dropped and rebuilt across type swap in executor
         if schema.columns[src_pos].data_type == new_type {
             return Ok(None);
         }

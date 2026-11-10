@@ -1153,8 +1153,80 @@ impl Executor {
                 })();
                 let _ = txn_mgr.abort(vtid);
                 verify?;
+                let affected_indexes: Vec<(String, bool)> = catalog
+                    .get_table_indexes(schema.table_id)
+                    .into_iter()
+                    .filter(|idx| idx.column_name.eq_ignore_ascii_case(&column_name))
+                    .map(|idx| (idx.name, idx.unique))
+                    .collect();
+
+                for (idx_name, _) in &affected_indexes {
+                    let idx_tree = catalog.get_index_by_name(idx_name).and_then(|m| catalog.index_tree(m.index_id));
+                    catalog.drop_index(idx_name)?;
+                    if let Some(t) = idx_tree {
+                        txn_mgr.purge_trees_state(&[t])?;
+                    }
+                }
+
                 catalog.commit_type_swap(&table_name, &column_name, src_pos, shadow_pos)?;
                 catalog.sync_roots()?;
+
+                if !affected_indexes.is_empty() {
+                    let refreshed_schema = catalog.get_table_schema(&table_name)?.ok_or_else(|| {
+                        Error::TransactionError(format!("Table '{}' not found", table_name))
+                    })?;
+                    let target_col_pos = refreshed_schema
+                        .columns
+                        .iter()
+                        .position(|c| !c.is_dropped() && c.name.eq_ignore_ascii_case(&column_name))
+                        .ok_or_else(|| {
+                            Error::TransactionError(format!("Column '{}' not found after type swap", column_name))
+                        })?;
+                    let pk_idx = Self::primary_key_index(&refreshed_schema);
+                    let table_tree = catalog.table_tree(refreshed_schema.table_id).ok_or_else(|| {
+                        Error::TransactionError("Table storage tree missing".to_string())
+                    })?;
+
+                    for (idx_name, unique) in affected_indexes {
+                        let mut staged_entries = Vec::new();
+                        let mut key_map: std::collections::BTreeMap<Vec<u8>, Vec<Vec<u8>>> =
+                            std::collections::BTreeMap::new();
+
+                        for (_pk, row_bytes) in table_tree.range_scan(None, None)? {
+                            let tuple = Tuple::deserialize_for_table(&row_bytes, refreshed_schema.columns.len())?;
+                            let pk_bytes = tuple[pk_idx].to_key_bytes();
+                            let idx_key = tuple[target_col_pos].to_key_bytes();
+                            let pks = key_map.entry(idx_key).or_default();
+                            if unique
+                                && !matches!(tuple[target_col_pos], Value::Null)
+                                && pks.iter().any(|existing_pk| existing_pk != &pk_bytes)
+                            {
+                                return Err(Error::WriteConflict(format!(
+                                    "Duplicate key violates unique index '{}'",
+                                    idx_name
+                                )));
+                            }
+                            if !pks.contains(&pk_bytes) {
+                                pks.push(pk_bytes);
+                                pks.sort();
+                            }
+                        }
+
+                        for (k, pks) in key_map {
+                            staged_entries.extend(Self::idx_encode_entries(&k, &pks)?);
+                        }
+
+                        let index_id = catalog.create_index(&idx_name, &table_name, &column_name, unique)?;
+                        if !staged_entries.is_empty() {
+                            if let Err(e) = catalog.populate_index_entries(index_id, &staged_entries) {
+                                let _ = catalog.drop_index(&idx_name);
+                                return Err(e);
+                            }
+                        }
+                    }
+                    catalog.sync_roots()?;
+                }
+
                 Ok(ExecutionResult::Ok)
             }
             PhysicalPlan::Insert { schema, values } => {
