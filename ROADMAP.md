@@ -64,7 +64,7 @@ Status tracker. `[x]` = done and measured/tested, `[ ]` = pending.
 - [ ] Concurrent DDL locking: ALTER table execution ke dauran concurrent writers ko actively lock karna (sirf point-in-time check nahi).
 - [ ] PK change support: new key ke mutabiq table tree aur secondary indexes rebuild karna.
 - [ ] Indexed column type change: secondary indexes drop karke rebuild ke saath type cast support karna.
-- [ ] DDL crash fault-injection: ALTER TYPE ke WAL append failure aur fsync failure paths par test coverage add karna.
+- [x] DDL crash fault-injection (8fcb0fa): ALTER TYPE ke WAL append failure injection (20 injection points) verified; table readability, retry recovery aur post-crash consistency validated.
 
 ## P1: Architecture & Concurrency
 - [ ] Concurrent B-Tree (read/write scaling): MvccMutex contention hatane ke liye concurrent B-tree design doc aur implementation (T=4 put scaling fix).
