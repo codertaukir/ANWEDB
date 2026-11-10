@@ -62,7 +62,7 @@ Status tracker. `[x]` = done and measured/tested, `[ ]` = pending.
 ## Features & DDL
 - [ ] ALTER limitations address karna: column position order maintain karna aur `set_not_null(default)` ko atomic banana.
 - [ ] Concurrent DDL locking: ALTER table execution ke dauran concurrent writers ko actively lock karna (sirf point-in-time check nahi).
-- [ ] PK change support: new key ke mutabiq table tree aur secondary indexes rebuild karna.
+- [x] PK change support (93392ec): UPDATE execution mein two-phase key migration (old PK deletion + new PK insertion) aur secondary index pointer retargeting verified; self-update, conflict detection, aur rollback integrity validated.
 - [ ] Indexed column type change: secondary indexes drop karke rebuild ke saath type cast support karna.
 - [x] DDL crash fault-injection (8fcb0fa): ALTER TYPE ke WAL append failure injection (20 injection points) verified; table readability, retry recovery aur post-crash consistency validated.
 
