@@ -122,7 +122,9 @@ Status tracker. `[x]` = done and measured/tested, `[ ]` = pending.
 ## P1: Architecture & Concurrency
 - [ ] Concurrent B-Tree (read/write scaling): MvccMutex contention hatane ke liye concurrent B-tree design doc aur implementation (T=4 put scaling fix).
 
-- [ ] Query Planner: JOIN execution mein WHERE predicate pushdown support.
+- [x] Query Planner & Join Execution Optimization (5fa0485, cea2550):
+  - Planner predicate pushdown (`mitrdb-query`): WHERE clause ke single-table predicates ko scan nodes (`SeqScan` / `IndexScan`) ke `bound_filter` mein pushdown kiya; post-join filter overhead eliminate hua (`bound_join_filter: None`); outer-join semantics preserve kiye.
+  - Zero-allocation hash join probe (`mitrdb-exec`): Single-key equi-joins ke liye borrowed `&Value` fast-path add kiya, hot path par per-row `Vec<Value>` heap allocations aur deep clones hataye; hash match ke baad redundant equi-condition checks bypass kiye; unmatched left rows ke liye pre-allocated null vector buffer reuse kiya.
 
 
 ## P2 & Housekeeping
