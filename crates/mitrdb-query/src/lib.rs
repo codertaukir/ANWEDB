@@ -1505,11 +1505,41 @@ impl QueryEngine {
                         }
                     }
 
+                    let mut left_conjuncts = Vec::new();
+                    let mut right_conjuncts = Vec::new();
+                    let mut post_join_conjuncts = Vec::new();
+
+                    if let Some(f_expr) = filter {
+                        let mut all_conjuncts = Vec::new();
+                        Self::collect_conjuncts(f_expr, &mut all_conjuncts);
+                        for c in all_conjuncts {
+                            match Self::check_expr_side(&c, &left_schema, &right_schema)? {
+                                Some(true) => left_conjuncts.push(c),
+                                Some(false) if join_clause.join_type == JoinType::Inner => {
+                                    right_conjuncts.push(c);
+                                }
+                                _ => post_join_conjuncts.push(c),
+                            }
+                        }
+                    }
+
+                    let left_bound_filter = if let Some(expr) = Self::combine_conjuncts(left_conjuncts) {
+                        Self::bind_filter(&left_schema, Some(expr))?
+                    } else {
+                        None
+                    };
+
+                    let right_bound_filter = if let Some(expr) = Self::combine_conjuncts(right_conjuncts) {
+                        Self::bind_filter(&right_schema, Some(expr))?
+                    } else {
+                        None
+                    };
+
                     let all_left_cols = (0..left_schema.columns.len()).collect();
                     let left_plan = self.plan_select_scan(
                         left_schema.clone(),
                         all_left_cols,
-                        None,
+                        left_bound_filter,
                         Vec::new(),
                         None,
                         0,
@@ -1518,13 +1548,13 @@ impl QueryEngine {
                     let right_plan = self.plan_select_scan(
                         right_schema.clone(),
                         all_right_cols,
-                        None,
+                        right_bound_filter,
                         Vec::new(),
                         None,
                         0,
                     );
 
-                    let bound_join_filter = if let Some(f_expr) = filter {
+                    let bound_join_filter = if let Some(f_expr) = Self::combine_conjuncts(post_join_conjuncts) {
                         Some(Self::bind_join_filter(f_expr, &left_schema, &right_schema)?)
                     } else {
                         None
@@ -2189,6 +2219,88 @@ impl QueryEngine {
                 "Column '{}' not found in table '{}' or '{}'",
                 trimmed, left_schema.name, right_schema.name
             ))),
+        }
+    }
+
+    fn collect_conjuncts(expr: Expr, out: &mut Vec<Expr>) {
+        match expr {
+            Expr::And(left, right) => {
+                Self::collect_conjuncts(*left, out);
+                Self::collect_conjuncts(*right, out);
+            }
+            other => out.push(other),
+        }
+    }
+
+    fn combine_conjuncts(exprs: Vec<Expr>) -> Option<Expr> {
+        let mut it = exprs.into_iter();
+        let first = it.next()?;
+        Some(it.fold(first, |acc, e| Expr::And(Box::new(acc), Box::new(e))))
+    }
+
+    fn check_expr_side(
+        expr: &Expr,
+        left_schema: &TableSchema,
+        right_schema: &TableSchema,
+    ) -> Result<Option<bool>> {
+        let mut has_left = false;
+        let mut has_right = false;
+
+        fn inspect(
+            e: &Expr,
+            left_schema: &TableSchema,
+            right_schema: &TableSchema,
+            has_left: &mut bool,
+            has_right: &mut bool,
+        ) -> Result<()> {
+            match e {
+                Expr::Column(col) => {
+                    match QueryEngine::resolve_join_column(col, left_schema, right_schema)? {
+                        JoinProjSource::Left(_) => *has_left = true,
+                        JoinProjSource::Right(_) => *has_right = true,
+                    }
+                }
+                Expr::Eq(l, r) => {
+                    inspect(l, left_schema, right_schema, has_left, has_right)?;
+                    inspect(r, left_schema, right_schema, has_left, has_right)?;
+                }
+                Expr::Compare { left, right, .. } => {
+                    inspect(left, left_schema, right_schema, has_left, has_right)?;
+                    inspect(right, left_schema, right_schema, has_left, has_right)?;
+                }
+                Expr::And(l, r) => {
+                    inspect(l, left_schema, right_schema, has_left, has_right)?;
+                    inspect(r, left_schema, right_schema, has_left, has_right)?;
+                }
+                Expr::Or(l, r) => {
+                    let mut l_left = false;
+                    let mut l_right = false;
+                    let mut r_left = false;
+                    let mut r_right = false;
+                    inspect(l, left_schema, right_schema, &mut l_left, &mut l_right)?;
+                    inspect(r, left_schema, right_schema, &mut r_left, &mut r_right)?;
+                    if (l_left || r_left) && (l_right || r_right) {
+                        *has_left = true;
+                        *has_right = true;
+                    } else if l_left || r_left {
+                        *has_left = true;
+                    } else if l_right || r_right {
+                        *has_right = true;
+                    }
+                }
+                Expr::IsNull(inner) | Expr::IsNotNull(inner) => {
+                    inspect(inner, left_schema, right_schema, has_left, has_right)?;
+                }
+                Expr::Literal(_) => {}
+            }
+            Ok(())
+        }
+
+        inspect(expr, left_schema, right_schema, &mut has_left, &mut has_right)?;
+        match (has_left, has_right) {
+            (true, false) => Ok(Some(true)),
+            (false, true) => Ok(Some(false)),
+            _ => Ok(None),
         }
     }
 

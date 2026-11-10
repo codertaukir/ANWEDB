@@ -336,3 +336,70 @@ fn m2_5_planner_aggregates_and_invalid_sql_rejection() {
         );
     }
 }
+
+#[test]
+fn test_predicate_pushdown_in_join_planner() {
+    let catalog = Arc::new(Catalog::new());
+    catalog
+        .create_table(
+            "t1",
+            vec![
+                ColumnDef {
+                    name: "id".to_string(),
+                    data_type: DataType::Int64,
+                    nullable: false,
+                    is_primary_key: true,
+                },
+                ColumnDef {
+                    name: "v1".to_string(),
+                    data_type: DataType::Int64,
+                    nullable: false,
+                    is_primary_key: false,
+                },
+            ],
+        )
+        .unwrap();
+
+    catalog
+        .create_table(
+            "t2",
+            vec![
+                ColumnDef {
+                    name: "id".to_string(),
+                    data_type: DataType::Int64,
+                    nullable: false,
+                    is_primary_key: true,
+                },
+                ColumnDef {
+                    name: "v2".to_string(),
+                    data_type: DataType::Int64,
+                    nullable: false,
+                    is_primary_key: false,
+                },
+            ],
+        )
+        .unwrap();
+
+    let engine = QueryEngine::new(catalog);
+    let plan = engine
+        .parse_and_plan("SELECT t1.id, t2.id FROM t1 INNER JOIN t2 ON t1.id = t2.id WHERE t1.v1 > 100 AND t2.v2 = 50")
+        .expect("plan should succeed");
+
+    match plan {
+        PhysicalPlan::NestedLoopJoin { left, right, filter, .. } => {
+            // Verify left scan received the pushed-down filter
+            match *left {
+                PhysicalPlan::SeqScan { filter: Some(_), .. } | PhysicalPlan::IndexScan { .. } => {}
+                other => panic!("Expected pushed-down filter in left scan, got: {:?}", other),
+            }
+            // Verify right scan received the pushed-down filter
+            match *right {
+                PhysicalPlan::SeqScan { filter: Some(_), .. } | PhysicalPlan::IndexScan { .. } => {}
+                other => panic!("Expected pushed-down filter in right scan, got: {:?}", other),
+            }
+            // Post-join filter should be None because both conjuncts pushed down cleanly
+            assert!(filter.is_none(), "Expected post-join filter to be None, got: {:?}", filter);
+        }
+        other => panic!("Expected NestedLoopJoin physical plan, got: {:?}", other),
+    }
+}
