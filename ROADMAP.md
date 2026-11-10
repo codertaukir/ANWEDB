@@ -100,7 +100,7 @@ Status tracker. `[x]` = done and measured/tested, `[ ]` = pending.
 ## Performance
 - [x] Batch delete per leaf (4042419, fdc2679): `delete_batch_logged` (btree.rs) + `rebalance_leaf` isolation, `delete_batch` (mitrdb-txn), aur `exec_delete` wiring. N=5000 delete_probe: 257us/row, 81 page writes; delete_autocommit_probe: N=2000 avg=741us, p50=718us, 0 evictions (write amplification aur root traversal overhead eliminated).
 
-- [ ] Index write amplification (wide ranges): `u >= 0` par `ta_i` ka +20% slowdown measure karna aur DELETE lock loop verify karna (`index_write_amp_probe`).
+- [x] Index write amplification (wide ranges, index_write_amp_probe): release mode measured N=16000 ta_i vs ta_u ~54-56us/row, reads/writes=0.000, wal_appends/row=1.000, wal_flushes=2. No IO leak; overhead purely memory lock/tombstone traversal.
 
 - [ ] btrfs autocommit fsync floor: ~13ms fdatasync floor ko concurrent group commit aggregation se mitigate karna.
 
