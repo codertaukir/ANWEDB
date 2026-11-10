@@ -110,3 +110,45 @@ fn update_sees_own_uncommitted_row_in_explicit_txn() {
     assert_eq!(int(&srv, "SELECT g FROM t WHERE id = 5000"), 2);
     done(dir, srv);
 }
+
+#[test]
+fn update_pk_self_assignment() {
+    let (dir, srv) = open("self_assign");
+    assert_eq!(affected(&srv, "UPDATE t SET id = 7 WHERE id = 7"), 1);
+    assert_eq!(cnt(&srv, "id = 7"), 1);
+    assert_eq!(int(&srv, "SELECT COUNT(*) FROM t"), 200);
+    done(dir, srv);
+}
+
+#[test]
+fn update_pk_with_secondary_index_and_scan() {
+    let (dir, srv) = open("sec_idx");
+    srv.execute_sql("CREATE INDEX idx_g ON t (g)").unwrap();
+    // g is 7 % 10 = 7 for id=7. Changing PK from 7 to 9007:
+    assert_eq!(affected(&srv, "UPDATE t SET id = 9007 WHERE id = 7"), 1);
+    assert_eq!(cnt(&srv, "id = 7"), 0);
+    assert_eq!(cnt(&srv, "id = 9007"), 1);
+    // Index scan on g = 7 must return exactly 20 rows, and id 9007 must be reachable via index
+    assert_eq!(cnt(&srv, "g = 7"), 20);
+    assert_eq!(cnt(&srv, "g = 7 AND id = 9007"), 1);
+    assert_eq!(cnt(&srv, "g = 7 AND id = 7"), 0);
+    done(dir, srv);
+}
+
+#[test]
+fn update_pk_rollback_preserves_original_state() {
+    let (dir, srv) = open("pk_rollback");
+    srv.execute_sql("CREATE INDEX idx_g ON t (g)").unwrap();
+    srv.execute_sql("BEGIN").unwrap();
+    assert_eq!(affected(&srv, "UPDATE t SET id = 9999 WHERE id = 15"), 1);
+    assert_eq!(cnt(&srv, "id = 9999"), 1);
+    assert_eq!(cnt(&srv, "id = 15"), 0);
+    srv.execute_sql("ROLLBACK").unwrap();
+
+    // After rollback, 15 must be restored, 9999 must not exist
+    assert_eq!(cnt(&srv, "id = 15"), 1);
+    assert_eq!(cnt(&srv, "id = 9999"), 0);
+    assert_eq!(cnt(&srv, "g = 5 AND id = 15"), 1);
+    assert_eq!(int(&srv, "SELECT COUNT(*) FROM t"), 200);
+    done(dir, srv);
+}
