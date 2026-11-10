@@ -68,3 +68,41 @@ fn page_op_failure_anywhere_in_alter_type_is_recoverable() {
     eprintln!("INJECT points_run={ran} fired={fired}");
     assert!(fired > 0, "injection never fired: test proves nothing");
 }
+
+#[test]
+fn wal_append_failure_in_alter_type_is_recoverable() {
+    let points: Vec<i64> = (0..20).collect();
+    let (mut fired, mut ran) = (0usize, 0usize);
+    for &n in &points {
+        let d = fresh(&format!("atwal_{n}"));
+        {
+            let s = open(&d);
+            s.execute_sql("CREATE TABLE t (id int primary key, a text, c text)").unwrap();
+            s.execute_sql("BEGIN").unwrap();
+            for i in 0..N {
+                s.execute_sql(&format!("INSERT INTO t VALUES ({i}, 'a{i}', '{i}')")).unwrap();
+            }
+            s.execute_sql("COMMIT").unwrap();
+
+            s.set_fail_wal_append_after(n);
+            let r = s.execute_sql("ALTER TABLE t ALTER COLUMN c TYPE int");
+            s.set_fail_wal_append_after(-1);
+            ran += 1;
+            if r.is_err() {
+                fired += 1;
+                assert_eq!(shape(&s, "SELECT * FROM t"), (3, N as usize), "n={n}: shape after wal failure");
+                assert!(dump(&s, "SELECT c FROM t WHERE id = 7").contains('7'), "n={n}: value lost");
+                s.execute_sql("ALTER TABLE t ALTER COLUMN c TYPE int")
+                    .unwrap_or_else(|e| panic!("n={n}: retry failed after wal error: {e:?}"));
+            }
+            assert!(dump(&s, "SELECT c FROM t WHERE id = 7").contains("Int64(7)"), "n={n}: not int after change");
+            assert_eq!(shape(&s, "SELECT * FROM t"), (3, N as usize), "n={n}: final shape");
+        } // crash/reopen
+        let s = open(&d);
+        assert_eq!(shape(&s, "SELECT * FROM t"), (3, N as usize), "n={n}: shape after reopen");
+        assert!(dump(&s, "SELECT c FROM t WHERE id = 7").contains("Int64(7)"), "n={n}: type lost after reopen");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+    eprintln!("WAL INJECT points_run={ran} fired={fired}");
+    assert!(fired > 0, "wal injection never fired");
+}

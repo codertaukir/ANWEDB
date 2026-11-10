@@ -161,6 +161,13 @@ impl Server {
         }
     }
 
+    #[cfg(feature = "fault-injection")]
+    pub fn set_fail_wal_append_after(&self, n: i64) {
+        if let Some(ref wal) = self.wal_mgr {
+            wal.set_fail_append_after(n);
+        }
+    }
+
     pub fn start(&self) -> Result<()> {
         Ok(())
     }
