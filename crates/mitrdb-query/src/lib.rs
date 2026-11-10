@@ -520,6 +520,7 @@ pub enum Statement {
     AlterTableSetNotNull {
         table_name: String,
         column_name: String,
+        default_value: Option<Value>,
     },
     AlterTableChangeType {
         table_name: String,
@@ -723,6 +724,7 @@ pub enum PhysicalPlan {
     AlterTableSetNotNull {
         table_name: String,
         column_name: String,
+        default_value: Option<Value>,
     },
     AlterTableChangeType {
         table_name: String,
@@ -1284,6 +1286,7 @@ impl QueryEngine {
             Statement::AlterTableSetNotNull {
                 table_name,
                 column_name,
+                default_value,
             } => {
                 let _ = self.catalog.get_table_schema(&table_name)?.ok_or_else(|| {
                     Error::TransactionError(format!("Table '{}' not found", table_name))
@@ -1291,6 +1294,7 @@ impl QueryEngine {
                 Ok(PhysicalPlan::AlterTableSetNotNull {
                     table_name,
                     column_name,
+                    default_value,
                 })
             }
             Statement::AlterTableChangeType {
@@ -1447,19 +1451,15 @@ impl QueryEngine {
 
                     let mut proj_items = Vec::new();
                     if projection.len() == 1 && projection[0] == "*" {
-                        for (i, c) in left_schema.columns.iter().enumerate() {
-                            if c.is_dropped() {
-                                continue;
-                            }
+                        for i in Self::logical_projection_indices(&left_schema) {
+                            let c = &left_schema.columns[i];
                             proj_items.push(JoinProjectionItem {
                                 source: JoinProjSource::Left(i),
                                 output_name: format!("{}.{}", left_schema.name, c.name),
                             });
                         }
-                        for (j, c) in right_schema.columns.iter().enumerate() {
-                            if c.is_dropped() {
-                                continue;
-                            }
+                        for j in Self::logical_projection_indices(&right_schema) {
+                            let c = &right_schema.columns[j];
                             proj_items.push(JoinProjectionItem {
                                 source: JoinProjSource::Right(j),
                                 output_name: format!("{}.{}", right_schema.name, c.name),
@@ -2316,19 +2316,32 @@ impl QueryEngine {
                     ));
                 }
                 let column_name = tokens[0].to_string();
-                let action = tokens[1..].join(" ").to_uppercase();
-                if action == "DROP NOT NULL" {
+                let raw_action = after[7..].trim_start();
+                let raw_action = raw_action[column_name.len()..].trim();
+                let action_upper = raw_action.to_uppercase();
+                if action_upper == "DROP NOT NULL" {
                     return Ok(Statement::AlterTableSetNullable {
                         table_name,
                         column_name,
                     });
                 }
-                if action == "SET NOT NULL" {
+                if action_upper == "SET NOT NULL" {
                     return Ok(Statement::AlterTableSetNotNull {
                         table_name,
                         column_name,
+                        default_value: None,
                     });
                 }
+                if action_upper.starts_with("SET NOT NULL DEFAULT ") {
+                    let literal_part = &raw_action["SET NOT NULL DEFAULT ".len()..];
+                    let val = Self::parse_literal(literal_part.trim())?;
+                    return Ok(Statement::AlterTableSetNotNull {
+                        table_name,
+                        column_name,
+                        default_value: Some(val),
+                    });
+                }
+                let action = action_upper;
                 let words: Vec<&str> = action.split_whitespace().collect();
                 let ty_tok = match words.as_slice() {
                     ["TYPE", t] | ["SET", "DATA", "TYPE", t] => Some(*t),
@@ -2463,6 +2476,12 @@ impl QueryEngine {
             .collect()
     }
 
+    pub fn logical_projection_indices(schema: &TableSchema) -> Vec<usize> {
+        (0..schema.columns.len())
+            .filter(|&i| !schema.columns[i].is_dropped())
+            .collect()
+    }
+
     fn resolve_projection_or_aggregates(
         schema: &TableSchema,
         projection: &[String],
@@ -2474,9 +2493,7 @@ impl QueryEngine {
         }
         if projection.len() == 1 && projection[0] == "*" {
             return Ok(ResolvedProjection::Columns(
-                (0..schema.columns.len())
-                    .filter(|&i| !schema.columns[i].is_dropped())
-                    .collect(),
+                Self::logical_projection_indices(schema),
             ));
         }
 

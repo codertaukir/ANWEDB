@@ -340,24 +340,26 @@ impl Table<'_> {
         if !valid_ident(name) {
             return Err(bad("bad column name"));
         }
-        if let Some(d) = default {
-            let lit = match d {
-                Value::Int64(n) => n.to_string(),
-                Value::Text(t) => format!("'{}'", t.replace('\'', "''")),
-                Value::Bool(b) => String::from(if b { "TRUE" } else { "FALSE" }),
-                _ => return Err(bad("default must be an int, text or bool value")),
-            };
-            self.server.execute_sql(&format!(
-                "UPDATE {} SET {} = {} WHERE {} IS NULL",
-                self.name, name, lit, name
-            ))?;
-        }
-        self.server
-            .execute_sql(&format!(
+        let sql = match default {
+            Some(Value::Int64(n)) => format!(
+                "ALTER TABLE {} ALTER COLUMN {} SET NOT NULL DEFAULT {}",
+                self.name, name, n
+            ),
+            Some(Value::Text(t)) => format!(
+                "ALTER TABLE {} ALTER COLUMN {} SET NOT NULL DEFAULT '{}'",
+                self.name, name, t.replace('\'', "''")
+            ),
+            Some(Value::Bool(b)) => format!(
+                "ALTER TABLE {} ALTER COLUMN {} SET NOT NULL DEFAULT {}",
+                self.name, name, if b { "TRUE" } else { "FALSE" }
+            ),
+            Some(_) => return Err(bad("default must be an int, text or bool value")),
+            None => format!(
                 "ALTER TABLE {} ALTER COLUMN {} SET NOT NULL",
                 self.name, name
-            ))
-            .map(|_| ())
+            ),
+        };
+        self.server.execute_sql(&sql).map(|_| ())
     }
 
     /// Change a column's type (`ty`: "int", "text", "bool", "bytes"), rewriting rows through a

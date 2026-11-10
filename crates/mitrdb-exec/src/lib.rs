@@ -1008,6 +1008,7 @@ impl Executor {
             PhysicalPlan::AlterTableSetNotNull {
                 table_name,
                 column_name,
+                default_value,
             } => {
                 let schema = catalog.get_table_schema(&table_name)?.ok_or_else(|| {
                     Error::TransactionError(format!("Table '{}' not found", table_name))
@@ -1040,26 +1041,56 @@ impl Executor {
                         table_name
                     )));
                 }
-                // Validate: no row (incl. rows padded by ADD COLUMN) may hold NULL here.
+                // Validate default type compatibility if provided
+                if let Some(ref def_val) = default_value {
+                    let col_def = &schema.columns[col_pos];
+                    let type_matches = match (&col_def.data_type, def_val) {
+                        (DataType::Int64, Value::Int64(_)) => true,
+                        (DataType::Text, Value::Text(_)) => true,
+                        (DataType::Bool, Value::Bool(_)) => true,
+                        (DataType::Bytes, Value::Bytes(_)) => true,
+                        _ => false,
+                    };
+                    if !type_matches {
+                        return Err(Error::TransactionError(format!(
+                            "Default value type {:?} does not match column '{}' type {:?}",
+                            def_val, column_name, col_def.data_type
+                        )));
+                    }
+                }
+
+                // Atomic: backfill default value if provided, or validate no NULLs exist.
                 let pk_idx = Self::primary_key_index(&schema);
                 let tid = txn_mgr.begin_with_isolation(default_isolation)?;
-                let scan: Result<()> = (|| {
-                    for (_pk, row_bytes) in txn_mgr.scan_unlocked(tid, &tree)? {
-                        let tuple =
+                let res: Result<()> = (|| {
+                    let mut updates = Vec::new();
+                    for (pk, row_bytes) in txn_mgr.scan_unlocked(tid, &tree)? {
+                        let mut tuple =
                             Tuple::deserialize_for_table(&row_bytes, schema.columns.len())?;
                         if matches!(tuple.get(col_pos), Some(Value::Null)) {
-                            return Err(Error::TransactionError(format!(
-                                "Cannot set NOT NULL on '{}.{}': row with primary key {:?} has NULL",
-                                table_name,
-                                column_name,
-                                tuple.get(pk_idx)
-                            )));
+                            if let Some(ref def_val) = default_value {
+                                tuple[col_pos] = def_val.clone();
+                                updates.push((pk, Tuple::serialize(&tuple)));
+                            } else {
+                                return Err(Error::TransactionError(format!(
+                                    "Cannot set NOT NULL on '{}.{}': row with primary key {:?} has NULL",
+                                    table_name,
+                                    column_name,
+                                    tuple.get(pk_idx)
+                                )));
+                            }
                         }
+                    }
+                    for (pk, new_bytes) in updates {
+                        txn_mgr.put(tid, &tree, &pk, &new_bytes)?;
                     }
                     Ok(())
                 })();
-                let _ = txn_mgr.abort(tid);
-                scan?;
+                if let Err(e) = res {
+                    let _ = txn_mgr.abort(tid);
+                    return Err(e);
+                }
+                Self::commit_or_abort(txn_mgr, tid)?;
                 catalog.set_not_null(&table_name, &column_name)?;
                 catalog.sync_roots()?;
                 Ok(ExecutionResult::Ok)
