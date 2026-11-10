@@ -8,7 +8,7 @@ use mitrdb_query::{
     BoundPredicate, BoundSelectItem, Catalog, ColumnDef, CompareOp, DataType, JoinProjSource,
     JoinType, PhysicalPlan, QueryEngine, TableSchema, Value,
 };
-use mitrdb_txn::{IsolationLevel, KeyBound, KeyRange, TxnManager};
+use mitrdb_txn::{IsolationLevel, KeyBound, KeyRange, LockKey, LockMode, TxnManager};
 
 const MULTI_PK_TAG: u8 = 0xFF;
 /// Index head value whose PK list continues in overflow keys: [tag][n_overflow u16 LE][first chunk].
@@ -28,6 +28,67 @@ pub enum ExecutionResult {
         columns: Vec<String>,
         rows: Vec<Vec<Value>>,
     },
+}
+
+struct DdlTableLockGuard<'a> {
+    txn_mgr: &'a TxnManager,
+    tid: TxnId,
+    active: bool,
+}
+
+#[allow(dead_code)]
+impl<'a> DdlTableLockGuard<'a> {
+    fn acquire(txn_mgr: &'a TxnManager, table_id: u32) -> Result<Self> {
+        let tid = txn_mgr.begin_with_isolation(IsolationLevel::Serializable)?;
+        match txn_mgr
+            .lock_manager()
+            .acquire(tid, LockKey::Table(table_id), LockMode::Exclusive)
+        {
+            Ok(_) => Ok(Self {
+                txn_mgr,
+                tid,
+                active: true,
+            }),
+            Err(e) => {
+                let _ = txn_mgr.abort(tid);
+                match e {
+                    Error::LockTimeout => {
+                        Err(Error::WriteConflict("Table lock timeout: referenced by active transaction".to_string()))
+                    }
+                    Error::Deadlock => {
+                        Err(Error::WriteConflict("Table lock deadlock detected".to_string()))
+                    }
+                    Error::WriteConflict(msg) => {
+                        Err(Error::WriteConflict(msg))
+                    }
+                    other => Err(other),
+                }
+            }
+        }
+    }
+
+    fn commit(mut self) -> Result<u64> {
+        self.active = false;
+        Self::commit_or_abort(self.txn_mgr, self.tid)
+    }
+
+    fn commit_or_abort(txn_mgr: &TxnManager, tid: TxnId) -> Result<u64> {
+        match txn_mgr.commit(tid) {
+            Ok(ts) => Ok(ts),
+            Err(e) => {
+                let _ = txn_mgr.abort(tid);
+                Err(e)
+            }
+        }
+    }
+}
+
+impl<'a> Drop for DdlTableLockGuard<'a> {
+    fn drop(&mut self) {
+        if self.active {
+            let _ = self.txn_mgr.abort(self.tid);
+        }
+    }
 }
 
 struct TopNCandidate<'a> {
@@ -381,7 +442,7 @@ impl Executor {
                 top_n,
                 ..
             } => {
-                if *top_n {
+                                if *top_n {
                     format!(
                         "IndexRangeScan(table={}, index={}, column={}, ranges={}, top_n=true)",
                         schema.name,
@@ -785,6 +846,11 @@ impl Executor {
             }
             PhysicalPlan::DropTable { name } => {
                 let mut dropped_trees = Vec::new();
+                let _guard = if let Some(schema) = catalog.get_table_schema(&name)? {
+                    Some(DdlTableLockGuard::acquire(txn_mgr, schema.table_id)?)
+                } else {
+                    None
+                };
                 if let Some(schema) = catalog.get_table_schema(&name)? {
                     if let Some(t) = catalog.table_tree(schema.table_id) {
                         dropped_trees.push(t);
@@ -816,7 +882,13 @@ impl Executor {
                     return Ok(ExecutionResult::Affected(0));
                 }
                 let mut staged_entries: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
-                if let Some(schema) = catalog.get_table_schema(&table_name)? {
+                let schema_opt = catalog.get_table_schema(&table_name)?;
+                let _guard = if let Some(ref schema) = schema_opt {
+                    Some(DdlTableLockGuard::acquire(txn_mgr, schema.table_id)?)
+                } else {
+                    None
+                };
+                if let Some(schema) = schema_opt {
                     let mut table_trees = Vec::new();
                     if let Some(table_tree) = catalog.table_tree(schema.table_id) {
                         table_trees.push(table_tree);
@@ -880,6 +952,7 @@ impl Executor {
                 let meta = catalog.get_index_by_name(&index_name).ok_or_else(|| {
                     Error::TransactionError(format!("Index '{}' does not exist", index_name))
                 })?;
+                let _guard = DdlTableLockGuard::acquire(txn_mgr, meta.table_id)?;
                 let idx_tree = catalog.index_tree(meta.index_id);
                 if let Some(ref t) = idx_tree
                     && txn_mgr.has_active_tree_references(t)
@@ -896,6 +969,11 @@ impl Executor {
                 Ok(ExecutionResult::Ok)
             }
             PhysicalPlan::AlterTableAddColumn { table_name, column } => {
+                let _guard = if let Some(schema) = catalog.get_table_schema(&table_name)? {
+                    Some(DdlTableLockGuard::acquire(txn_mgr, schema.table_id)?)
+                } else {
+                    None
+                };
                 if let Some(schema) = catalog.get_table_schema(&table_name)? {
                     let mut table_trees = Vec::new();
                     if let Some(table_tree) = catalog.table_tree(schema.table_id) {
@@ -925,6 +1003,11 @@ impl Executor {
                 old_name,
                 new_name,
             } => {
+                let _guard = if let Some(schema) = catalog.get_table_schema(&table_name)? {
+                    Some(DdlTableLockGuard::acquire(txn_mgr, schema.table_id)?)
+                } else {
+                    None
+                };
                 if let Some(schema) = catalog.get_table_schema(&table_name)? {
                     let mut table_trees = Vec::new();
                     if let Some(table_tree) = catalog.table_tree(schema.table_id) {
@@ -953,6 +1036,11 @@ impl Executor {
                 table_name,
                 column_name,
             } => {
+                let _guard = if let Some(schema) = catalog.get_table_schema(&table_name)? {
+                    Some(DdlTableLockGuard::acquire(txn_mgr, schema.table_id)?)
+                } else {
+                    None
+                };
                 if let Some(schema) = catalog.get_table_schema(&table_name)? {
                     let mut table_trees = Vec::new();
                     if let Some(table_tree) = catalog.table_tree(schema.table_id) {
@@ -981,6 +1069,11 @@ impl Executor {
                 table_name,
                 column_name,
             } => {
+                let _guard = if let Some(schema) = catalog.get_table_schema(&table_name)? {
+                    Some(DdlTableLockGuard::acquire(txn_mgr, schema.table_id)?)
+                } else {
+                    None
+                };
                 if let Some(schema) = catalog.get_table_schema(&table_name)? {
                     let mut table_trees = Vec::new();
                     if let Some(table_tree) = catalog.table_tree(schema.table_id) {
@@ -1013,6 +1106,7 @@ impl Executor {
                 let schema = catalog.get_table_schema(&table_name)?.ok_or_else(|| {
                     Error::TransactionError(format!("Table '{}' not found", table_name))
                 })?;
+                let _guard = DdlTableLockGuard::acquire(txn_mgr, schema.table_id)?;
                 let col_pos = schema
                     .columns
                     .iter()
@@ -1103,6 +1197,7 @@ impl Executor {
                 let schema = catalog.get_table_schema(&table_name)?.ok_or_else(|| {
                     Error::TransactionError(format!("Table '{}' not found", table_name))
                 })?;
+                let _guard = DdlTableLockGuard::acquire(txn_mgr, schema.table_id)?;
                 let tree = catalog.table_tree(schema.table_id).ok_or_else(|| {
                     Error::TransactionError("Table storage B+Tree not initialized".to_string())
                 })?;
@@ -1410,6 +1505,7 @@ impl Executor {
                 offset,
                 top_n,
             } => {
+                Self::acquire_table_shared(txn_mgr, tid, schema.table_id)?;
                 let effective_sort = if !sort_keys.is_empty() {
                     sort_keys
                 } else {
@@ -1439,6 +1535,7 @@ impl Executor {
                 offset,
                 top_n,
             } => {
+                Self::acquire_table_shared(txn_mgr, tid, schema.table_id)?;
                 let effective_sort = if !sort_keys.is_empty() {
                     sort_keys
                 } else {
@@ -1470,6 +1567,7 @@ impl Executor {
                 offset,
                 top_n,
             } => {
+                Self::acquire_table_shared(txn_mgr, tid, schema.table_id)?;
                 let effective_sort = if !sort_keys.is_empty() {
                     sort_keys
                 } else {
@@ -2091,6 +2189,18 @@ impl Executor {
         res
     }
 
+    #[inline]
+    fn acquire_table_shared(txn_mgr: &TxnManager, tid: TxnId, table_id: u32) -> Result<()> {
+        txn_mgr
+            .lock_manager()
+            .acquire(tid, LockKey::Table(table_id), LockMode::Shared)
+    }
+
+    #[allow(dead_code)]
+    fn acquire_table_exclusive<'a>(txn_mgr: &'a TxnManager, table_id: u32) -> Result<DdlTableLockGuard<'a>> {
+        DdlTableLockGuard::acquire(txn_mgr, table_id)
+    }
+
     /// A failed commit must not leak the txn (and its locks): roll it back, keep the original error.
     /// abort() refuses non-Active txns (poisoned / already committed); that Err is ignored on purpose.
     fn commit_or_abort(txn_mgr: &TxnManager, tid: TxnId) -> Result<u64> {
@@ -2366,6 +2476,7 @@ impl Executor {
         schema: &TableSchema,
         values: &[Value],
     ) -> Result<ExecutionResult> {
+        Self::acquire_table_shared(txn_mgr, txn_id, schema.table_id)?;
         let profiling = mitrdb_observe::profiling_enabled();
         let insert_started = profiling.then(std::time::Instant::now);
         if values.len() != schema.columns.len() {
@@ -2584,6 +2695,7 @@ impl Executor {
         increments: &[(usize, i64)],
         filter: Option<&BoundFilter>,
     ) -> Result<ExecutionResult> {
+        Self::acquire_table_shared(txn_mgr, txn_id, schema.table_id)?;
         for (col_idx, new_val) in assignments {
             if *col_idx >= schema.columns.len() {
                 return Err(Error::TransactionError(format!(
@@ -3204,6 +3316,7 @@ impl Executor {
         schema: &TableSchema,
         filter: Option<&BoundFilter>,
     ) -> Result<ExecutionResult> {
+        Self::acquire_table_shared(txn_mgr, txn_id, schema.table_id)?;
         let tree = catalog.table_tree(schema.table_id).ok_or_else(|| {
             Error::TransactionError("Table storage B+Tree not initialized".to_string())
         })?;
