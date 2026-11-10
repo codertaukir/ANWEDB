@@ -60,7 +60,7 @@ Status tracker. `[x]` = done and measured/tested, `[ ]` = pending.
 - [ ] (parked) Freelist reuse save: 3-4% fsync reduction (low priority).
 
 ## Features & DDL
-- [ ] ALTER limitations address karna: column position order maintain karna aur `set_not_null(default)` ko atomic banana.
+- [x] Atomic SET NOT NULL DEFAULT aur column projection (390388c): `set_not_null(default)` ko atomic do-phase (collect-then-apply) mutation mein convert kiya; live cursor invalidation aur literal case corruption fix hua; non-dropped column projection order clean kiya. 100+ server/exec/query tests pass, insert throughput ~50k-54k rows/sec maintain raha.
 - [ ] Concurrent DDL locking: ALTER table execution ke dauran concurrent writers ko actively lock karna (sirf point-in-time check nahi).
 - [x] PK change support (93392ec): UPDATE execution mein two-phase key migration (old PK deletion + new PK insertion) aur secondary index pointer retargeting verified; self-update, conflict detection, aur rollback integrity validated.
 - [x] Indexed column type change (a41bdc4): `prepare_type_shadow` guard lifted; execution handler automatically drops stale secondary indexes, completes atomic type shadow swap, and rebuilds/populates indexes from backfilled row bytes with unique constraint validation.
