@@ -1015,4 +1015,66 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
+
+    #[test]
+    fn test_free_pages_batch_crash_before_freelist_persist() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "mitrdb_test_disk_free_batch_crash_{}",
+            std::process::id()
+        ));
+        let db_path = temp_dir.join("crash_test.db");
+        let fl_path = DiskManager::freelist_path(&db_path);
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let allocated_pids;
+        {
+            let disk = DiskManager::open_or_create(db_path.as_path()).unwrap();
+            let mut ids = Vec::new();
+            for _ in 0..6 {
+                let (p, _) = disk.allocate_page(PAGE_TYPE_SLOTTED).unwrap();
+                ids.push(p);
+            }
+            allocated_pids = ids;
+            disk.sync().unwrap();
+        }
+
+        // Freelist state snapshot before batch free (empty freelist)
+        let stale_freelist_bytes = std::fs::read(&fl_path).unwrap_or_default();
+
+        // Perform batch free
+        {
+            let disk = DiskManager::open_or_create(db_path.as_path()).unwrap();
+            disk.free_pages_batch(&[allocated_pids[2], allocated_pids[4]])
+                .unwrap();
+            // Drop disk manager immediately
+        }
+
+        // SIMULATE CRASH: disk had written blank pages + sync_all,
+        // but .freelist sidecar was reverted or torn to stale state
+        if stale_freelist_bytes.is_empty() {
+            let _ = std::fs::remove_file(&fl_path);
+        } else {
+            std::fs::write(&fl_path, &stale_freelist_bytes).unwrap();
+        }
+
+        // Reopen with stale/missing freelist and verify disk-level rebuild recovery
+        {
+            let disk = DiskManager::open_or_create(db_path.as_path()).unwrap();
+            let rebuilt = disk
+                .rebuild_freelist_from_disk_excluding(&std::collections::HashSet::new())
+                .unwrap();
+
+            assert!(rebuilt.contains(&allocated_pids[2]));
+            assert!(rebuilt.contains(&allocated_pids[4]));
+            assert!(disk.is_page_free(allocated_pids[2]));
+            assert!(disk.is_page_free(allocated_pids[4]));
+
+            // New page allocation must reuse one of the recovered free pages
+            let (reused_pid, _) = disk.allocate_page(PAGE_TYPE_SLOTTED).unwrap();
+            assert!(reused_pid == allocated_pids[2] || reused_pid == allocated_pids[4]);
+        }
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
 }
