@@ -1,3 +1,9 @@
+#![allow(
+    clippy::type_complexity,
+    clippy::match_like_matches_macro,
+    clippy::collapsible_if,
+    clippy::too_many_arguments
+)]
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BinaryHeap, HashSet};
 use std::sync::Arc;
@@ -52,15 +58,13 @@ impl<'a> DdlTableLockGuard<'a> {
             Err(e) => {
                 let _ = txn_mgr.abort(tid);
                 match e {
-                    Error::LockTimeout => {
-                        Err(Error::WriteConflict("Table lock timeout: referenced by active transaction".to_string()))
-                    }
-                    Error::Deadlock => {
-                        Err(Error::WriteConflict("Table lock deadlock detected".to_string()))
-                    }
-                    Error::WriteConflict(msg) => {
-                        Err(Error::WriteConflict(msg))
-                    }
+                    Error::LockTimeout => Err(Error::WriteConflict(
+                        "Table lock timeout: referenced by active transaction".to_string(),
+                    )),
+                    Error::Deadlock => Err(Error::WriteConflict(
+                        "Table lock deadlock detected".to_string(),
+                    )),
+                    Error::WriteConflict(msg) => Err(Error::WriteConflict(msg)),
                     other => Err(other),
                 }
             }
@@ -442,7 +446,7 @@ impl Executor {
                 top_n,
                 ..
             } => {
-                                if *top_n {
+                if *top_n {
                     format!(
                         "IndexRangeScan(table={}, index={}, column={}, ranges={}, top_n=true)",
                         schema.name,
@@ -616,11 +620,11 @@ impl Executor {
     fn idx_encode_entries(key: &[u8], pks: &[Vec<u8>]) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
         let plain = Self::encode_index_pks(pks);
         if plain.len() + 3 <= IDX_CHUNK_BUDGET.saturating_sub(key.len() + 64).max(256) {
-        return Ok(vec![(key.to_vec(), plain)]);
+            return Ok(vec![(key.to_vec(), plain)]);
         }
         let chunks = Self::idx_split_chunks(key.len(), pks);
         if chunks.len() <= 1 {
-        return Ok(vec![(key.to_vec(), plain)]);
+            return Ok(vec![(key.to_vec(), plain)]);
         }
         if chunks.len() - 1 > u16::MAX as usize {
             return Err(Error::OutOfSpace);
@@ -651,7 +655,7 @@ impl Executor {
         mut raw: Option<&mut Vec<Vec<u8>>>,
     ) -> Result<Vec<Vec<u8>>> {
         if head.first() != Some(&CHUNKED_PK_TAG) {
-        return Self::decode_index_pks(head);
+            return Self::decode_index_pks(head);
         }
         if head.len() < 3 {
             return Err(Error::PageCorrupted(
@@ -665,9 +669,9 @@ impl Executor {
         }
         for i in 1..=n {
             let okey = Self::idx_overflow_key(key, i);
-            let v = txn_mgr.get(txn_id, tree, &okey)?.ok_or_else(|| {
-                Error::PageCorrupted("Missing index overflow chunk".to_string())
-            })?;
+            let v = txn_mgr
+                .get(txn_id, tree, &okey)?
+                .ok_or_else(|| Error::PageCorrupted("Missing index overflow chunk".to_string()))?;
             pks.extend(Self::decode_index_pks(&v)?);
             if let Some(r) = raw.as_deref_mut() {
                 r.push(v);
@@ -687,7 +691,8 @@ impl Executor {
         match txn_mgr.get(txn_id, tree, key)? {
             None => Ok((Vec::new(), raw)),
             Some(head) => {
-                let pks = Self::idx_decode_entry(txn_mgr, txn_id, tree, key, &head, Some(&mut raw))?;
+                let pks =
+                    Self::idx_decode_entry(txn_mgr, txn_id, tree, key, &head, Some(&mut raw))?;
                 Ok((pks, raw))
             }
         }
@@ -1216,14 +1221,11 @@ impl Executor {
                         table_name
                     )));
                 }
-                let (src_pos, shadow_pos) = match catalog.prepare_type_shadow(
-                    &table_name,
-                    &column_name,
-                    new_type.clone(),
-                )? {
-                    Some(p) => p,
-                    None => return Ok(ExecutionResult::Ok),
-                };
+                let (src_pos, shadow_pos) =
+                    match catalog.prepare_type_shadow(&table_name, &column_name, new_type)? {
+                        Some(p) => p,
+                        None => return Ok(ExecutionResult::Ok),
+                    };
                 catalog.sync_roots()?;
                 let schema = catalog.get_table_schema(&table_name)?.ok_or_else(|| {
                     Error::TransactionError(format!("Table '{}' not found", table_name))
@@ -1264,8 +1266,7 @@ impl Executor {
                 let vtid = txn_mgr.begin_with_isolation(default_isolation)?;
                 let verify: Result<()> = (|| {
                     for (_pk, row_bytes) in txn_mgr.scan_unlocked(vtid, &tree)? {
-                        let tuple =
-                            Tuple::deserialize_for_table(&row_bytes, schema.columns.len())?;
+                        let tuple = Tuple::deserialize_for_table(&row_bytes, schema.columns.len())?;
                         if !matches!(tuple[src_pos], Value::Null)
                             && matches!(tuple[shadow_pos], Value::Null)
                         {
@@ -1287,7 +1288,9 @@ impl Executor {
                     .collect();
 
                 for (idx_name, _) in &affected_indexes {
-                    let idx_tree = catalog.get_index_by_name(idx_name).and_then(|m| catalog.index_tree(m.index_id));
+                    let idx_tree = catalog
+                        .get_index_by_name(idx_name)
+                        .and_then(|m| catalog.index_tree(m.index_id));
                     catalog.drop_index(idx_name)?;
                     if let Some(t) = idx_tree {
                         txn_mgr.purge_trees_state(&[t])?;
@@ -1298,20 +1301,27 @@ impl Executor {
                 catalog.sync_roots()?;
 
                 if !affected_indexes.is_empty() {
-                    let refreshed_schema = catalog.get_table_schema(&table_name)?.ok_or_else(|| {
-                        Error::TransactionError(format!("Table '{}' not found", table_name))
-                    })?;
+                    let refreshed_schema =
+                        catalog.get_table_schema(&table_name)?.ok_or_else(|| {
+                            Error::TransactionError(format!("Table '{}' not found", table_name))
+                        })?;
                     let target_col_pos = refreshed_schema
                         .columns
                         .iter()
                         .position(|c| !c.is_dropped() && c.name.eq_ignore_ascii_case(&column_name))
                         .ok_or_else(|| {
-                            Error::TransactionError(format!("Column '{}' not found after type swap", column_name))
+                            Error::TransactionError(format!(
+                                "Column '{}' not found after type swap",
+                                column_name
+                            ))
                         })?;
                     let pk_idx = Self::primary_key_index(&refreshed_schema);
-                    let table_tree = catalog.table_tree(refreshed_schema.table_id).ok_or_else(|| {
-                        Error::TransactionError("Table storage tree missing".to_string())
-                    })?;
+                    let table_tree =
+                        catalog
+                            .table_tree(refreshed_schema.table_id)
+                            .ok_or_else(|| {
+                                Error::TransactionError("Table storage tree missing".to_string())
+                            })?;
 
                     for (idx_name, unique) in affected_indexes {
                         let mut staged_entries = Vec::new();
@@ -1319,7 +1329,10 @@ impl Executor {
                             std::collections::BTreeMap::new();
 
                         for (_pk, row_bytes) in table_tree.range_scan(None, None)? {
-                            let tuple = Tuple::deserialize_for_table(&row_bytes, refreshed_schema.columns.len())?;
+                            let tuple = Tuple::deserialize_for_table(
+                                &row_bytes,
+                                refreshed_schema.columns.len(),
+                            )?;
                             let pk_bytes = tuple[pk_idx].to_key_bytes();
                             let idx_key = tuple[target_col_pos].to_key_bytes();
                             let pks = key_map.entry(idx_key).or_default();
@@ -1342,9 +1355,12 @@ impl Executor {
                             staged_entries.extend(Self::idx_encode_entries(&k, &pks)?);
                         }
 
-                        let index_id = catalog.create_index(&idx_name, &table_name, &column_name, unique)?;
+                        let index_id =
+                            catalog.create_index(&idx_name, &table_name, &column_name, unique)?;
                         if !staged_entries.is_empty() {
-                            if let Err(e) = catalog.populate_index_entries(index_id, &staged_entries) {
+                            if let Err(e) =
+                                catalog.populate_index_entries(index_id, &staged_entries)
+                            {
                                 let _ = catalog.drop_index(&idx_name);
                                 return Err(e);
                             }
@@ -1790,11 +1806,12 @@ impl Executor {
                     .filter(|(_, _, op)| *op == mitrdb_query::CompareOp::Eq)
                     .map(|&(l, r, _)| (l, r))
                     .collect();
-                let non_eq_conditions: Vec<(usize, usize, mitrdb_query::CompareOp)> = join_conditions
-                    .iter()
-                    .filter(|(_, _, op)| *op != mitrdb_query::CompareOp::Eq)
-                    .copied()
-                    .collect();
+                let non_eq_conditions: Vec<(usize, usize, mitrdb_query::CompareOp)> =
+                    join_conditions
+                        .iter()
+                        .filter(|(_, _, op)| *op != mitrdb_query::CompareOp::Eq)
+                        .copied()
+                        .collect();
 
                 let all_idx: Vec<usize> = (0..right_rows.len()).collect();
                 let no_match: [usize; 0] = [];
@@ -1818,7 +1835,10 @@ impl Executor {
                         let cands: &[usize] = if matches!(l_val, Value::Null) {
                             &no_match
                         } else {
-                            single_hash.get(l_val).map(|v| v.as_slice()).unwrap_or(&no_match)
+                            single_hash
+                                .get(l_val)
+                                .map(|v| v.as_slice())
+                                .unwrap_or(&no_match)
                         };
 
                         for &ri in cands {
@@ -1840,7 +1860,9 @@ impl Executor {
                                 for item in &projection {
                                     match item.source {
                                         JoinProjSource::Left(i) => tuple.push(left_row[i].clone()),
-                                        JoinProjSource::Right(j) => tuple.push(right_row[j].clone()),
+                                        JoinProjSource::Right(j) => {
+                                            tuple.push(right_row[j].clone())
+                                        }
                                     }
                                 }
                                 result_tuples.push(tuple);
@@ -1868,7 +1890,8 @@ impl Executor {
                         std::collections::HashMap::with_capacity(right_rows.len());
 
                     for (ri, rrow) in right_rows.iter().enumerate() {
-                        let key: Vec<Value> = eq_pairs.iter().map(|&(_, r)| rrow[r].clone()).collect();
+                        let key: Vec<Value> =
+                            eq_pairs.iter().map(|&(_, r)| rrow[r].clone()).collect();
                         if !key.iter().any(|v| matches!(v, Value::Null)) {
                             multi_hash.entry(key).or_default().push(ri);
                         }
@@ -1876,12 +1899,18 @@ impl Executor {
 
                     for left_row in &left_rows {
                         let mut matched = false;
-                        let has_null = eq_pairs.iter().any(|&(l, _)| matches!(&left_row[l], Value::Null));
+                        let has_null = eq_pairs
+                            .iter()
+                            .any(|&(l, _)| matches!(&left_row[l], Value::Null));
                         let cands: &[usize] = if has_null {
                             &no_match
                         } else {
-                            let key: Vec<Value> = eq_pairs.iter().map(|&(l, _)| left_row[l].clone()).collect();
-                            multi_hash.get(&key).map(|v| v.as_slice()).unwrap_or(&no_match)
+                            let key: Vec<Value> =
+                                eq_pairs.iter().map(|&(l, _)| left_row[l].clone()).collect();
+                            multi_hash
+                                .get(&key)
+                                .map(|v| v.as_slice())
+                                .unwrap_or(&no_match)
                         };
 
                         for &ri in cands {
@@ -1903,7 +1932,9 @@ impl Executor {
                                 for item in &projection {
                                     match item.source {
                                         JoinProjSource::Left(i) => tuple.push(left_row[i].clone()),
-                                        JoinProjSource::Right(j) => tuple.push(right_row[j].clone()),
+                                        JoinProjSource::Right(j) => {
+                                            tuple.push(right_row[j].clone())
+                                        }
                                     }
                                 }
                                 result_tuples.push(tuple);
@@ -1948,7 +1979,9 @@ impl Executor {
                                 for item in &projection {
                                     match item.source {
                                         JoinProjSource::Left(i) => tuple.push(left_row[i].clone()),
-                                        JoinProjSource::Right(j) => tuple.push(right_row[j].clone()),
+                                        JoinProjSource::Right(j) => {
+                                            tuple.push(right_row[j].clone())
+                                        }
                                     }
                                 }
                                 result_tuples.push(tuple);
@@ -2308,7 +2341,10 @@ impl Executor {
     }
 
     #[allow(dead_code)]
-    fn acquire_table_exclusive<'a>(txn_mgr: &'a TxnManager, table_id: u32) -> Result<DdlTableLockGuard<'a>> {
+    fn acquire_table_exclusive<'a>(
+        txn_mgr: &'a TxnManager,
+        table_id: u32,
+    ) -> Result<DdlTableLockGuard<'a>> {
         DdlTableLockGuard::acquire(txn_mgr, table_id)
     }
 
@@ -2699,9 +2735,7 @@ impl Executor {
                 }
                 return Ok(out);
             }
-            let is_point = |r: &KeyRange| {
-                matches!((&r.start, &r.end), (KeyBound::Included(a), KeyBound::Included(b)) if a == b)
-            };
+            let is_point = |r: &KeyRange| matches!((&r.start, &r.end), (KeyBound::Included(a), KeyBound::Included(b)) if a == b);
             let indexes = catalog.get_table_indexes(schema.table_id);
             for idx_meta in &indexes {
                 let Some(col_pos) = schema
@@ -2844,9 +2878,11 @@ impl Executor {
             }
             for (col_idx, delta) in increments {
                 let next = match tuple.get(*col_idx) {
-                    Some(Value::Int64(v)) => Value::Int64(v.checked_add(*delta).ok_or_else(|| {
-                        Error::TransactionError("Integer overflow in UPDATE".to_string())
-                    })?),
+                    Some(Value::Int64(v)) => {
+                        Value::Int64(v.checked_add(*delta).ok_or_else(|| {
+                            Error::TransactionError("Integer overflow in UPDATE".to_string())
+                        })?)
+                    }
                     Some(Value::Null) => Value::Null,
                     _ => {
                         return Err(Error::TransactionError(
@@ -2938,7 +2974,8 @@ impl Executor {
                         )));
                     }
                     {
-                        let (existing_pks, _) = Self::idx_read_all(txn_mgr, txn_id, idx_tree, &new_idx_key)?;
+                        let (existing_pks, _) =
+                            Self::idx_read_all(txn_mgr, txn_id, idx_tree, &new_idx_key)?;
                         if existing_pks.iter().any(|existing_pk| {
                             existing_pk != old_pk_bytes && !updating_old_pks.contains(existing_pk)
                         }) {
@@ -2960,10 +2997,18 @@ impl Executor {
                 let old_idx_key = old_tuple[*col_pos].to_key_bytes();
                 let new_idx_key = new_tuple[*col_pos].to_key_bytes();
                 if old_idx_key != new_idx_key || old_pk_bytes != new_pk_bytes {
-                    let (mut pks, old_raw) = Self::idx_read_all(txn_mgr, txn_id, idx_tree, &old_idx_key)?;
+                    let (mut pks, old_raw) =
+                        Self::idx_read_all(txn_mgr, txn_id, idx_tree, &old_idx_key)?;
                     if !pks.is_empty() {
                         pks.retain(|pk| pk != old_pk_bytes);
-                        Self::idx_write_all(txn_mgr, txn_id, idx_tree, &old_idx_key, &pks, &old_raw)?;
+                        Self::idx_write_all(
+                            txn_mgr,
+                            txn_id,
+                            idx_tree,
+                            &old_idx_key,
+                            &pks,
+                            &old_raw,
+                        )?;
                     }
                 }
             }
@@ -2981,7 +3026,8 @@ impl Executor {
                 let old_idx_key = old_tuple[*col_pos].to_key_bytes();
                 let new_idx_key = new_tuple[*col_pos].to_key_bytes();
                 if old_idx_key != new_idx_key || old_pk_bytes != new_pk_bytes {
-                    let (mut pks, old_raw) = Self::idx_read_all(txn_mgr, txn_id, idx_tree, &new_idx_key)?;
+                    let (mut pks, old_raw) =
+                        Self::idx_read_all(txn_mgr, txn_id, idx_tree, &new_idx_key)?;
                     if !pks.contains(new_pk_bytes) {
                         pks.push(new_pk_bytes.clone());
                         pks.sort();
@@ -3168,7 +3214,14 @@ impl Executor {
                 if idx_key.first() == Some(&OVERFLOW_KEY_TAG) {
                     continue;
                 }
-                let pks = Self::idx_decode_entry(txn_mgr, txn_id, &idx_tree, &idx_key, &encoded_pks, None)?;
+                let pks = Self::idx_decode_entry(
+                    txn_mgr,
+                    txn_id,
+                    &idx_tree,
+                    &idx_key,
+                    &encoded_pks,
+                    None,
+                )?;
                 for pk_bytes in pks {
                     if !seen_pks.insert(pk_bytes.clone()) {
                         continue;
@@ -3285,7 +3338,14 @@ impl Executor {
                 if idx_key.first() == Some(&OVERFLOW_KEY_TAG) {
                     continue;
                 }
-                let mut pks = Self::idx_decode_entry(txn_mgr, txn_id, &idx_tree, &idx_key, &encoded_pks, None)?;
+                let mut pks = Self::idx_decode_entry(
+                    txn_mgr,
+                    txn_id,
+                    &idx_tree,
+                    &idx_key,
+                    &encoded_pks,
+                    None,
+                )?;
                 if pk_descending {
                     pks.reverse();
                 }
@@ -3533,9 +3593,7 @@ impl Executor {
 
         Ok(ExecutionResult::Affected(deleted))
     }
-
 }
-
 
 impl Default for Executor {
     fn default() -> Self {

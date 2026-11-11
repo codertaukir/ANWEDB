@@ -1,3 +1,9 @@
+#![allow(
+    clippy::ptr_arg,
+    clippy::collapsible_if,
+    clippy::type_complexity,
+    unused_imports
+)]
 // PROBE (ignored): blocked WAL + poisoned commit => new-connection latency through the single accept thread.
 // Twin: healthy server, blocked server, healthy server again (same run).
 use mitrdb_server::{Server, TcpServerConfig};
@@ -42,12 +48,18 @@ fn connect_ping(addr: SocketAddr) -> std::io::Result<Duration> {
     send_frame(&mut s, b"MITRDB/1")?;
     let hello = recv_frame(&mut s)?;
     if !String::from_utf8_lossy(&hello).contains("\"ok\"") {
-        return Err(std::io::Error::other(format!("bad hello: {}", String::from_utf8_lossy(&hello))));
+        return Err(std::io::Error::other(format!(
+            "bad hello: {}",
+            String::from_utf8_lossy(&hello)
+        )));
     }
     send_frame(&mut s, b"PING")?;
     let pong = recv_frame(&mut s)?;
     if !String::from_utf8_lossy(&pong).contains("PONG") {
-        return Err(std::io::Error::other(format!("bad pong: {}", String::from_utf8_lossy(&pong))));
+        return Err(std::io::Error::other(format!(
+            "bad pong: {}",
+            String::from_utf8_lossy(&pong)
+        )));
     }
     let d = t.elapsed();
     let _ = send_frame(&mut s, b"QUIT");
@@ -60,12 +72,18 @@ fn free_port() -> u16 {
 }
 
 fn run(label: &str, blocked: bool) {
-    let dir = std::env::temp_dir().join(format!("mitrdb_idle_probe_{}_{}", label, std::process::id()));
+    let dir = std::env::temp_dir().join(format!(
+        "mitrdb_idle_probe_{}_{}",
+        label,
+        std::process::id()
+    ));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    let (srv, _) = Server::open_with_segment_size(dir.join("t.db"), dir.join("t.wal"), 64, 64).unwrap();
+    let (srv, _) =
+        Server::open_with_segment_size(dir.join("t.db"), dir.join("t.wal"), 64, 64).unwrap();
     let srv = Arc::new(srv);
-    srv.execute_sql("CREATE TABLE s (id INT PRIMARY KEY, v INT)").unwrap();
+    srv.execute_sql("CREATE TABLE s (id INT PRIMARY KEY, v INT)")
+        .unwrap();
     srv.execute_sql("INSERT INTO s VALUES (100, 0)").unwrap();
 
     let mut blocked_path = None;
@@ -74,9 +92,16 @@ fn run(label: &str, blocked: bool) {
         std::fs::create_dir(&b).unwrap();
         let t = Instant::now();
         let r = srv.execute_sql("INSERT INTO s VALUES (1, 1)");
-        println!("SETUP_INSERT {label} err={} after={:?}", r.is_err(), t.elapsed());
+        println!(
+            "SETUP_INSERT {label} err={} after={:?}",
+            r.is_err(),
+            t.elapsed()
+        );
         assert!(r.is_err(), "premise: insert must fail");
-        assert!(srv.txn_manager().poisoned_commit_count() > 0, "premise: commit must be poisoned");
+        assert!(
+            srv.txn_manager().poisoned_commit_count() > 0,
+            "premise: commit must be poisoned"
+        );
         blocked_path = Some(b);
     }
 

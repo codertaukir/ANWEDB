@@ -1,9 +1,15 @@
+#![allow(
+    clippy::ptr_arg,
+    clippy::collapsible_if,
+    clippy::type_complexity,
+    unused_imports
+)]
 #![cfg(feature = "fault-injection")]
-use std::sync::Arc;
 use mitrdb_storage::btree::BPlusTree;
 use mitrdb_storage::buffer_pool::BufferPoolManager;
 use mitrdb_storage::disk::DiskManager;
 use mitrdb_storage::wal::WalManager;
+use std::sync::Arc;
 
 fn key(i: u64) -> [u8; 8] {
     i.to_be_bytes()
@@ -29,7 +35,9 @@ fn test_btree_multiwrite_atomicity_on_fault() {
 
         let mut p_lsn = 0;
         for i in [10, 20, 30, 40, 50, 60, 70, 80] {
-            tree_c.insert_or_replace_logged(100, &mut p_lsn, &key(i), b"val").unwrap();
+            tree_c
+                .insert_or_replace_logged(100, &mut p_lsn, &key(i), b"val")
+                .unwrap();
         }
 
         bpm_c.set_fail_page_op_after(fail_at);

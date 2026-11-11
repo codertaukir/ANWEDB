@@ -1,3 +1,9 @@
+#![allow(
+    clippy::ptr_arg,
+    clippy::collapsible_if,
+    clippy::type_complexity,
+    unused_imports
+)]
 // Page-op failure injected at every point of ALTER COLUMN TYPE: the table must stay usable,
 // a retry must succeed, and the new type must survive a crash/reopen.
 // Run: cargo test -p mitrdb-server --features fault-injection --test alter_type_inject -- --nocapture
@@ -12,7 +18,7 @@ fn fresh(tag: &str) -> PathBuf {
     std::fs::create_dir_all(&d).unwrap();
     d
 }
-fn open(d: &PathBuf) -> Server {
+fn open(d: &std::path::Path) -> Server {
     Server::open(d.join("t.db"), d.join("t.wal"), 64).unwrap().0
 }
 fn shape(s: &Server, sql: &str) -> (usize, usize) {
@@ -36,10 +42,12 @@ fn page_op_failure_anywhere_in_alter_type_is_recoverable() {
         let d = fresh(&format!("atinj_{n}"));
         {
             let s = open(&d);
-            s.execute_sql("CREATE TABLE t (id int primary key, a text, c text)").unwrap();
+            s.execute_sql("CREATE TABLE t (id int primary key, a text, c text)")
+                .unwrap();
             s.execute_sql("BEGIN").unwrap();
             for i in 0..N {
-                s.execute_sql(&format!("INSERT INTO t VALUES ({i}, 'a{i}', '{i}')")).unwrap();
+                s.execute_sql(&format!("INSERT INTO t VALUES ({i}, 'a{i}', '{i}')"))
+                    .unwrap();
             }
             s.execute_sql("COMMIT").unwrap();
 
@@ -50,19 +58,48 @@ fn page_op_failure_anywhere_in_alter_type_is_recoverable() {
             if r.is_err() {
                 fired += 1;
                 // table still usable, same width, same row count, value readable either way
-                assert_eq!(shape(&s, "SELECT * FROM t"), (3, N as usize), "n={n}: shape after failure");
-                assert!(dump(&s, "SELECT c FROM t WHERE id = 7").contains('7'), "n={n}: value lost");
+                assert_eq!(
+                    shape(&s, "SELECT * FROM t"),
+                    (3, N as usize),
+                    "n={n}: shape after failure"
+                );
+                assert!(
+                    dump(&s, "SELECT c FROM t WHERE id = 7").contains('7'),
+                    "n={n}: value lost"
+                );
                 s.execute_sql("ALTER TABLE t ALTER COLUMN c TYPE int")
                     .unwrap_or_else(|e| panic!("n={n}: retry failed: {e:?}"));
             }
-            assert!(dump(&s, "SELECT c FROM t WHERE id = 7").contains("Int64(7)"), "n={n}: not int after change");
-            assert_eq!(shape(&s, "SELECT * FROM t"), (3, N as usize), "n={n}: final shape");
-            assert_eq!(shape(&s, "SELECT * FROM t WHERE c = 150"), (3, 1), "n={n}: filter on new type");
+            assert!(
+                dump(&s, "SELECT c FROM t WHERE id = 7").contains("Int64(7)"),
+                "n={n}: not int after change"
+            );
+            assert_eq!(
+                shape(&s, "SELECT * FROM t"),
+                (3, N as usize),
+                "n={n}: final shape"
+            );
+            assert_eq!(
+                shape(&s, "SELECT * FROM t WHERE c = 150"),
+                (3, 1),
+                "n={n}: filter on new type"
+            );
         } // crash
         let s = open(&d);
-        assert_eq!(shape(&s, "SELECT * FROM t"), (3, N as usize), "n={n}: shape after reopen");
-        assert!(dump(&s, "SELECT c FROM t WHERE id = 7").contains("Int64(7)"), "n={n}: type lost after reopen");
-        assert!(s.execute_sql("INSERT INTO t VALUES (9999, 'z', 'text-not-int')").is_err(), "n={n}: type not enforced");
+        assert_eq!(
+            shape(&s, "SELECT * FROM t"),
+            (3, N as usize),
+            "n={n}: shape after reopen"
+        );
+        assert!(
+            dump(&s, "SELECT c FROM t WHERE id = 7").contains("Int64(7)"),
+            "n={n}: type lost after reopen"
+        );
+        assert!(
+            s.execute_sql("INSERT INTO t VALUES (9999, 'z', 'text-not-int')")
+                .is_err(),
+            "n={n}: type not enforced"
+        );
         let _ = std::fs::remove_dir_all(&d);
     }
     eprintln!("INJECT points_run={ran} fired={fired}");
@@ -77,10 +114,12 @@ fn wal_append_failure_in_alter_type_is_recoverable() {
         let d = fresh(&format!("atwal_{n}"));
         {
             let s = open(&d);
-            s.execute_sql("CREATE TABLE t (id int primary key, a text, c text)").unwrap();
+            s.execute_sql("CREATE TABLE t (id int primary key, a text, c text)")
+                .unwrap();
             s.execute_sql("BEGIN").unwrap();
             for i in 0..N {
-                s.execute_sql(&format!("INSERT INTO t VALUES ({i}, 'a{i}', '{i}')")).unwrap();
+                s.execute_sql(&format!("INSERT INTO t VALUES ({i}, 'a{i}', '{i}')"))
+                    .unwrap();
             }
             s.execute_sql("COMMIT").unwrap();
 
@@ -90,17 +129,38 @@ fn wal_append_failure_in_alter_type_is_recoverable() {
             ran += 1;
             if r.is_err() {
                 fired += 1;
-                assert_eq!(shape(&s, "SELECT * FROM t"), (3, N as usize), "n={n}: shape after wal failure");
-                assert!(dump(&s, "SELECT c FROM t WHERE id = 7").contains('7'), "n={n}: value lost");
+                assert_eq!(
+                    shape(&s, "SELECT * FROM t"),
+                    (3, N as usize),
+                    "n={n}: shape after wal failure"
+                );
+                assert!(
+                    dump(&s, "SELECT c FROM t WHERE id = 7").contains('7'),
+                    "n={n}: value lost"
+                );
                 s.execute_sql("ALTER TABLE t ALTER COLUMN c TYPE int")
                     .unwrap_or_else(|e| panic!("n={n}: retry failed after wal error: {e:?}"));
             }
-            assert!(dump(&s, "SELECT c FROM t WHERE id = 7").contains("Int64(7)"), "n={n}: not int after change");
-            assert_eq!(shape(&s, "SELECT * FROM t"), (3, N as usize), "n={n}: final shape");
+            assert!(
+                dump(&s, "SELECT c FROM t WHERE id = 7").contains("Int64(7)"),
+                "n={n}: not int after change"
+            );
+            assert_eq!(
+                shape(&s, "SELECT * FROM t"),
+                (3, N as usize),
+                "n={n}: final shape"
+            );
         } // crash/reopen
         let s = open(&d);
-        assert_eq!(shape(&s, "SELECT * FROM t"), (3, N as usize), "n={n}: shape after reopen");
-        assert!(dump(&s, "SELECT c FROM t WHERE id = 7").contains("Int64(7)"), "n={n}: type lost after reopen");
+        assert_eq!(
+            shape(&s, "SELECT * FROM t"),
+            (3, N as usize),
+            "n={n}: shape after reopen"
+        );
+        assert!(
+            dump(&s, "SELECT c FROM t WHERE id = 7").contains("Int64(7)"),
+            "n={n}: type lost after reopen"
+        );
         let _ = std::fs::remove_dir_all(&d);
     }
     eprintln!("WAL INJECT points_run={ran} fired={fired}");

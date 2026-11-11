@@ -1,3 +1,9 @@
+#![allow(
+    clippy::ptr_arg,
+    clippy::collapsible_if,
+    clippy::type_complexity,
+    unused_imports
+)]
 #![cfg(feature = "fault-injection")]
 // Probe v7 (ignored): ONE injected cache-miss failure on a DEEP tree (depth 3 at max_keys=64).
 // Scenarios: root split (2->3) insert, and deletes after d leftmost deletes (merge/borrow/rebalance_internal).
@@ -31,7 +37,9 @@ fn sig(bt: &str) -> String {
     let mut fns: Vec<String> = Vec::new();
     for line in bt.lines() {
         let l = line.trim();
-        let Some((num, rest)) = l.split_once(": ") else { continue };
+        let Some((num, rest)) = l.split_once(": ") else {
+            continue;
+        };
         if num.parse::<usize>().is_err() {
             continue;
         }
@@ -70,7 +78,8 @@ macro_rules! mk {
         let bpm = Arc::new(BufferPoolManager::new(disk.clone(), $pool));
         let wal = Arc::new(WalManager::open_or_create($dir.join("t.wal").as_path()).unwrap());
         let mut prev = wal.append_record(LogRecord::new_begin(0, 1)).unwrap();
-        let tree = BPlusTree::create_logged(bpm.clone(), Some(wal.clone()), $maxk, 1, &mut prev).unwrap();
+        let tree =
+            BPlusTree::create_logged(bpm.clone(), Some(wal.clone()), $maxk, 1, &mut prev).unwrap();
         (disk, bpm, wal, tree, prev)
     }};
 }
@@ -78,9 +87,18 @@ macro_rules! mk {
 #[test]
 #[ignore]
 fn btree_deep_fail_probe() {
-    let maxk: u16 = std::env::var("MAXK").ok().and_then(|v| v.parse().ok()).unwrap_or(64);
-    let pool: usize = std::env::var("POOL").ok().and_then(|v| v.parse().ok()).unwrap_or(8);
-    let nmax: i64 = std::env::var("NMAX").ok().and_then(|v| v.parse().ok()).unwrap_or(60);
+    let maxk: u16 = std::env::var("MAXK")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(64);
+    let pool: usize = std::env::var("POOL")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(8);
+    let nmax: i64 = std::env::var("NMAX")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(60);
     let total: u64 = 8000;
     let base = std::env::var("MITRDB_DIR")
         .map(std::path::PathBuf::from)
@@ -95,7 +113,8 @@ fn btree_deep_fail_probe() {
         let mut found = 0u64;
         for i in 0..total {
             let before = tree.root_page_id();
-            tree.insert_logged(1, &mut prev, &key(i), &[7u8; 8]).unwrap();
+            tree.insert_logged(1, &mut prev, &key(i), &[7u8; 8])
+                .unwrap();
             if tree.root_page_id() != before {
                 changes += 1;
                 if changes == 2 {
@@ -113,7 +132,8 @@ fn btree_deep_fail_probe() {
     };
 
     // (label, op, keys inserted 0..pre, leftmost deletes d)
-    let mut scens: Vec<(String, &str, u64, u64)> = vec![(format!("root_split_c{c}"), "insert", c, 0)];
+    let mut scens: Vec<(String, &str, u64, u64)> =
+        vec![(format!("root_split_c{c}"), "insert", c, 0)];
     for d in [0u64, 3000, 6000, 7500] {
         scens.push((format!("delete_after_{d}"), "delete", total, d));
     }
@@ -126,7 +146,8 @@ fn btree_deep_fail_probe() {
             let (_disk, bpm, _wal, tree, mut prev) = mk!(dir, maxk, pool);
             let mut expected: HashSet<u64> = HashSet::new();
             for i in 0..pre {
-                tree.insert_logged(1, &mut prev, &key(i), &[7u8; 8]).unwrap();
+                tree.insert_logged(1, &mut prev, &key(i), &[7u8; 8])
+                    .unwrap();
                 expected.insert(i);
             }
             for i in 0..dl {
@@ -135,13 +156,18 @@ fn btree_deep_fail_probe() {
             }
             let kk = if op == "insert" { pre } else { dl };
             if n == 0 {
-                println!("PRE7 scen={label} depth={} pages={}", depth(&tree), tree.collect_all_pages().unwrap().len());
+                println!(
+                    "PRE7 scen={label} depth={} pages={}",
+                    depth(&tree),
+                    tree.collect_all_pages().unwrap().len()
+                );
             }
             let prev_before = prev;
             bpm.set_fail_miss_after(n);
             let res = catch_unwind(AssertUnwindSafe(|| {
                 if op == "insert" {
-                    tree.insert_logged(1, &mut prev, &key(kk), &[7u8; 8]).map(|_| true)
+                    tree.insert_logged(1, &mut prev, &key(kk), &[7u8; 8])
+                        .map(|_| true)
                 } else {
                     tree.delete_logged(1, &mut prev, &key(kk))
                 }
@@ -177,9 +203,15 @@ fn btree_deep_fail_probe() {
                     let bad = coll > 0 || geterr > 0 || scan_err || tgt || prev != prev_before;
                     if bad {
                         total_bad += 1;
-                        println!("BAD7 scen={label} n={n} lost={coll} get_err={geterr} scan_err={scan_err} target_changed={tgt} prev_moved={}", prev != prev_before);
+                        println!(
+                            "BAD7 scen={label} n={n} lost={coll} get_err={geterr} scan_err={scan_err} target_changed={tgt} prev_moved={}",
+                            prev != prev_before
+                        );
                     }
-                    let s = trace.as_deref().map(sig).unwrap_or_else(|| "NO_TRACE".to_string());
+                    let s = trace
+                        .as_deref()
+                        .map(sig)
+                        .unwrap_or_else(|| "NO_TRACE".to_string());
                     let e = table.entry(s).or_insert((0, 0));
                     e.0 += 1;
                     if bad {

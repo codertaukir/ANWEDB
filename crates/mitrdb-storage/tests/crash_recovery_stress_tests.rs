@@ -1,3 +1,9 @@
+#![allow(
+    clippy::ptr_arg,
+    clippy::collapsible_if,
+    clippy::type_complexity,
+    unused_imports
+)]
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::sync::Arc;
@@ -11,10 +17,8 @@ use mitrdb_storage::wal::{LogRecord, WalManager};
 
 #[test]
 fn test_crash_recovery_uncommitted_undo_and_committed_redo() {
-    let temp_dir = std::env::temp_dir().join(format!(
-        "mitrdb_crash_stress_1_{}",
-        std::process::id()
-    ));
+    let temp_dir =
+        std::env::temp_dir().join(format!("mitrdb_crash_stress_1_{}", std::process::id()));
     let db_path = temp_dir.join("crash_test.db");
     let wal_path = temp_dir.join("crash_test.wal");
     let _ = std::fs::remove_dir_all(&temp_dir);
@@ -117,10 +121,8 @@ fn test_crash_recovery_uncommitted_undo_and_committed_redo() {
 
 #[test]
 fn test_crash_recovery_with_torn_tail_corruption() {
-    let temp_dir = std::env::temp_dir().join(format!(
-        "mitrdb_crash_stress_2_{}",
-        std::process::id()
-    ));
+    let temp_dir =
+        std::env::temp_dir().join(format!("mitrdb_crash_stress_2_{}", std::process::id()));
     let db_path = temp_dir.join("torn_test.db");
     let wal_path = temp_dir.join("torn_test.wal");
     let _ = std::fs::remove_dir_all(&temp_dir);
@@ -158,12 +160,10 @@ fn test_crash_recovery_with_torn_tail_corruption() {
 
     // --- PHASE 2: Inject Torn-Tail (Garbage bytes appended to WAL) ---
     {
-        let mut wal_file = OpenOptions::new()
-            .write(true)
-            .append(true)
-            .open(&wal_path)
+        let mut wal_file = OpenOptions::new().append(true).open(&wal_path).unwrap();
+        wal_file
+            .write_all(&[0xDE, 0xAD, 0xBE, 0xEF, 0x01, 0x02])
             .unwrap();
-        wal_file.write_all(&[0xDE, 0xAD, 0xBE, 0xEF, 0x01, 0x02]).unwrap();
         wal_file.sync_all().unwrap();
     }
 

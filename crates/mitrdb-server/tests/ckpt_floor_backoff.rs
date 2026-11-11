@@ -1,3 +1,9 @@
+#![allow(
+    clippy::ptr_arg,
+    clippy::collapsible_if,
+    clippy::type_complexity,
+    unused_imports
+)]
 use mitrdb_exec::ExecutionResult;
 use mitrdb_server::{Server, Value};
 
@@ -21,15 +27,24 @@ fn churn(srv: &Server, base: i64, n: i64) {
     let mut i = 0;
     while i < n {
         let end = (i + 500).min(n);
-        let vals: Vec<String> = (i..end).map(|k| format!("({},'user_{}')", base + k, k)).collect();
-        srv.execute_sql(&format!("INSERT INTO t VALUES {}", vals.join(","))).unwrap();
+        let vals: Vec<String> = (i..end)
+            .map(|k| format!("({},'user_{}')", base + k, k))
+            .collect();
+        srv.execute_sql(&format!("INSERT INTO t VALUES {}", vals.join(",")))
+            .unwrap();
         i = end;
     }
     for k in 0..n {
-        srv.execute_sql(&format!("DELETE FROM t WHERE id = {}", base + k)).unwrap();
+        srv.execute_sql(&format!("DELETE FROM t WHERE id = {}", base + k))
+            .unwrap();
     }
     for k in 0..n {
-        srv.execute_sql(&format!("INSERT INTO t VALUES ({}, 'user_{}')", base + k, k)).unwrap();
+        srv.execute_sql(&format!(
+            "INSERT INTO t VALUES ({}, 'user_{}')",
+            base + k,
+            k
+        ))
+        .unwrap();
     }
 }
 
@@ -40,18 +55,24 @@ fn pinned_wal_backs_off_checkpoints() {
     let dir = std::env::temp_dir().join(format!("mitrdb_ckptfloor_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    let (srv, _) = Server::open_with_segment_size(dir.join("t.db"), dir.join("t.wal"), 256, SEG).unwrap();
-    srv.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, name TEXT)").unwrap();
+    let (srv, _) =
+        Server::open_with_segment_size(dir.join("t.db"), dir.join("t.wal"), 256, SEG).unwrap();
+    srv.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, name TEXT)")
+        .unwrap();
 
     // premise: a manual checkpoint is counted by checkpoints_created
     let c0 = srv.metrics_snapshot().checkpoints_created;
     srv.checkpoint().unwrap();
     let c1 = srv.metrics_snapshot().checkpoints_created;
-    assert!(c1 > c0, "premise: manual checkpoint must raise checkpoints_created ({c0} -> {c1})");
+    assert!(
+        c1 > c0,
+        "premise: manual checkpoint must raise checkpoints_created ({c0} -> {c1})"
+    );
 
     let s1 = srv.create_session();
     srv.execute_in_session(s1, "BEGIN").unwrap();
-    srv.execute_in_session(s1, "INSERT INTO t VALUES (900000, 'pinned')").unwrap();
+    srv.execute_in_session(s1, "INSERT INTO t VALUES (900000, 'pinned')")
+        .unwrap();
 
     srv.set_auto_checkpoint_wal_bytes(4 * SEG);
     let before = srv.metrics_snapshot().checkpoints_created;

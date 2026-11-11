@@ -1,3 +1,9 @@
+#![allow(
+    clippy::ptr_arg,
+    clippy::collapsible_if,
+    clippy::type_complexity,
+    unused_imports
+)]
 // resolve_poisoned_commit: persistent flush failure poisons; once WAL works again, resolve completes the commit.
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -17,7 +23,14 @@ fn tmp(tag: &str) -> PathBuf {
     d
 }
 
-fn open(dir: &Path) -> (Arc<WalManager>, Arc<BufferPoolManager>, Arc<BPlusTree>, TxnManager) {
+fn open(
+    dir: &Path,
+) -> (
+    Arc<WalManager>,
+    Arc<BufferPoolManager>,
+    Arc<BPlusTree>,
+    TxnManager,
+) {
     let disk = Arc::new(DiskManager::open_or_create(dir.join("t.db").as_path()).unwrap());
     let bpm = Arc::new(BufferPoolManager::new(disk.clone(), 32));
     let wal = Arc::new(WalManager::open_or_create(dir.join("t.wal").as_path()).unwrap());
@@ -29,7 +42,11 @@ fn open(dir: &Path) -> (Arc<WalManager>, Arc<BufferPoolManager>, Arc<BPlusTree>,
 
 fn block_wal(wal_path: &Path) {
     if wal_path.is_file() {
-        assert_eq!(std::fs::metadata(wal_path).unwrap().len(), 0, "wal already has data");
+        assert_eq!(
+            std::fs::metadata(wal_path).unwrap().len(),
+            0,
+            "wal already has data"
+        );
         std::fs::remove_file(wal_path).unwrap();
     }
     std::fs::create_dir(wal_path).unwrap();
@@ -53,7 +70,11 @@ fn resolve_completes_poisoned_commit_and_releases_locks() {
         // locks still held while poisoned
         let c = mgr.begin().unwrap();
         let r = mgr.put(c, &tree, b"key_a", b"val_c");
-        assert!(matches!(r, Err(Error::LockTimeout)), "expected LockTimeout, got {:?}", r.err().map(|e| e.to_string()));
+        assert!(
+            matches!(r, Err(Error::LockTimeout)),
+            "expected LockTimeout, got {:?}",
+            r.err().map(|e| e.to_string())
+        );
         let _ = mgr.abort(c);
 
         // WAL still broken: resolve fails and txn stays poisoned
@@ -62,7 +83,9 @@ fn resolve_completes_poisoned_commit_and_releases_locks() {
 
         // WAL healthy again
         std::fs::remove_dir(&wal_path).unwrap();
-        let ts = mgr.resolve_poisoned_commit(a).expect("resolve should complete the commit");
+        let ts = mgr
+            .resolve_poisoned_commit(a)
+            .expect("resolve should complete the commit");
         assert!(ts > 0);
         assert!(!mgr.is_commit_poisoned(a));
         assert!(wal.flushed_lsn() > 0);
@@ -71,7 +94,10 @@ fn resolve_completes_poisoned_commit_and_releases_locks() {
 
         // locks released and value visible to a new txn
         let d = mgr.begin().unwrap();
-        assert_eq!(mgr.get(d, &tree, b"key_a").unwrap().as_deref(), Some(&b"val_a"[..]));
+        assert_eq!(
+            mgr.get(d, &tree, b"key_a").unwrap().as_deref(),
+            Some(&b"val_a"[..])
+        );
         mgr.put(d, &tree, b"key_a", b"val_d").unwrap();
         mgr.commit(d).unwrap();
     }
@@ -79,7 +105,9 @@ fn resolve_completes_poisoned_commit_and_releases_locks() {
         let disk = Arc::new(DiskManager::open_or_create(dir.join("t.db").as_path()).unwrap());
         let wal = Arc::new(WalManager::open_or_create(wal_path.as_path()).unwrap());
         let bpm = Arc::new(BufferPoolManager::new(disk.clone(), 32));
-        RecoveryManager::new(wal.clone(), bpm.clone()).recover().unwrap();
+        RecoveryManager::new(wal.clone(), bpm.clone())
+            .recover()
+            .unwrap();
         let tree = BPlusTree::open(bpm.clone(), Some(wal.clone()), root_id, 4).unwrap();
         assert_eq!(tree.get(b"key_a").unwrap().as_deref(), Some(&b"val_d"[..]));
     }
@@ -93,9 +121,15 @@ fn resolve_rejects_non_poisoned_txn() {
         let (_wal, _bpm, tree, mgr) = open(&dir);
         let a = mgr.begin().unwrap();
         mgr.put(a, &tree, b"k", b"v").unwrap();
-        assert!(mgr.resolve_poisoned_commit(a).is_err(), "active txn is not resolvable");
+        assert!(
+            mgr.resolve_poisoned_commit(a).is_err(),
+            "active txn is not resolvable"
+        );
         mgr.commit(a).unwrap();
-        assert!(mgr.resolve_poisoned_commit(a).is_err(), "committed txn is not resolvable");
+        assert!(
+            mgr.resolve_poisoned_commit(a).is_err(),
+            "committed txn is not resolvable"
+        );
     }
     let _ = std::fs::remove_dir_all(&dir);
 }

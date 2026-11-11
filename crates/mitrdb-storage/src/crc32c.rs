@@ -142,7 +142,9 @@ mod tests {
     }
 
     fn pseudo_random_bytes(len: usize, seed: u64) -> Vec<u8> {
-        let mut x = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        let mut x = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         (0..len)
             .map(|_| {
                 x ^= x << 13;
@@ -181,7 +183,10 @@ mod tests {
 
     #[test]
     fn test_crc32c_matches_reference_for_page_sized_inputs() {
-        for (i, len) in [4096usize, 4096 - 8, 8192, 65_536, 131_121].into_iter().enumerate() {
+        for (i, len) in [4096usize, 4096 - 8, 8192, 65_536, 131_121]
+            .into_iter()
+            .enumerate()
+        {
             let buf = pseudo_random_bytes(len, 100 + i as u64);
             assert_eq!(checksum(&buf), reference_checksum(&buf), "len={len}");
         }

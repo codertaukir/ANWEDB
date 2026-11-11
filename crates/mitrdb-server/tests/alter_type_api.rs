@@ -1,3 +1,9 @@
+#![allow(
+    clippy::ptr_arg,
+    clippy::collapsible_if,
+    clippy::type_complexity,
+    unused_imports
+)]
 use mitrdb_server::{ExecutionResult, Server};
 use std::path::PathBuf;
 
@@ -7,7 +13,7 @@ fn fresh(tag: &str) -> PathBuf {
     std::fs::create_dir_all(&d).unwrap();
     d
 }
-fn open(d: &PathBuf) -> Server {
+fn open(d: &std::path::Path) -> Server {
     Server::open(d.join("t.db"), d.join("t.wal"), 64).unwrap().0
 }
 fn dump(s: &Server, sql: &str) -> String {
@@ -22,7 +28,8 @@ fn table_change_type_validates_names_and_converts() {
     let d = fresh("alttype_api");
     {
         let s = open(&d);
-        s.execute_sql("CREATE TABLE t (id int primary key, a int)").unwrap();
+        s.execute_sql("CREATE TABLE t (id int primary key, a int)")
+            .unwrap();
         s.execute_sql("INSERT INTO t VALUES (1, 42)").unwrap();
 
         assert!(s.table("t").change_type("bad name", "text").is_err());

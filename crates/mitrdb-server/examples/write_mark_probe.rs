@@ -19,12 +19,18 @@ fn main() -> Result<(), String> {
     let tid = tm.begin().map_err(|e| format!("begin: {e:?}"))?;
     const M: u64 = 1_000_000;
     for _ in 0..100_000 {
-        black_box(tm.write_mark(black_box(tid)).map_err(|e| format!("mark: {e:?}"))?);
+        black_box(
+            tm.write_mark(black_box(tid))
+                .map_err(|e| format!("mark: {e:?}"))?,
+        );
     }
     for round in 0..5 {
         let t = Instant::now();
         for _ in 0..M {
-            black_box(tm.write_mark(black_box(tid)).map_err(|e| format!("mark: {e:?}"))?);
+            black_box(
+                tm.write_mark(black_box(tid))
+                    .map_err(|e| format!("mark: {e:?}"))?,
+            );
         }
         println!(
             "round {round}: {:.1} ns/call",

@@ -1,6 +1,12 @@
+#![allow(
+    clippy::ptr_arg,
+    clippy::collapsible_if,
+    clippy::type_complexity,
+    unused_imports
+)]
 use mitrdb_common::Error;
 use mitrdb_exec::ExecutionResult;
-use mitrdb_server::{val, IsolationLevel, Server, Value};
+use mitrdb_server::{IsolationLevel, Server, Value, val};
 use std::path::PathBuf;
 
 fn open(tag: &str) -> (PathBuf, Server) {
@@ -12,9 +18,13 @@ fn open(tag: &str) -> (PathBuf, Server) {
 }
 
 fn load(srv: &Server, name: &str, n: i64) {
-    srv.execute_sql(&format!("CREATE TABLE {name} (id INT PRIMARY KEY, age INT)")).unwrap();
+    srv.execute_sql(&format!(
+        "CREATE TABLE {name} (id INT PRIMARY KEY, age INT)"
+    ))
+    .unwrap();
     let vals: Vec<String> = (0..n).map(|k| format!("({k},{})", k % 3)).collect();
-    srv.execute_sql(&format!("INSERT INTO {name} VALUES {}", vals.join(","))).unwrap();
+    srv.execute_sql(&format!("INSERT INTO {name} VALUES {}", vals.join(",")))
+        .unwrap();
 }
 
 fn ids(srv: &Server, name: &str) -> Vec<i64> {
@@ -53,9 +63,19 @@ fn delete_where_pk_shapes() {
     for (i, (wh, deleted)) in cases.iter().enumerate() {
         let name = format!("c{i}");
         load(&srv, &name, 10);
-        let res = srv.execute_sql(&format!("DELETE FROM {name} WHERE {wh}")).unwrap();
-        assert_eq!(res, ExecutionResult::Affected(deleted.len()), "case '{wh}' affected");
-        let expect: Vec<i64> = all.iter().copied().filter(|x| !deleted.contains(x)).collect();
+        let res = srv
+            .execute_sql(&format!("DELETE FROM {name} WHERE {wh}"))
+            .unwrap();
+        assert_eq!(
+            res,
+            ExecutionResult::Affected(deleted.len()),
+            "case '{wh}' affected"
+        );
+        let expect: Vec<i64> = all
+            .iter()
+            .copied()
+            .filter(|x| !deleted.contains(x))
+            .collect();
         assert_eq!(ids(&srv, &name), expect, "case '{wh}' remaining");
     }
     drop(srv);
@@ -68,7 +88,11 @@ fn delete_pk_range_with_null_filter_table_api() {
     let t = srv.table("n");
     t.sync("id int primary key, age int").unwrap();
     for i in 0..6i64 {
-        let age = if i == 2 || i == 4 { Value::Null } else { val(i) };
+        let age = if i == 2 || i == 4 {
+            Value::Null
+        } else {
+            val(i)
+        };
         t.insert(&[("id", val(i)), ("age", age)]).unwrap();
     }
     let n = t
@@ -90,7 +114,9 @@ fn delete_pk_range_serializable_phantom() {
     let s1 = srv.create_session_with_isolation(IsolationLevel::Serializable);
     let s2 = srv.create_session_with_isolation(IsolationLevel::Serializable);
     srv.execute_in_session(s1, "BEGIN").unwrap();
-    let res = srv.execute_in_session(s1, "DELETE FROM u WHERE id >= 5").unwrap();
+    let res = srv
+        .execute_in_session(s1, "DELETE FROM u WHERE id >= 5")
+        .unwrap();
     assert_eq!(res, ExecutionResult::Affected(5));
     // insert inside the deleted range must be blocked
     assert!(matches!(
@@ -98,7 +124,8 @@ fn delete_pk_range_serializable_phantom() {
         Err(Error::LockTimeout)
     ));
     // insert outside the range must work
-    srv.execute_in_session(s2, "INSERT INTO u VALUES (-1, 0)").ok();
+    srv.execute_in_session(s2, "INSERT INTO u VALUES (-1, 0)")
+        .ok();
     srv.execute_in_session(s1, "COMMIT").unwrap();
     assert_eq!(ids(&srv, "u").into_iter().filter(|x| *x >= 5).count(), 0);
     drop(srv);

@@ -1,3 +1,9 @@
+#![allow(
+    clippy::ptr_arg,
+    clippy::collapsible_if,
+    clippy::type_complexity,
+    unused_imports
+)]
 // Probe v4 (btree level): ONE injected page-op failure per fresh tree; failures grouped by the
 // call signature (bpm fn @ btree call chain) captured from a backtrace at the injection point.
 // Run: cargo test -p mitrdb-storage --features fault-injection --test btree_io_fail_probe -- --ignored --nocapture
@@ -19,7 +25,9 @@ fn sig(bt: &str) -> String {
     let mut fns: Vec<String> = Vec::new();
     for line in bt.lines() {
         let l = line.trim();
-        let Some((num, rest)) = l.split_once(": ") else { continue };
+        let Some((num, rest)) = l.split_once(": ") else {
+            continue;
+        };
         if num.parse::<usize>().is_err() {
             continue;
         }
@@ -53,8 +61,12 @@ fn sig(bt: &str) -> String {
 #[test]
 #[ignore]
 fn btree_io_fail_probe() {
-    let maxk: u16 = std::env::var("MAXK").ok().and_then(|v| v.parse().ok()).unwrap_or(4);
-    let pres: Vec<u64> = std::env::var("PRES").ok()
+    let maxk: u16 = std::env::var("MAXK")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(4);
+    let pres: Vec<u64> = std::env::var("PRES")
+        .ok()
         .map(|v| v.split(',').filter_map(|x| x.parse().ok()).collect())
         .unwrap_or_else(|| vec![16, 64]);
     println!("CFG maxk={maxk} pres={pres:?}");
@@ -66,23 +78,38 @@ fn btree_io_fail_probe() {
                 for trial in 0..16u64 {
                     let dir = std::env::temp_dir().join(format!(
                         "mitrdb_iofp4_{}_{}_{}_{}_{}",
-                        std::process::id(), op, n, pre, trial
+                        std::process::id(),
+                        op,
+                        n,
+                        pre,
+                        trial
                     ));
                     let _ = std::fs::remove_dir_all(&dir);
                     std::fs::create_dir_all(&dir).unwrap();
-                    let disk = Arc::new(DiskManager::open_or_create(dir.join("t.db").as_path()).unwrap());
+                    let disk =
+                        Arc::new(DiskManager::open_or_create(dir.join("t.db").as_path()).unwrap());
                     let bpm = Arc::new(BufferPoolManager::new(disk.clone(), 8));
-                    let wal = Arc::new(WalManager::open_or_create(dir.join("t.wal").as_path()).unwrap());
+                    let wal =
+                        Arc::new(WalManager::open_or_create(dir.join("t.wal").as_path()).unwrap());
                     let mut prev = wal.append_record(LogRecord::new_begin(0, 1)).unwrap();
-                    let tree = BPlusTree::create_logged(bpm.clone(), Some(wal.clone()), maxk, 1, &mut prev).unwrap();
+                    let tree = BPlusTree::create_logged(
+                        bpm.clone(),
+                        Some(wal.clone()),
+                        maxk,
+                        1,
+                        &mut prev,
+                    )
+                    .unwrap();
                     let mut expected: HashSet<u64> = HashSet::new();
                     for i in 0..pre {
-                        tree.insert_logged(1, &mut prev, &key(2 * i), &[7u8; 8]).unwrap();
+                        tree.insert_logged(1, &mut prev, &key(2 * i), &[7u8; 8])
+                            .unwrap();
                         expected.insert(2 * i);
                     }
                     if op == "delete" {
                         for i in 0..pre {
-                            tree.insert_logged(1, &mut prev, &key(2 * i + 1), &[7u8; 8]).unwrap();
+                            tree.insert_logged(1, &mut prev, &key(2 * i + 1), &[7u8; 8])
+                                .unwrap();
                             expected.insert(2 * i + 1);
                         }
                     }
@@ -91,7 +118,8 @@ fn btree_io_fail_probe() {
                     bpm.set_fail_miss_after(n);
                     let res = catch_unwind(AssertUnwindSafe(|| {
                         if op == "insert" {
-                            tree.insert_logged(1, &mut prev, &key(kk), &[7u8; 8]).map(|_| true)
+                            tree.insert_logged(1, &mut prev, &key(kk), &[7u8; 8])
+                                .map(|_| true)
                         } else {
                             tree.delete_logged(1, &mut prev, &key(kk))
                         }
@@ -124,11 +152,15 @@ fn btree_io_fail_probe() {
                             let t = tree.get(&key(kk));
                             let tgt = (op == "insert" && matches!(t, Ok(Some(_))))
                                 || (op == "delete" && matches!(t, Ok(None)));
-                            let bad = coll > 0 || geterr > 0 || scan_err || tgt || prev != prev_before;
+                            let bad =
+                                coll > 0 || geterr > 0 || scan_err || tgt || prev != prev_before;
                             if bad {
                                 total_bad += 1;
                             }
-                            let s = trace.as_deref().map(sig).unwrap_or_else(|| "NO_TRACE".to_string());
+                            let s = trace
+                                .as_deref()
+                                .map(sig)
+                                .unwrap_or_else(|| "NO_TRACE".to_string());
                             let e = table.entry(s).or_insert((0, 0));
                             e.0 += 1;
                             if bad {

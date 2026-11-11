@@ -1,3 +1,9 @@
+#![allow(
+    clippy::ptr_arg,
+    clippy::collapsible_if,
+    clippy::type_complexity,
+    unused_imports
+)]
 use mitrdb_server::Server;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -26,21 +32,37 @@ fn summarize(label: &str, mut lat: Vec<Duration>, total: Duration) {
 #[test]
 #[ignore]
 fn probe_update_idx() {
-    let n: i64 = std::env::var("MITRDB_N").ok().and_then(|v| v.parse().ok()).unwrap_or(2000);
-    let ops: i64 = std::env::var("MITRDB_OPS").ok().and_then(|v| v.parse().ok()).unwrap_or(200).min(n).min(1000);
-    let base = std::env::var("MITRDB_DIR").map(PathBuf::from).unwrap_or_else(|_| std::env::temp_dir());
+    let n: i64 = std::env::var("MITRDB_N")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(2000);
+    let ops: i64 = std::env::var("MITRDB_OPS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(200)
+        .min(n)
+        .min(1000);
+    let base = std::env::var("MITRDB_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| std::env::temp_dir());
     let d = base.join(format!("updidx_{}_{}", std::process::id(), n));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
-    let s = Server::open(d.join("t.db"), d.join("t.wal"), 4096).unwrap().0;
-    s.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, g INT, name TEXT)").unwrap();
+    let s = Server::open(d.join("t.db"), d.join("t.wal"), 4096)
+        .unwrap()
+        .0;
+    s.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, g INT, name TEXT)")
+        .unwrap();
     s.execute_sql("CREATE INDEX idx_g ON t(g)").unwrap();
 
     let mut i = 0i64;
     while i < n {
         let end = (i + 500).min(n);
-        let vals: Vec<String> = (i..end).map(|k| format!("({k},{},'user_{k}')", k % 1000)).collect();
-        s.execute_sql(&format!("INSERT INTO t VALUES {}", vals.join(","))).unwrap();
+        let vals: Vec<String> = (i..end)
+            .map(|k| format!("({k},{},'user_{k}')", k % 1000))
+            .collect();
+        s.execute_sql(&format!("INSERT INTO t VALUES {}", vals.join(",")))
+            .unwrap();
         i = end;
     }
 
@@ -49,7 +71,8 @@ fn probe_update_idx() {
     let t_all = Instant::now();
     for j in 0..ops {
         let t = Instant::now();
-        s.execute_sql(&format!("SELECT COUNT(*) FROM t WHERE g = {j}")).unwrap();
+        s.execute_sql(&format!("SELECT COUNT(*) FROM t WHERE g = {j}"))
+            .unwrap();
         lat.push(t.elapsed());
     }
     summarize(&format!("select_idx N={n}"), lat, t_all.elapsed());
@@ -61,7 +84,9 @@ fn probe_update_idx() {
     for j in 0..ops {
         let k = (j * step) % n;
         let t = Instant::now();
-        let r = s.execute_sql(&format!("UPDATE t SET name = 'x' WHERE id = {k}")).unwrap();
+        let r = s
+            .execute_sql(&format!("UPDATE t SET name = 'x' WHERE id = {k}"))
+            .unwrap();
         lat.push(t.elapsed());
         assert_eq!(format!("{r:?}"), "Affected(1)", "pk k={k}");
     }
@@ -73,7 +98,9 @@ fn probe_update_idx() {
     for j in 0..ops {
         let exp = (n - j + 999) / 1000;
         let t = Instant::now();
-        let r = s.execute_sql(&format!("UPDATE t SET name = 'y' WHERE g = {j}")).unwrap();
+        let r = s
+            .execute_sql(&format!("UPDATE t SET name = 'y' WHERE g = {j}"))
+            .unwrap();
         lat.push(t.elapsed());
         assert_eq!(format!("{r:?}"), format!("Affected({exp})"), "idx j={j}");
     }

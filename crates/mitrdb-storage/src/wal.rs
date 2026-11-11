@@ -414,9 +414,9 @@ fn write_and_sync_uring(
     unsafe {
         let mut sq = ring.submission();
         sq.push(&write_op)
-            .map_err(|_| std::io::Error::new(std::io::ErrorKind::Other, "SQ full on write"))?;
+            .map_err(|_| std::io::Error::other("SQ full on write"))?;
         sq.push(&fsync_op)
-            .map_err(|_| std::io::Error::new(std::io::ErrorKind::Other, "SQ full on fsync"))?;
+            .map_err(|_| std::io::Error::other("SQ full on fsync"))?;
     }
 
     ring.submit_and_wait(2)?;
@@ -632,7 +632,8 @@ impl WalManager {
             .checkpoint_meta
             .map(|m| m.checkpoint_lsn)
             .unwrap_or(0);
-        mgr.ckpt_full_image_threshold.store(startup_ckpt, std::sync::atomic::Ordering::Relaxed);
+        mgr.ckpt_full_image_threshold
+            .store(startup_ckpt, std::sync::atomic::Ordering::Relaxed);
         Ok(mgr)
     }
 
@@ -676,7 +677,10 @@ impl WalManager {
     /// True if the next logged write to a page with this LSN must carry a full-page image
     /// (first write since the last checkpoint). Hot path: one relaxed atomic load.
     pub fn needs_full_page_image(&self, page_lsn: Lsn) -> bool {
-        page_lsn <= self.ckpt_full_image_threshold.load(std::sync::atomic::Ordering::Relaxed)
+        page_lsn
+            <= self
+                .ckpt_full_image_threshold
+                .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     pub fn register_bpm(&self, bpm: &std::sync::Arc<crate::buffer_pool::BufferPoolManager>) {
@@ -871,7 +875,8 @@ impl WalManager {
                 inner.next_lsn = 1;
                 inner.flushed_lsn = 0;
                 inner.checkpoint_meta = None;
-                self.ckpt_full_image_threshold.store(0, std::sync::atomic::Ordering::Relaxed);
+                self.ckpt_full_image_threshold
+                    .store(0, std::sync::atomic::Ordering::Relaxed);
                 inner.txn_trackers.clear();
                 inner.max_user_txn_id = 0;
                 inner.max_sys_txn_id = 0;
@@ -1361,7 +1366,9 @@ impl WalManager {
             match io_result {
                 Ok(()) => {
                     for (seg_id, nbytes) in batch.bytes_by_seg {
-                        if let Some(seg) = inner.segments.iter_mut().find(|s| s.segment_id == seg_id) {
+                        if let Some(seg) =
+                            inner.segments.iter_mut().find(|s| s.segment_id == seg_id)
+                        {
                             seg.flushed_bytes = seg.flushed_bytes.saturating_add(nbytes);
                         }
                     }
@@ -1380,7 +1387,8 @@ impl WalManager {
                     self.flush_cv.notify_all();
                 }
                 Err(e) => {
-                    let drained_bytes: u64 = batch.drained_records.iter().map(|p| p.len as u64).sum();
+                    let drained_bytes: u64 =
+                        batch.drained_records.iter().map(|p| p.len as u64).sum();
                     inner.pending_base = inner.pending_base.saturating_sub(drained_bytes);
 
                     let current_records = std::mem::take(&mut inner.pending);
@@ -1599,11 +1607,9 @@ impl WalManager {
             let mut max_lsn_in_seg = inner.flushed_lsn;
             for item in &inner.pending {
                 if item.lsn <= target_lsn && item.segment_id == seg_id {
-                    bytes_in_seg = bytes_in_seg
-                        .checked_add(item.len as u64)
-                        .ok_or_else(|| {
-                            Error::WalCorrupted("Segment byte count overflow".to_string())
-                        })?;
+                    bytes_in_seg = bytes_in_seg.checked_add(item.len as u64).ok_or_else(|| {
+                        Error::WalCorrupted("Segment byte count overflow".to_string())
+                    })?;
                     max_lsn_in_seg = item.lsn;
                     count_in_seg += 1;
                 } else {
@@ -2131,8 +2137,16 @@ mod tests {
         let wal = WalManager::open_or_create(dir.join("t.wal")).unwrap();
         let target = 18 * 1024 * 1024;
         while wal.pending_bytes_len() < target {
-            wal.append_record(LogRecord::new_update(0, 1, 0, 1, 0, vec![7u8; 1000], Vec::new()))
-                .unwrap();
+            wal.append_record(LogRecord::new_update(
+                0,
+                1,
+                0,
+                1,
+                0,
+                vec![7u8; 1000],
+                Vec::new(),
+            ))
+            .unwrap();
         }
         let cap_before = wal.inner.lock().unwrap().pending_bytes.capacity();
         wal.flush_all().unwrap();
@@ -2334,8 +2348,7 @@ mod tests {
         use std::sync::Arc;
         use std::thread;
 
-        let temp_dir =
-            std::env::temp_dir().join(format!("mitrdb_wal_race_{}", std::process::id()));
+        let temp_dir = std::env::temp_dir().join(format!("mitrdb_wal_race_{}", std::process::id()));
         let wal_path = temp_dir.join("test.wal");
         let _ = std::fs::remove_dir_all(&temp_dir);
 

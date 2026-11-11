@@ -1,3 +1,9 @@
+#![allow(
+    clippy::ptr_arg,
+    clippy::collapsible_if,
+    clippy::type_complexity,
+    unused_imports
+)]
 //! Reproducer: scans must never return values written by aborted transactions.
 //!
 //! Writers insert brand-new "ghost" keys and ALWAYS abort (never commit), so no

@@ -11,13 +11,36 @@ use mitrdb_storage::wal::WalManager;
 use mitrdb_txn::TxnManager;
 
 const NAMES: [&str; 30] = [
-    "ParsePlan", "PlanExecution", "InsertExecution", "TxnPut", "TxnCommit", "WalAppend",
-    "WalFlush", "LockAcquire", "MvccMutexWait", "TxnMutexWait", "BtreeMutation",
-    "VersionChainMutation", "BtreeTraversal", "BtreePageWrite", "BtreeLeafSplit",
-    "BtreeInternalSplit", "BufferPoolFetch", "BufferPoolDiskRead", "SplitMidSelection",
-    "SplitPageAllocation", "SplitRedistribution", "SplitParentUpdate", "LockMutexWait",
-    "LockTableScan", "LockBookkeeping", "LockConditionWait", "BufferPoolNewPage",
-    "BufferPoolVictimSelect", "BufferPoolDiskAllocate", "BufferPoolUnpin",
+    "ParsePlan",
+    "PlanExecution",
+    "InsertExecution",
+    "TxnPut",
+    "TxnCommit",
+    "WalAppend",
+    "WalFlush",
+    "LockAcquire",
+    "MvccMutexWait",
+    "TxnMutexWait",
+    "BtreeMutation",
+    "VersionChainMutation",
+    "BtreeTraversal",
+    "BtreePageWrite",
+    "BtreeLeafSplit",
+    "BtreeInternalSplit",
+    "BufferPoolFetch",
+    "BufferPoolDiskRead",
+    "SplitMidSelection",
+    "SplitPageAllocation",
+    "SplitRedistribution",
+    "SplitParentUpdate",
+    "LockMutexWait",
+    "LockTableScan",
+    "LockBookkeeping",
+    "LockConditionWait",
+    "BufferPoolNewPage",
+    "BufferPoolVictimSelect",
+    "BufferPoolDiskAllocate",
+    "BufferPoolUnpin",
 ];
 
 fn main() -> Result<(), String> {
@@ -32,10 +55,16 @@ fn main() -> Result<(), String> {
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     let t: usize = a[1].parse().map_err(|e| format!("threads: {e}"))?;
     let k: usize = a[2].parse().map_err(|e| format!("puts: {e}"))?;
-    let disk = Arc::new(DiskManager::open_or_create(dir.join("t.db").as_path()).map_err(|e| format!("{e:?}"))?);
+    let disk = Arc::new(
+        DiskManager::open_or_create(dir.join("t.db").as_path()).map_err(|e| format!("{e:?}"))?,
+    );
     let bpm = Arc::new(BufferPoolManager::new(disk.clone(), 4096));
-    let wal = Arc::new(WalManager::open_or_create(dir.join("t.wal").as_path()).map_err(|e| format!("{e:?}"))?);
-    let tree = Arc::new(BPlusTree::create(bpm.clone(), Some(wal.clone()), 64).map_err(|e| format!("{e:?}"))?);
+    let wal = Arc::new(
+        WalManager::open_or_create(dir.join("t.wal").as_path()).map_err(|e| format!("{e:?}"))?,
+    );
+    let tree = Arc::new(
+        BPlusTree::create(bpm.clone(), Some(wal.clone()), 64).map_err(|e| format!("{e:?}"))?,
+    );
     let mgr = Arc::new(TxnManager::with_storage(wal.clone(), bpm.clone()));
     let mut tids = Vec::new();
     for _ in 0..t {
@@ -46,11 +75,14 @@ fn main() -> Result<(), String> {
     for (ti, &tid) in tids.iter().enumerate() {
         let (mgr, tree, barrier) = (mgr.clone(), tree.clone(), barrier.clone());
         handles.push(std::thread::spawn(move || -> Result<(), String> {
-            let keys: Vec<Vec<u8>> = (0..k).map(|i| format!("t{ti:02}k{i:08}").into_bytes()).collect();
+            let keys: Vec<Vec<u8>> = (0..k)
+                .map(|i| format!("t{ti:02}k{i:08}").into_bytes())
+                .collect();
             let val = [7u8; 16];
             barrier.wait();
             for key in &keys {
-                mgr.put(tid, &tree, key, &val).map_err(|e| format!("put: {e:?}"))?;
+                mgr.put(tid, &tree, key, &val)
+                    .map_err(|e| format!("put: {e:?}"))?;
             }
             Ok(())
         }));

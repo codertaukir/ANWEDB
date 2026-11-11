@@ -1,3 +1,9 @@
+#![allow(
+    clippy::ptr_arg,
+    clippy::collapsible_if,
+    clippy::type_complexity,
+    unused_imports
+)]
 // commit(): transient WAL flush failure is retried; persistent failure still poisons.
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -17,7 +23,14 @@ fn tmp(tag: &str) -> PathBuf {
     d
 }
 
-fn open(dir: &Path) -> (Arc<WalManager>, Arc<BufferPoolManager>, Arc<BPlusTree>, TxnManager) {
+fn open(
+    dir: &Path,
+) -> (
+    Arc<WalManager>,
+    Arc<BufferPoolManager>,
+    Arc<BPlusTree>,
+    TxnManager,
+) {
     let disk = Arc::new(DiskManager::open_or_create(dir.join("t.db").as_path()).unwrap());
     let bpm = Arc::new(BufferPoolManager::new(disk.clone(), 32));
     let wal = Arc::new(WalManager::open_or_create(dir.join("t.wal").as_path()).unwrap());
@@ -29,7 +42,11 @@ fn open(dir: &Path) -> (Arc<WalManager>, Arc<BufferPoolManager>, Arc<BPlusTree>,
 
 fn block_wal(wal_path: &Path) {
     if wal_path.is_file() {
-        assert_eq!(std::fs::metadata(wal_path).unwrap().len(), 0, "wal already has data");
+        assert_eq!(
+            std::fs::metadata(wal_path).unwrap().len(),
+            0,
+            "wal already has data"
+        );
         std::fs::remove_file(wal_path).unwrap();
     }
     std::fs::create_dir(wal_path).unwrap();
@@ -65,9 +82,14 @@ fn transient_flush_failure_is_retried_and_commit_succeeds() {
         let disk = Arc::new(DiskManager::open_or_create(dir.join("t.db").as_path()).unwrap());
         let wal = Arc::new(WalManager::open_or_create(wal_path.as_path()).unwrap());
         let bpm = Arc::new(BufferPoolManager::new(disk.clone(), 32));
-        RecoveryManager::new(wal.clone(), bpm.clone()).recover().unwrap();
+        RecoveryManager::new(wal.clone(), bpm.clone())
+            .recover()
+            .unwrap();
         let tree = BPlusTree::open(bpm.clone(), Some(wal.clone()), root_id, 4).unwrap();
-        assert!(tree.get(b"key_a").unwrap().is_some(), "committed key lost after recovery");
+        assert!(
+            tree.get(b"key_a").unwrap().is_some(),
+            "committed key lost after recovery"
+        );
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -83,7 +105,10 @@ fn persistent_flush_failure_poisons_and_abort_is_rejected() {
         mgr.put(a, &tree, b"key_a", b"val_a").unwrap();
         assert!(mgr.commit(a).is_err());
         assert!(mgr.is_commit_poisoned(a));
-        assert!(mgr.abort(a).is_err(), "abort of a poisoned commit must be rejected");
+        assert!(
+            mgr.abort(a).is_err(),
+            "abort of a poisoned commit must be rejected"
+        );
     }
     let _ = std::fs::remove_dir_all(&dir);
 }

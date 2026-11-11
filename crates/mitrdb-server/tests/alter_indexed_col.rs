@@ -1,3 +1,9 @@
+#![allow(
+    clippy::ptr_arg,
+    clippy::collapsible_if,
+    clippy::type_complexity,
+    unused_imports
+)]
 use mitrdb_exec::ExecutionResult;
 use mitrdb_server::{Server, Value};
 use std::path::PathBuf;
@@ -18,12 +24,17 @@ fn done(dir: PathBuf, srv: Server) {
 #[test]
 fn test_alter_column_type_on_indexed_column() {
     let (dir, srv) = open("alter_idx");
-    srv.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, val TEXT)").unwrap();
-    srv.execute_sql("INSERT INTO t VALUES (1, '100'), (2, '200'), (3, '300')").unwrap();
+    srv.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, val TEXT)")
+        .unwrap();
+    srv.execute_sql("INSERT INTO t VALUES (1, '100'), (2, '200'), (3, '300')")
+        .unwrap();
     srv.execute_sql("CREATE INDEX idx_val ON t (val)").unwrap();
 
     let res = srv.execute_sql("ALTER TABLE t ALTER COLUMN val TYPE INT");
-    assert!(res.is_ok(), "ALTER TABLE with indexed column should succeed");
+    assert!(
+        res.is_ok(),
+        "ALTER TABLE with indexed column should succeed"
+    );
 
     let query_res = srv.execute_sql("SELECT id FROM t WHERE val = 200").unwrap();
     match query_res {
@@ -40,11 +51,14 @@ fn test_alter_column_type_on_indexed_column() {
 #[test]
 fn test_alter_indexed_col_subsequent_inserts_and_scan() {
     let (dir, srv) = open("subseq_ins");
-    srv.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, num TEXT)").unwrap();
-    srv.execute_sql("INSERT INTO t VALUES (1, '10'), (2, '20'), (3, '30')").unwrap();
+    srv.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, num TEXT)")
+        .unwrap();
+    srv.execute_sql("INSERT INTO t VALUES (1, '10'), (2, '20'), (3, '30')")
+        .unwrap();
     srv.execute_sql("CREATE INDEX idx_num ON t (num)").unwrap();
 
-    srv.execute_sql("ALTER TABLE t ALTER COLUMN num TYPE INT").unwrap();
+    srv.execute_sql("ALTER TABLE t ALTER COLUMN num TYPE INT")
+        .unwrap();
 
     // Insert new row using the new integer type
     srv.execute_sql("INSERT INTO t VALUES (4, 40)").unwrap();
@@ -75,13 +89,19 @@ fn test_alter_indexed_col_subsequent_inserts_and_scan() {
 #[test]
 fn test_alter_unique_indexed_col_duplicate_fails() {
     let (dir, srv) = open("unique_fail");
-    srv.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, tag TEXT)").unwrap();
+    srv.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, tag TEXT)")
+        .unwrap();
     // In TEXT, '01' and '1' are distinct, but when cast to INT both become 1
-    srv.execute_sql("INSERT INTO t VALUES (1, '01'), (2, '1')").unwrap();
-    srv.execute_sql("CREATE UNIQUE INDEX idx_tag ON t (tag)").unwrap();
+    srv.execute_sql("INSERT INTO t VALUES (1, '01'), (2, '1')")
+        .unwrap();
+    srv.execute_sql("CREATE UNIQUE INDEX idx_tag ON t (tag)")
+        .unwrap();
 
     let res = srv.execute_sql("ALTER TABLE t ALTER COLUMN tag TYPE INT");
-    assert!(res.is_err(), "Expected unique constraint violation on type cast duplicate keys");
+    assert!(
+        res.is_err(),
+        "Expected unique constraint violation on type cast duplicate keys"
+    );
 
     done(dir, srv);
 }

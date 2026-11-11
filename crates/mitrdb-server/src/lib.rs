@@ -1,3 +1,9 @@
+#![allow(
+    clippy::type_complexity,
+    clippy::collapsible_if,
+    clippy::too_many_arguments,
+    clippy::ptr_arg
+)]
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -131,10 +137,16 @@ impl Server {
         if !report.skipped_undos.is_empty() {
             let trees = catalog.all_table_trees();
             for tree in trees {
-                if let Ok(records) = tree.range_scan_bounds(&mitrdb_storage::btree::KeyRange::full()) {
+                if let Ok(records) =
+                    tree.range_scan_bounds(&mitrdb_storage::btree::KeyRange::full())
+                {
                     for (k, _) in records {
                         for skipped in &report.skipped_undos {
-                            if skipped.redo_data.windows(k.len()).any(|window| window == k.as_slice()) {
+                            if skipped
+                                .redo_data
+                                .windows(k.len())
+                                .any(|window| window == k.as_slice())
+                            {
                                 let mut dummy_lsn = 0;
                                 let _ = tree.delete_logged(skipped.txn_id, &mut dummy_lsn, &k);
                             }
@@ -496,9 +508,7 @@ impl Server {
     pub fn validate_backup<P: AsRef<Path>>(backup_dir: P) -> Result<BackupManifest> {
         BackupManager::validate_backup(backup_dir.as_ref())
     }
-
 }
-
 
 impl Default for Server {
     fn default() -> Self {
@@ -506,11 +516,11 @@ impl Default for Server {
     }
 }
 
-mod perms;
 mod files;
+mod perms;
 pub use files::{FileStore, StoredFile};
 mod table;
-pub use table::{val, Delete, IntoValue, Query, Rows, Table, Update};
+pub use table::{Delete, IntoValue, Query, Rows, Table, Update, val};
 
 mod schema_builder;
 pub use schema_builder::{ColumnBuilder, TableBuilder};

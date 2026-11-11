@@ -68,8 +68,7 @@ impl FileStore {
         fs::create_dir_all(dir.as_ref()).map_err(io_err)?;
         {
             use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(dir.as_ref(), fs::Permissions::from_mode(0o700))
-                .map_err(io_err)?;
+            fs::set_permissions(dir.as_ref(), fs::Permissions::from_mode(0o700)).map_err(io_err)?;
         }
         Ok(Self {
             dir: dir.as_ref().to_path_buf(),

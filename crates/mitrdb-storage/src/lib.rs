@@ -1,3 +1,4 @@
+#![allow(clippy::chunks_exact_to_as_chunks, clippy::collapsible_if)]
 // MITRDB is Linux-only (O_DIRECT/fsync/permission semantics are Linux-specific).
 #[cfg(not(target_os = "linux"))]
 compile_error!("MITRDB supports Linux only. Build on a Linux target.");

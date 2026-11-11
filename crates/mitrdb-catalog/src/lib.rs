@@ -273,7 +273,9 @@ impl Catalog {
             let _ = bpm.unpin_page(0, false);
             if ptype == PAGE_TYPE_BTREE_LEAF || ptype == PAGE_TYPE_BTREE_INTERNAL {
                 let cat_root = Self::resolve_root_page(&bpm, 0);
-                if let Ok(cat_tree) = BPlusTree::open(bpm.clone(), wal.clone(), cat_root, DEFAULT_BTREE_MAX_KEYS) {
+                if let Ok(cat_tree) =
+                    BPlusTree::open(bpm.clone(), wal.clone(), cat_root, DEFAULT_BTREE_MAX_KEYS)
+                {
                     let cat_arc = Arc::new(cat_tree);
                     if let Ok(entries) = cat_arc.range_scan(None, None) {
                         for (k, v) in entries {
@@ -305,9 +307,12 @@ impl Catalog {
                                 }
                                 meta.root_page_id =
                                     Self::resolve_root_page(&bpm, meta.root_page_id);
-                                if let Ok(tree) =
-                                    BPlusTree::open(bpm.clone(), wal.clone(), meta.root_page_id, DEFAULT_BTREE_MAX_KEYS)
-                                {
+                                if let Ok(tree) = BPlusTree::open(
+                                    bpm.clone(),
+                                    wal.clone(),
+                                    meta.root_page_id,
+                                    DEFAULT_BTREE_MAX_KEYS,
+                                ) {
                                     state.index_trees.insert(meta.index_id, Arc::new(tree));
                                 }
                                 state.indexes.insert(meta.index_id, meta);
@@ -331,9 +336,13 @@ impl Catalog {
             } else {
                 INVALID_LSN
             };
-            if let Ok(cat_tree) =
-                BPlusTree::create_logged(bpm.clone(), wal.clone(), DEFAULT_BTREE_MAX_KEYS, sys_tid, &mut prev_lsn)
-                && cat_tree.root_page_id() == 0
+            if let Ok(cat_tree) = BPlusTree::create_logged(
+                bpm.clone(),
+                wal.clone(),
+                DEFAULT_BTREE_MAX_KEYS,
+                sys_tid,
+                &mut prev_lsn,
+            ) && cat_tree.root_page_id() == 0
             {
                 if let Some(ref w) = wal {
                     let _ = w.commit(sys_tid, prev_lsn);
@@ -1051,7 +1060,11 @@ impl Catalog {
         }
         let shadow_name = format!("{}shadow_{}", DROPPED_PREFIX, schema.columns[src_pos].name);
         let mut updated_schema = schema.clone();
-        if let Some(p) = updated_schema.columns.iter().position(|c| c.name == shadow_name) {
+        if let Some(p) = updated_schema
+            .columns
+            .iter()
+            .position(|c| c.name == shadow_name)
+        {
             if updated_schema.columns[p].data_type == new_type {
                 return Ok(Some((src_pos, p)));
             }
@@ -1242,9 +1255,7 @@ impl Catalog {
             }
         }
 
-        if updated_tables.is_empty()
-            && updated_indexes.is_empty()
-        {
+        if updated_tables.is_empty() && updated_indexes.is_empty() {
             return Ok(());
         }
 
@@ -1331,7 +1342,6 @@ impl Catalog {
         let state = self.state.read().unwrap();
         state.index_trees.get(&index_id).cloned()
     }
-
 }
 
 impl Default for Catalog {

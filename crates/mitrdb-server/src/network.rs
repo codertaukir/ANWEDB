@@ -426,15 +426,11 @@ fn serve_stream<S: Read + Write>(
         frame_timeout: Some(config.frame_timeout),
         deadline: None,
     };
-    let hello = match read_frame_with_limits(
-        stream,
-        config.max_frame_bytes,
-        shutdown,
-        handshake_limits,
-    )? {
-        Some(frame) => frame,
-        None => return Ok(()),
-    };
+    let hello =
+        match read_frame_with_limits(stream, config.max_frame_bytes, shutdown, handshake_limits)? {
+            Some(frame) => frame,
+            None => return Ok(()),
+        };
     if hello.as_slice() != PROTOCOL_VERSION.as_bytes() {
         let _ = write_frame(
             stream,
@@ -1120,7 +1116,10 @@ mod tests {
         handle.shutdown().unwrap();
         let _ = std::fs::remove_file(db_path);
         let _ = std::fs::remove_file(wal_path);
-        assert!(closed, "server kept a trickling connection open for {elapsed:?}");
+        assert!(
+            closed,
+            "server kept a trickling connection open for {elapsed:?}"
+        );
         assert!(
             elapsed < Duration::from_secs(3),
             "disconnect took too long: {elapsed:?}"
@@ -1147,7 +1146,10 @@ mod tests {
         handle.shutdown().unwrap();
         let _ = std::fs::remove_file(db_path);
         let _ = std::fs::remove_file(wal_path);
-        assert!(closed, "server kept a silent connection open for {elapsed:?}");
+        assert!(
+            closed,
+            "server kept a silent connection open for {elapsed:?}"
+        );
         assert!(
             elapsed < Duration::from_secs(2),
             "silent connection closed too late: {elapsed:?}"

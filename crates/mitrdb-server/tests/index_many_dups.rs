@@ -1,4 +1,10 @@
-use mitrdb_server::{val, Server};
+#![allow(
+    clippy::ptr_arg,
+    clippy::collapsible_if,
+    clippy::type_complexity,
+    unused_imports
+)]
+use mitrdb_server::{Server, val};
 use std::path::PathBuf;
 
 fn dir(tag: &str) -> PathBuf {
@@ -8,12 +14,16 @@ fn dir(tag: &str) -> PathBuf {
     d
 }
 
-fn open(d: &PathBuf) -> Server {
-    Server::open(d.join("t.db"), d.join("t.wal"), 256).unwrap().0
+fn open(d: &std::path::Path) -> Server {
+    Server::open(d.join("t.db"), d.join("t.wal"), 256)
+        .unwrap()
+        .0
 }
 
 fn rows_in(s: &Server, sql: &str) -> usize {
-    format!("{:?}", s.execute_sql(sql).unwrap()).matches("Int64(").count()
+    format!("{:?}", s.execute_sql(sql).unwrap())
+        .matches("Int64(")
+        .count()
 }
 
 fn check(s: &Server, total: usize, g7: usize, g8: usize) {
@@ -34,7 +44,8 @@ fn thousands_of_rows_per_index_value() {
     {
         let s = open(&d);
         let t = s.table("t");
-        t.sync("id int primary key, g int index, u int unique").unwrap();
+        t.sync("id int primary key, g int index, u int unique")
+            .unwrap();
         s.execute_sql("BEGIN").unwrap();
         for i in 0..N {
             t.insert(&[("id", val(i)), ("g", val(7))]).unwrap(); // u stays NULL (shared unique entry)
@@ -45,7 +56,14 @@ fn thousands_of_rows_per_index_value() {
         assert_eq!(t.delete().filter("id", "<", val(1000)).run().unwrap(), 1000);
         check(&s, 1000, 1000, 0);
 
-        assert_eq!(t.update().set("g", val(8)).filter("id", "<", val(1500)).run().unwrap(), 500);
+        assert_eq!(
+            t.update()
+                .set("g", val(8))
+                .filter("id", "<", val(1500))
+                .run()
+                .unwrap(),
+            500
+        );
         check(&s, 1000, 500, 500);
     }
     let s = open(&d);

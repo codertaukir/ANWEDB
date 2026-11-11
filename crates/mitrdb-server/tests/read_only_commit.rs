@@ -1,4 +1,10 @@
-use mitrdb_server::{val, Server};
+#![allow(
+    clippy::ptr_arg,
+    clippy::collapsible_if,
+    clippy::type_complexity,
+    unused_imports
+)]
+use mitrdb_server::{Server, val};
 use std::path::PathBuf;
 
 fn dir(tag: &str) -> PathBuf {
@@ -8,7 +14,7 @@ fn dir(tag: &str) -> PathBuf {
     d
 }
 
-fn open(d: &PathBuf) -> Server {
+fn open(d: &std::path::Path) -> Server {
     Server::open(d.join("t.db"), d.join("t.wal"), 64).unwrap().0
 }
 
@@ -24,7 +30,9 @@ fn read_only_commits_keep_durability_and_txn_ids_sane() {
     let d = dir("a");
     {
         let s = open(&d);
-        s.table("t").sync("id int primary key, g int index").unwrap();
+        s.table("t")
+            .sync("id int primary key, g int index")
+            .unwrap();
         let t = s.table("t");
         for i in 0..100i64 {
             t.insert(&[("id", val(i)), ("g", val(i % 5))]).unwrap();
@@ -55,5 +63,11 @@ fn read_only_commits_keep_durability_and_txn_ids_sane() {
     let t = s.table("t");
     assert_eq!(t.find().count().unwrap(), 151);
     assert_eq!(t.find().filter("g", "=", val(0)).count().unwrap(), 30);
-    assert!(t.find().filter("id", "=", val(1000)).one().unwrap().is_some());
+    assert!(
+        t.find()
+            .filter("id", "=", val(1000))
+            .one()
+            .unwrap()
+            .is_some()
+    );
 }

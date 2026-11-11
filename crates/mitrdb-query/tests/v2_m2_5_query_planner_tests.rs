@@ -1,3 +1,9 @@
+#![allow(
+    clippy::ptr_arg,
+    clippy::collapsible_if,
+    clippy::type_complexity,
+    unused_imports
+)]
 use std::sync::Arc;
 
 use mitrdb_catalog::{Catalog, ColumnDef, DataType};
@@ -386,19 +392,37 @@ fn test_predicate_pushdown_in_join_planner() {
         .expect("plan should succeed");
 
     match plan {
-        PhysicalPlan::NestedLoopJoin { left, right, filter, .. } => {
+        PhysicalPlan::NestedLoopJoin {
+            left,
+            right,
+            filter,
+            ..
+        } => {
             // Verify left scan received the pushed-down filter
             match *left {
-                PhysicalPlan::SeqScan { filter: Some(_), .. } | PhysicalPlan::IndexScan { .. } => {}
+                PhysicalPlan::SeqScan {
+                    filter: Some(_), ..
+                }
+                | PhysicalPlan::IndexScan { .. } => {}
                 other => panic!("Expected pushed-down filter in left scan, got: {:?}", other),
             }
             // Verify right scan received the pushed-down filter
             match *right {
-                PhysicalPlan::SeqScan { filter: Some(_), .. } | PhysicalPlan::IndexScan { .. } => {}
-                other => panic!("Expected pushed-down filter in right scan, got: {:?}", other),
+                PhysicalPlan::SeqScan {
+                    filter: Some(_), ..
+                }
+                | PhysicalPlan::IndexScan { .. } => {}
+                other => panic!(
+                    "Expected pushed-down filter in right scan, got: {:?}",
+                    other
+                ),
             }
             // Post-join filter should be None because both conjuncts pushed down cleanly
-            assert!(filter.is_none(), "Expected post-join filter to be None, got: {:?}", filter);
+            assert!(
+                filter.is_none(),
+                "Expected post-join filter to be None, got: {:?}",
+                filter
+            );
         }
         other => panic!("Expected NestedLoopJoin physical plan, got: {:?}", other),
     }

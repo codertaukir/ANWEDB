@@ -1,3 +1,9 @@
+#![allow(
+    clippy::ptr_arg,
+    clippy::collapsible_if,
+    clippy::type_complexity,
+    unused_imports
+)]
 use mitrdb_exec::ExecutionResult;
 use mitrdb_query::Value;
 use mitrdb_server::Server;

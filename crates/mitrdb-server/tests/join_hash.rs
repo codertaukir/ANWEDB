@@ -1,3 +1,9 @@
+#![allow(
+    clippy::ptr_arg,
+    clippy::collapsible_if,
+    clippy::type_complexity,
+    unused_imports
+)]
 use mitrdb_server::{ExecutionResult, Server};
 use std::time::Instant;
 
@@ -5,9 +11,13 @@ fn open(tag: &str) -> Server {
     let d = std::env::temp_dir().join(format!("mitrdb_jh_{}_{}", std::process::id(), tag));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
-    let s = Server::open(d.join("t.db"), d.join("t.wal"), 256).unwrap().0;
-    s.execute_sql("CREATE TABLE ja (id INT PRIMARY KEY, k INT)").unwrap();
-    s.execute_sql("CREATE TABLE jb (id INT PRIMARY KEY, k INT)").unwrap();
+    let s = Server::open(d.join("t.db"), d.join("t.wal"), 256)
+        .unwrap()
+        .0;
+    s.execute_sql("CREATE TABLE ja (id INT PRIMARY KEY, k INT)")
+        .unwrap();
+    s.execute_sql("CREATE TABLE jb (id INT PRIMARY KEY, k INT)")
+        .unwrap();
     s
 }
 
@@ -20,7 +30,8 @@ fn fill(s: &Server, table: &str, data: &[(i64, Option<i64>)]) {
                 None => format!("({id},NULL)"),
             })
             .collect();
-        s.execute_sql(&format!("INSERT INTO {table} VALUES {}", vals.join(","))).unwrap();
+        s.execute_sql(&format!("INSERT INTO {table} VALUES {}", vals.join(",")))
+            .unwrap();
     }
 }
 
@@ -34,10 +45,12 @@ fn rows(s: &Server, q: &str) -> usize {
 #[test]
 fn hash_join_matches_naive_reference() {
     let s = open("ref");
-    let a: Vec<(i64, Option<i64>)> =
-        (0..300).map(|i| (i, if i % 10 == 0 { None } else { Some(i % 7) })).collect();
-    let b: Vec<(i64, Option<i64>)> =
-        (0..200).map(|j| (j, if j % 9 == 0 { None } else { Some(j % 5) })).collect();
+    let a: Vec<(i64, Option<i64>)> = (0..300)
+        .map(|i| (i, if i % 10 == 0 { None } else { Some(i % 7) }))
+        .collect();
+    let b: Vec<(i64, Option<i64>)> = (0..200)
+        .map(|j| (j, if j % 9 == 0 { None } else { Some(j % 5) }))
+        .collect();
     fill(&s, "ja", &a);
     fill(&s, "jb", &b);
 
@@ -50,12 +63,21 @@ fn hash_join_matches_naive_reference() {
         if m == 0 {
             unmatched += 1;
         }
-        lt += b.iter().filter(|(_, kb)| matches!((ka, kb), (Some(x), Some(y)) if x < y)).count();
+        lt += b
+            .iter()
+            .filter(|(_, kb)| matches!((ka, kb), (Some(x), Some(y)) if x < y))
+            .count();
     }
     assert!(inner > 0 && unmatched > 0);
     assert_eq!(rows(&s, "SELECT * FROM ja JOIN jb ON ja.k = jb.k"), inner);
-    assert_eq!(rows(&s, "SELECT * FROM ja INNER JOIN jb ON ja.k = jb.k"), inner);
-    assert_eq!(rows(&s, "SELECT * FROM ja LEFT JOIN jb ON ja.k = jb.k"), inner + unmatched);
+    assert_eq!(
+        rows(&s, "SELECT * FROM ja INNER JOIN jb ON ja.k = jb.k"),
+        inner
+    );
+    assert_eq!(
+        rows(&s, "SELECT * FROM ja LEFT JOIN jb ON ja.k = jb.k"),
+        inner + unmatched
+    );
     // non-Eq join: purana nested loop path
     assert_eq!(rows(&s, "SELECT * FROM ja JOIN jb ON ja.k < jb.k"), lt);
 }
@@ -65,12 +87,14 @@ fn join_order_by_column_must_be_selected() {
     let s = open("ob");
     fill(&s, "ja", &[(1, Some(1)), (2, Some(2))]);
     fill(&s, "jb", &[(1, Some(1)), (2, Some(2))]);
-    assert!(s
-        .execute_sql("SELECT ja.id FROM ja JOIN jb ON ja.k = jb.k ORDER BY jb.id")
-        .is_err());
-    assert!(s
-        .execute_sql("SELECT ja.id, jb.id FROM ja JOIN jb ON ja.k = jb.k ORDER BY jb.id")
-        .is_ok());
+    assert!(
+        s.execute_sql("SELECT ja.id FROM ja JOIN jb ON ja.k = jb.k ORDER BY jb.id")
+            .is_err()
+    );
+    assert!(
+        s.execute_sql("SELECT ja.id, jb.id FROM ja JOIN jb ON ja.k = jb.k ORDER BY jb.id")
+            .is_ok()
+    );
 }
 
 #[test]

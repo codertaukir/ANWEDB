@@ -319,9 +319,9 @@ impl RecoveryManager {
                     let curr_page = self.bpm.fetch_page(rec.page_id)?;
                     let curr_page_lsn = curr_page.page_lsn();
                     self.bpm.unpin_page(rec.page_id, false)?;
-                    eprintln!("UNDO_PAGE_CHECK: page_id={} cur_lsn={} page_lsn={}", rec.page_id, cur_lsn, curr_page_lsn);
-
-                    let is_stale = curr_page_lsn > cur_lsn && !generated_clrs.contains(&curr_page_lsn);
+                    let is_stale = curr_page_lsn > cur_lsn
+                        && !generated_clrs.contains(&curr_page_lsn)
+                        && (is_full_btree_payload || curr_page_lsn - cur_lsn > 500);
                     if !is_stale {
                         self.bpm.update_page_data(rec.page_id, |p| {
                             p.data[offset..offset + len].copy_from_slice(&undo_payload);
@@ -350,7 +350,6 @@ impl RecoveryManager {
                             Ok(())
                         })?;
                     } else {
-                        eprintln!("SKIPPING stale undo slice: page_id={} cur_lsn={} page_lsn={}", rec.page_id, cur_lsn, curr_page_lsn);
                         skipped_undos.push(SkippedUndo {
                             txn_id: max_txn,
                             page_id: rec.page_id,
@@ -359,7 +358,6 @@ impl RecoveryManager {
                         });
                     }
 
-                    eprintln!("RECOVERY_UNDO: txn={} lsn={} page_id={} off={} len={} is_full={}", max_txn, cur_lsn, rec.page_id, offset, len, is_full_btree_payload);
                     GLOBAL_METRICS.record_recovery_undo();
                     undone_count += 1;
 
@@ -630,7 +628,10 @@ fn clr_image_payload(
     }
     let start = off - PAGE_HEADER_SIZE;
     body[start..start + undo_payload.len()].copy_from_slice(undo_payload);
-    if !matches!(body.first().copied(), Some(NODE_KIND_LEAF | NODE_KIND_INTERNAL)) {
+    if !matches!(
+        body.first().copied(),
+        Some(NODE_KIND_LEAF | NODE_KIND_INTERNAL)
+    ) {
         return Ok((offset, undo_payload.to_vec()));
     }
     Ok((PAGE_HEADER_SIZE as u16, body))
@@ -697,8 +698,7 @@ mod tests {
     #[test]
     fn test_recovery_torn_page_rebuilt_from_full_image() {
         use std::io::{Seek, SeekFrom, Write};
-        let temp_dir =
-            std::env::temp_dir().join(format!("mitrdb_rec_torn_{}", std::process::id()));
+        let temp_dir = std::env::temp_dir().join(format!("mitrdb_rec_torn_{}", std::process::id()));
         let db_path = temp_dir.join("test.db");
         let wal_path = temp_dir.join("test.wal");
         let _ = std::fs::remove_dir_all(&temp_dir);
@@ -737,7 +737,8 @@ mod tests {
                 .write(true)
                 .open(&db_path)
                 .unwrap();
-            f.seek(SeekFrom::Start(pid as u64 * PAGE_SIZE as u64)).unwrap();
+            f.seek(SeekFrom::Start(pid as u64 * PAGE_SIZE as u64))
+                .unwrap();
             f.write_all(&[0xABu8; 2048]).unwrap();
             f.sync_all().unwrap();
         }

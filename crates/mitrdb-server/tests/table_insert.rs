@@ -1,4 +1,10 @@
-use mitrdb_server::{val, ExecutionResult, Server, Value};
+#![allow(
+    clippy::ptr_arg,
+    clippy::collapsible_if,
+    clippy::type_complexity,
+    unused_imports
+)]
+use mitrdb_server::{ExecutionResult, Server, Value, val};
 
 #[test]
 fn insert_any_order_nulls_and_errors() {
@@ -8,10 +14,15 @@ fn insert_any_order_nulls_and_errors() {
     let (server, _) = Server::open(dir.join("t.db"), dir.join("t.wal"), 64).unwrap();
 
     let t = server.table("users");
-    t.sync("id int primary key, name text not null, age int").unwrap();
+    t.sync("id int primary key, name text not null, age int")
+        .unwrap();
 
     // columns in different order, age missing -> NULL
-    assert_eq!(t.insert(&[("name", val("Taukir")), ("id", val(1))]).unwrap(), 1);
+    assert_eq!(
+        t.insert(&[("name", val("Taukir")), ("id", val(1))])
+            .unwrap(),
+        1
+    );
 
     match server.execute_sql("SELECT * FROM users").unwrap() {
         ExecutionResult::Rows { rows, .. } => {
@@ -30,9 +41,16 @@ fn insert_any_order_nulls_and_errors() {
     // wrong type
     assert!(t.insert(&[("id", val("two")), ("name", val("X"))]).is_err());
     // unknown column
-    assert!(t.insert(&[("id", val(3)), ("name", val("X")), ("city", val("Y"))]).is_err());
+    assert!(
+        t.insert(&[("id", val(3)), ("name", val("X")), ("city", val("Y"))])
+            .is_err()
+    );
     // value with a quote works (no SQL string involved)
-    assert_eq!(t.insert(&[("id", val(4)), ("name", val("O'Brien"))]).unwrap(), 1);
+    assert_eq!(
+        t.insert(&[("id", val(4)), ("name", val("O'Brien"))])
+            .unwrap(),
+        1
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }

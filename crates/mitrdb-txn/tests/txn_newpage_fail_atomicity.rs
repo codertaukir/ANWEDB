@@ -1,3 +1,9 @@
+#![allow(
+    clippy::ptr_arg,
+    clippy::collapsible_if,
+    clippy::type_complexity,
+    unused_imports
+)]
 // Regression (txn level): new_page failing mid-split inside TxnManager::put must not corrupt
 // the tree, so rollback_to_mark / abort / commit all leave exactly the expected keys.
 // Engine undo is key-level only; without btree-level atomicity keys vanish silently.
@@ -33,7 +39,12 @@ fn setup(tag: &str) -> Env {
     let tree = Arc::new(BPlusTree::create(bpm.clone(), Some(wal.clone()), 4).unwrap());
     bpm.flush_all().unwrap();
     let mgr = TxnManager::with_storage(wal, bpm);
-    Env { dir, disk, tree, mgr }
+    Env {
+        dir,
+        disk,
+        tree,
+        mgr,
+    }
 }
 
 // Raw tree view (not MVCC) so physical loss is visible.
@@ -45,12 +56,19 @@ fn check(tree: &BPlusTree, expected: &HashSet<u64>, ctx: &str) {
         );
     }
     let all = tree.range_scan_bounds(&KeyRange::full()).unwrap();
-    assert_eq!(all.len(), expected.len(), "{ctx}: scan count (phantom or lost)");
+    assert_eq!(
+        all.len(),
+        expected.len(),
+        "{ctx}: scan count (phantom or lost)"
+    );
     for (k, _) in &all {
         let mut a = [0u8; 8];
         assert_eq!(k.len(), 8, "{ctx}: bad key len");
         a.copy_from_slice(k);
-        assert!(expected.contains(&u64::from_be_bytes(a)), "{ctx}: phantom key");
+        assert!(
+            expected.contains(&u64::from_be_bytes(a)),
+            "{ctx}: phantom key"
+        );
     }
     assert!(all.windows(2).all(|w| w[0].0 < w[1].0), "{ctx}: scan order");
 }
@@ -98,10 +116,14 @@ fn newpage_failure_in_put_then_rollback_or_abort_keeps_tree_consistent() {
                 }
                 let ctx = format!("{variant} k={k} pre={pre} end");
                 if variant == "abort" {
-                    env.mgr.abort(t).unwrap_or_else(|e| panic!("{ctx}: abort: {e}"));
+                    env.mgr
+                        .abort(t)
+                        .unwrap_or_else(|e| panic!("{ctx}: abort: {e}"));
                     check(&env.tree, &base, &ctx);
                 } else {
-                    env.mgr.commit(t).unwrap_or_else(|e| panic!("{ctx}: commit: {e}"));
+                    env.mgr
+                        .commit(t)
+                        .unwrap_or_else(|e| panic!("{ctx}: commit: {e}"));
                     check(&env.tree, &expected, &ctx);
                 }
                 let dir = env.dir.clone();

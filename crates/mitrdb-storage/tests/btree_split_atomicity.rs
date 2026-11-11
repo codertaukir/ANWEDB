@@ -1,3 +1,9 @@
+#![allow(
+    clippy::ptr_arg,
+    clippy::collapsible_if,
+    clippy::type_complexity,
+    unused_imports
+)]
 // Regression: split_leaf ko old_next leaf ka read fail hone par tree/WAL ko chhuna nahi chahiye.
 use std::io::{Seek, SeekFrom, Write};
 use std::sync::Arc;
@@ -28,13 +34,15 @@ fn split_leaf_old_next_read_failure_leaves_tree_and_wal_untouched() {
         let bpm = Arc::new(BufferPoolManager::new(disk.clone(), 64));
         let wal = Arc::new(WalManager::open_or_create(wal_path.as_path()).unwrap());
         let mut prev = wal.append_record(LogRecord::new_begin(0, 1)).unwrap();
-        let tree =
-            BPlusTree::create_logged(bpm.clone(), Some(wal.clone()), max_keys, 1, &mut prev)
-                .unwrap();
+        let tree = BPlusTree::create_logged(bpm.clone(), Some(wal.clone()), max_keys, 1, &mut prev)
+            .unwrap();
         for i in 0..20u64 {
-            tree.insert_logged(1, &mut prev, &key(2 * i), &[7u8; 8]).unwrap();
+            tree.insert_logged(1, &mut prev, &key(2 * i), &[7u8; 8])
+                .unwrap();
         }
-        let c = wal.append_record(LogRecord::new_commit(0, 1, prev)).unwrap();
+        let c = wal
+            .append_record(LogRecord::new_commit(0, 1, prev))
+            .unwrap();
         wal.flush_up_to(c).unwrap();
         root_id = tree.root_page_id();
         let root = tree.read_node(root_id).unwrap();
@@ -45,7 +53,10 @@ fn split_leaf_old_next_read_failure_leaves_tree_and_wal_untouched() {
     }
 
     {
-        let mut f = std::fs::OpenOptions::new().write(true).open(&db_path).unwrap();
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&db_path)
+            .unwrap();
         f.seek(SeekFrom::Start(l2_id as u64 * 4096)).unwrap();
         f.write_all(&[0xFF; 4]).unwrap();
         f.sync_all().unwrap();
@@ -63,7 +74,11 @@ fn split_leaf_old_next_read_failure_leaves_tree_and_wal_untouched() {
     let res = tree.insert_logged(2, &mut prev, &key(9), &[9u8; 8]);
     assert!(res.is_err(), "insert should fail on corrupt next leaf");
     assert_eq!(prev, prev_before, "failed split must not advance prev_lsn");
-    assert_eq!(wal.next_lsn(), next_before, "failed split must not append WAL records");
+    assert_eq!(
+        wal.next_lsn(),
+        next_before,
+        "failed split must not append WAL records"
+    );
 
     for i in 0..20u64 {
         // L2 ke keys corrupt page mein hain; unhe skip karo (sirf L2 ke keys 16..22 range ke)
@@ -77,8 +92,14 @@ fn split_leaf_old_next_read_failure_leaves_tree_and_wal_untouched() {
             k
         );
     }
-    assert!(tree.get(&key(9)).unwrap().is_none(), "failed insert must not be visible");
+    assert!(
+        tree.get(&key(9)).unwrap().is_none(),
+        "failed insert must not be visible"
+    );
     let root = tree.read_node(tree.root_page_id()).unwrap();
-    assert_eq!(root.children, children_before, "tree structure must be unchanged");
+    assert_eq!(
+        root.children, children_before,
+        "tree structure must be unchanged"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }

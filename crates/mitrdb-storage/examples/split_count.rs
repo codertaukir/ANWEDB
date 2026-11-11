@@ -41,15 +41,21 @@ fn main() {
     let wal = Arc::new(WalManager::open_or_create(dir.join("t.wal").as_path()).unwrap());
     let mut prev = wal.append_record(LogRecord::new_begin(0, 1)).unwrap();
     let tree = BPlusTree::create_logged(bpm, Some(wal), 64, 1, &mut prev).unwrap();
-    let keys: Vec<u64> = (0..n).map(|i| if mode == "rand" { (i * 7919) % n } else { i }).collect();
+    let keys: Vec<u64> = (0..n)
+        .map(|i| if mode == "rand" { (i * 7919) % n } else { i })
+        .collect();
     let (a0, b0) = (ALLOCS.load(Relaxed), BYTES.load(Relaxed));
     for k in &keys {
-        tree.insert_logged(1, &mut prev, &k.to_be_bytes(), &[7u8; 8]).unwrap();
+        tree.insert_logged(1, &mut prev, &k.to_be_bytes(), &[7u8; 8])
+            .unwrap();
     }
     let (a1, b1) = (ALLOCS.load(Relaxed), BYTES.load(Relaxed));
     println!(
         "ALLOCCOUNT mode={mode} allocs={} bytes={} pages={} root={}",
-        a1 - a0, b1 - b0, disk.num_pages(), tree.root_page_id()
+        a1 - a0,
+        b1 - b0,
+        disk.num_pages(),
+        tree.root_page_id()
     );
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -15,7 +15,9 @@ const BATCHES: u64 = 2000;
 fn main() -> Result<(), String> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.len() != 3 {
-        return Err("Usage: write_mark_contended <fresh-db-path> <fresh-wal-path> <threads>".into());
+        return Err(
+            "Usage: write_mark_contended <fresh-db-path> <fresh-wal-path> <threads>".into(),
+        );
     }
     if Path::new(&args[0]).exists() || Path::new(&args[1]).exists() {
         return Err("Refusing to use an existing DB/WAL path".into());
@@ -34,14 +36,20 @@ fn main() -> Result<(), String> {
         let barrier = barrier.clone();
         handles.push(std::thread::spawn(move || -> Result<Vec<f64>, String> {
             for _ in 0..WARM_BATCHES * B {
-                black_box(tm.write_mark(black_box(tid)).map_err(|e| format!("mark: {e:?}"))?);
+                black_box(
+                    tm.write_mark(black_box(tid))
+                        .map_err(|e| format!("mark: {e:?}"))?,
+                );
             }
             barrier.wait();
             let mut per_call = Vec::with_capacity(BATCHES as usize);
             for _ in 0..BATCHES {
                 let s = Instant::now();
                 for _ in 0..B {
-                    black_box(tm.write_mark(black_box(tid)).map_err(|e| format!("mark: {e:?}"))?);
+                    black_box(
+                        tm.write_mark(black_box(tid))
+                            .map_err(|e| format!("mark: {e:?}"))?,
+                    );
                 }
                 per_call.push(s.elapsed().as_nanos() as f64 / B as f64);
             }

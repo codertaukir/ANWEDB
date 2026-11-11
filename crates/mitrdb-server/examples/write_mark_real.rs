@@ -15,7 +15,9 @@ use mitrdb_txn::TxnManager;
 fn main() -> Result<(), String> {
     let a: Vec<String> = std::env::args().skip(1).collect();
     if a.len() != 4 {
-        return Err("Usage: write_mark_real <fresh-dir> <threads> <mark|nomark> <puts-per-thread>".into());
+        return Err(
+            "Usage: write_mark_real <fresh-dir> <threads> <mark|nomark> <puts-per-thread>".into(),
+        );
     }
     let dir = Path::new(&a[0]);
     if dir.exists() {
@@ -29,10 +31,16 @@ fn main() -> Result<(), String> {
         _ => return Err("mode must be mark or nomark".into()),
     };
     let k: usize = a[3].parse().map_err(|e| format!("puts: {e}"))?;
-    let disk = Arc::new(DiskManager::open_or_create(dir.join("t.db").as_path()).map_err(|e| format!("{e:?}"))?);
+    let disk = Arc::new(
+        DiskManager::open_or_create(dir.join("t.db").as_path()).map_err(|e| format!("{e:?}"))?,
+    );
     let bpm = Arc::new(BufferPoolManager::new(disk.clone(), 4096));
-    let wal = Arc::new(WalManager::open_or_create(dir.join("t.wal").as_path()).map_err(|e| format!("{e:?}"))?);
-    let tree = Arc::new(BPlusTree::create(bpm.clone(), Some(wal.clone()), 4).map_err(|e| format!("{e:?}"))?);
+    let wal = Arc::new(
+        WalManager::open_or_create(dir.join("t.wal").as_path()).map_err(|e| format!("{e:?}"))?,
+    );
+    let tree = Arc::new(
+        BPlusTree::create(bpm.clone(), Some(wal.clone()), 4).map_err(|e| format!("{e:?}"))?,
+    );
     let mgr = Arc::new(TxnManager::with_storage(wal.clone(), bpm.clone()));
     let mut tids = Vec::new();
     for _ in 0..t {
@@ -43,14 +51,17 @@ fn main() -> Result<(), String> {
     for (ti, &tid) in tids.iter().enumerate() {
         let (mgr, tree, barrier) = (mgr.clone(), tree.clone(), barrier.clone());
         handles.push(std::thread::spawn(move || -> Result<(), String> {
-            let keys: Vec<Vec<u8>> = (0..k).map(|i| format!("t{ti:02}k{i:08}").into_bytes()).collect();
+            let keys: Vec<Vec<u8>> = (0..k)
+                .map(|i| format!("t{ti:02}k{i:08}").into_bytes())
+                .collect();
             let val = [7u8; 16];
             barrier.wait();
             for key in &keys {
                 if mark {
                     black_box(mgr.write_mark(tid).map_err(|e| format!("mark: {e:?}"))?);
                 }
-                mgr.put(tid, &tree, key, &val).map_err(|e| format!("put: {e:?}"))?;
+                mgr.put(tid, &tree, key, &val)
+                    .map_err(|e| format!("put: {e:?}"))?;
             }
             Ok(())
         }));

@@ -1,3 +1,9 @@
+#![allow(
+    clippy::ptr_arg,
+    clippy::collapsible_if,
+    clippy::type_complexity,
+    unused_imports
+)]
 // Regression: new_page failing anywhere in a split chain must leave tree + WAL untouched.
 // Run: cargo test -p mitrdb-storage --features fault-injection --test btree_newpage_fail_atomicity
 use std::sync::Arc;
@@ -23,7 +29,16 @@ fn verify(tree: &BPlusTree, committed: &[u64], ctx: &str) {
     assert!(all.windows(2).all(|w| w[0].0 < w[1].0), "{ctx}: scan order");
 }
 
-fn setup(tag: &str, maxk: u16) -> (std::path::PathBuf, Arc<DiskManager>, Arc<WalManager>, BPlusTree, u64) {
+fn setup(
+    tag: &str,
+    maxk: u16,
+) -> (
+    std::path::PathBuf,
+    Arc<DiskManager>,
+    Arc<WalManager>,
+    BPlusTree,
+    u64,
+) {
     let dir = std::env::temp_dir().join(format!("mitrdb_np_atomic_{}_{}", std::process::id(), tag));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -43,7 +58,8 @@ fn new_page_failure_in_split_leaves_tree_and_wal_untouched() {
             let (dir, disk, wal, tree, mut prev) = setup(&format!("a{k}_{pre}"), 4);
             let mut committed: Vec<u64> = Vec::new();
             for i in 0..pre {
-                tree.insert_logged(1, &mut prev, &key(2 * i), &[7u8; 8]).unwrap();
+                tree.insert_logged(1, &mut prev, &key(2 * i), &[7u8; 8])
+                    .unwrap();
                 committed.push(2 * i);
             }
             let odd = |i: u64| 2 * ((i * 7919) % pre) + 1;
@@ -68,7 +84,8 @@ fn new_page_failure_in_split_leaves_tree_and_wal_untouched() {
                             "{ctx}: failed insert is visible"
                         );
                         verify(&tree, &committed, &ctx);
-                        tree.insert_logged(1, &mut prev, &key(kk), &[7u8; 8]).unwrap();
+                        tree.insert_logged(1, &mut prev, &key(kk), &[7u8; 8])
+                            .unwrap();
                         committed.push(kk);
                         verify(&tree, &committed, &format!("{ctx} after retry"));
                     }
@@ -93,7 +110,8 @@ fn split_plan_is_exact_without_injection() {
         for i in 0..n {
             let kk = (i * 7919) % n;
             let vlen = 8 + ((i as usize * 37) % 1400);
-            tree.insert_logged(1, &mut prev, &key(kk), &vec![7u8; vlen]).unwrap();
+            tree.insert_logged(1, &mut prev, &key(kk), &vec![7u8; vlen])
+                .unwrap();
             committed.push(kk);
         }
         committed.sort_unstable();

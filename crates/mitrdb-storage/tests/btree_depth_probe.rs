@@ -1,3 +1,9 @@
+#![allow(
+    clippy::ptr_arg,
+    clippy::collapsible_if,
+    clippy::type_complexity,
+    unused_imports
+)]
 // Probe (ignored): B+tree depth / page count vs number of keys at a given max_keys.
 // Run: MAXK=64 MITRDB_DIR=$HOME/x cargo test --release -p mitrdb-storage --test btree_depth_probe -- --ignored --nocapture
 use std::sync::Arc;
@@ -26,7 +32,10 @@ fn depth(tree: &BPlusTree) -> (usize, usize) {
 #[test]
 #[ignore]
 fn btree_depth_probe() {
-    let maxk: u16 = std::env::var("MAXK").ok().and_then(|v| v.parse().ok()).unwrap_or(64);
+    let maxk: u16 = std::env::var("MAXK")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(64);
     let base = std::env::var("MITRDB_DIR")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| std::env::temp_dir());
@@ -39,17 +48,25 @@ fn btree_depth_probe() {
         let bpm = Arc::new(BufferPoolManager::new(disk.clone(), 4096));
         let wal = Arc::new(WalManager::open_or_create(dir.join("t.wal").as_path()).unwrap());
         let mut prev = wal.append_record(LogRecord::new_begin(0, 1)).unwrap();
-        let tree = BPlusTree::create_logged(bpm.clone(), Some(wal.clone()), maxk, 1, &mut prev).unwrap();
+        let tree =
+            BPlusTree::create_logged(bpm.clone(), Some(wal.clone()), maxk, 1, &mut prev).unwrap();
         let mut done = 0u64;
         for &m in marks.iter() {
             while done < m {
-                let k = if mode == "seq" { done } else { (done.wrapping_mul(2654435761)) & 0xFFFF_FFFF };
-                tree.insert_logged(1, &mut prev, &key(k), &[7u8; 8]).unwrap();
+                let k = if mode == "seq" {
+                    done
+                } else {
+                    (done.wrapping_mul(2654435761)) & 0xFFFF_FFFF
+                };
+                tree.insert_logged(1, &mut prev, &key(k), &[7u8; 8])
+                    .unwrap();
                 done += 1;
             }
             let (d, rk) = depth(&tree);
             let pages = tree.collect_all_pages().unwrap().len();
-            println!("DEPTH maxk={maxk} mode={mode} keys={m} depth={d} root_keys={rk} pages={pages}");
+            println!(
+                "DEPTH maxk={maxk} mode={mode} keys={m} depth={d} root_keys={rk} pages={pages}"
+            );
         }
         drop(tree);
         let _ = std::fs::remove_dir_all(&dir);

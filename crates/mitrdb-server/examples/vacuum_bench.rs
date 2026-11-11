@@ -31,12 +31,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let t_insert_start = Instant::now();
     server.execute_sql("BEGIN;")?;
     for id in 1..=total_rows {
-        server.execute_sql(&format!("INSERT INTO bench_vac VALUES ({id}, {});", id * 10))?;
+        server.execute_sql(&format!(
+            "INSERT INTO bench_vac VALUES ({id}, {});",
+            id * 10
+        ))?;
     }
     server.execute_sql("COMMIT;")?;
     let t_insert_elapsed = t_insert_start.elapsed();
-    println!("  -> Completed in {:.3}s ({:.2} rows/sec)", 
-        t_insert_elapsed.as_secs_f64(), 
+    println!(
+        "  -> Completed in {:.3}s ({:.2} rows/sec)",
+        t_insert_elapsed.as_secs_f64(),
         total_rows as f64 / t_insert_elapsed.as_secs_f64()
     );
 
@@ -44,7 +48,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let t_base_scan = Instant::now();
     let _ = server.execute_sql("SELECT * FROM bench_vac;")?;
     let base_scan_elapsed = t_base_scan.elapsed();
-    println!("  -> Baseline scan latency (clean): {:.3}ms", base_scan_elapsed.as_secs_f64() * 1000.0);
+    println!(
+        "  -> Baseline scan latency (clean): {:.3}ms",
+        base_scan_elapsed.as_secs_f64() * 1000.0
+    );
 
     // 2. Churn / Delete Phase (Generating dead tuples)
     println!("\n[Stage 2] Deleting {delete_rows} rows (generating dead tombstones)...");
@@ -55,7 +62,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     server.execute_sql("COMMIT;")?;
     let t_del_elapsed = t_del_start.elapsed();
-    println!("  -> Deleted in {:.3}s ({:.2} deletes/sec)",
+    println!(
+        "  -> Deleted in {:.3}s ({:.2} deletes/sec)",
         t_del_elapsed.as_secs_f64(),
         delete_rows as f64 / t_del_elapsed.as_secs_f64()
     );
@@ -64,9 +72,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let t_bloat_scan = Instant::now();
     let _ = server.execute_sql("SELECT * FROM bench_vac;")?;
     let bloat_scan_elapsed = t_bloat_scan.elapsed();
-    println!("  -> Bloated scan latency (with dead tuples): {:.3}ms (+{:.1}%)",
+    println!(
+        "  -> Bloated scan latency (with dead tuples): {:.3}ms (+{:.1}%)",
         bloat_scan_elapsed.as_secs_f64() * 1000.0,
-        ((bloat_scan_elapsed.as_secs_f64() - base_scan_elapsed.as_secs_f64()) / base_scan_elapsed.as_secs_f64()) * 100.0
+        ((bloat_scan_elapsed.as_secs_f64() - base_scan_elapsed.as_secs_f64())
+            / base_scan_elapsed.as_secs_f64())
+            * 100.0
     );
 
     // 3. VACUUM Phase
@@ -76,25 +87,52 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let rep = server.vacuum();
     let t_vac_elapsed = t_vac_start.elapsed();
     let m_after = server.metrics_snapshot();
-    
-    println!("  -> VACUUM completed in {:.3}ms", t_vac_elapsed.as_secs_f64() * 1000.0);
+
+    println!(
+        "  -> VACUUM completed in {:.3}ms",
+        t_vac_elapsed.as_secs_f64() * 1000.0
+    );
     println!("  -> Versions pruned: {}", rep.versions_pruned);
-    println!("  -> Active MVCC keys remaining: {}", server.txn_manager().mvcc_key_count());
-    println!("  -> Active MVCC versions remaining: {}", server.txn_manager().mvcc_version_count());
+    println!(
+        "  -> Active MVCC keys remaining: {}",
+        server.txn_manager().mvcc_key_count()
+    );
+    println!(
+        "  -> Active MVCC versions remaining: {}",
+        server.txn_manager().mvcc_version_count()
+    );
 
     // 4. Post-Vacuum Scan Phase
     let t_post_scan = Instant::now();
     let _ = server.execute_sql("SELECT * FROM bench_vac;")?;
     let post_scan_elapsed = t_post_scan.elapsed();
-    println!("\n[Stage 4] Post-Vacuum scan latency: {:.3}ms", post_scan_elapsed.as_secs_f64() * 1000.0);
+    println!(
+        "\n[Stage 4] Post-Vacuum scan latency: {:.3}ms",
+        post_scan_elapsed.as_secs_f64() * 1000.0
+    );
 
     println!("\n================== BENCHMARK SUMMARY ==================");
-    println!("  Baseline Scan (Clean):       {:.3}ms", base_scan_elapsed.as_secs_f64() * 1000.0);
-    println!("  Bloated Scan (Dead Tuples):  {:.3}ms", bloat_scan_elapsed.as_secs_f64() * 1000.0);
-    println!("  VACUUM Execution Time:       {:.3}ms", t_vac_elapsed.as_secs_f64() * 1000.0);
-    println!("  Post-VACUUM Scan:            {:.3}ms", post_scan_elapsed.as_secs_f64() * 1000.0);
+    println!(
+        "  Baseline Scan (Clean):       {:.3}ms",
+        base_scan_elapsed.as_secs_f64() * 1000.0
+    );
+    println!(
+        "  Bloated Scan (Dead Tuples):  {:.3}ms",
+        bloat_scan_elapsed.as_secs_f64() * 1000.0
+    );
+    println!(
+        "  VACUUM Execution Time:       {:.3}ms",
+        t_vac_elapsed.as_secs_f64() * 1000.0
+    );
+    println!(
+        "  Post-VACUUM Scan:            {:.3}ms",
+        post_scan_elapsed.as_secs_f64() * 1000.0
+    );
     println!("  Versions Cleaned:            {}", rep.versions_pruned);
-    println!("  Buffer Pool Hits:            {}", m_after.buffer_hits.saturating_sub(m_before.buffer_hits));
+    println!(
+        "  Buffer Pool Hits:            {}",
+        m_after.buffer_hits.saturating_sub(m_before.buffer_hits)
+    );
     println!("=======================================================");
 
     Ok(())

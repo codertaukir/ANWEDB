@@ -1,3 +1,9 @@
+#![allow(
+    clippy::ptr_arg,
+    clippy::collapsible_if,
+    clippy::type_complexity,
+    unused_imports
+)]
 use mitrdb_server::{ExecutionResult, Server};
 
 fn rows(server: &Server, sql: &str) -> usize {
@@ -16,7 +22,9 @@ fn sync_keeps_data_and_is_repeatable() {
 
     let t = server.table("users");
     assert_eq!(t.sync("id int primary key, name text").unwrap().len(), 1);
-    server.execute_sql("INSERT INTO users VALUES (1, 'Taukir')").unwrap();
+    server
+        .execute_sql("INSERT INTO users VALUES (1, 'Taukir')")
+        .unwrap();
 
     // same definition again: nothing to do
     assert!(t.sync("id int primary key, name text").unwrap().is_empty());

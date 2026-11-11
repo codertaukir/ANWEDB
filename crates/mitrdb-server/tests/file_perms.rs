@@ -1,3 +1,9 @@
+#![allow(
+    clippy::ptr_arg,
+    clippy::collapsible_if,
+    clippy::type_complexity,
+    unused_imports
+)]
 use mitrdb_server::Server;
 use std::os::unix::fs::PermissionsExt;
 
@@ -7,7 +13,8 @@ fn db_and_wal_files_are_owner_only_after_open() {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let (s, _) = Server::open(dir.join("t.db"), dir.join("t.wal"), 64).unwrap();
-    s.execute_sql("CREATE TABLE p (id INT PRIMARY KEY)").unwrap();
+    s.execute_sql("CREATE TABLE p (id INT PRIMARY KEY)")
+        .unwrap();
     let mut seen = 0;
     for e in std::fs::read_dir(&dir).unwrap().flatten() {
         let name = e.file_name().to_string_lossy().to_string();

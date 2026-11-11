@@ -1,4 +1,10 @@
-use mitrdb_server::{val, Server};
+#![allow(
+    clippy::ptr_arg,
+    clippy::collapsible_if,
+    clippy::type_complexity,
+    unused_imports
+)]
+use mitrdb_server::{Server, val};
 use std::path::PathBuf;
 
 fn dir(tag: &str) -> PathBuf {
@@ -8,7 +14,7 @@ fn dir(tag: &str) -> PathBuf {
     d
 }
 
-fn open(d: &PathBuf) -> Server {
+fn open(d: &std::path::Path) -> Server {
     Server::open(d.join("t.db"), d.join("t.wal"), 64).unwrap().0
 }
 
@@ -21,23 +27,50 @@ fn param_increment_add_sub_and_errors() {
     t.insert(&[("id", val(1)), ("n", val(10))]).unwrap();
     t.insert(&[("id", val(2)), ("n", val(100))]).unwrap();
 
-    s.execute_sql_params("UPDATE t SET n = n + $1 WHERE id = $2", &[val(5), val(1)]).unwrap();
-    assert_eq!(t.find().filter("id", "=", val(1)).one().unwrap().unwrap()[1], val(15));
+    s.execute_sql_params("UPDATE t SET n = n + $1 WHERE id = $2", &[val(5), val(1)])
+        .unwrap();
+    assert_eq!(
+        t.find().filter("id", "=", val(1)).one().unwrap().unwrap()[1],
+        val(15)
+    );
 
-    s.execute_sql_params("UPDATE t SET n = n - $1 WHERE id = $2", &[val(3), val(1)]).unwrap();
-    assert_eq!(t.find().filter("id", "=", val(1)).one().unwrap().unwrap()[1], val(12));
+    s.execute_sql_params("UPDATE t SET n = n - $1 WHERE id = $2", &[val(3), val(1)])
+        .unwrap();
+    assert_eq!(
+        t.find().filter("id", "=", val(1)).one().unwrap().unwrap()[1],
+        val(12)
+    );
 
     // other row untouched
-    assert_eq!(t.find().filter("id", "=", val(2)).one().unwrap().unwrap()[1], val(100));
+    assert_eq!(
+        t.find().filter("id", "=", val(2)).one().unwrap().unwrap()[1],
+        val(100)
+    );
 
     // non-integer param, missing param, plain execute_sql: all errors, data unchanged
-    assert!(s.execute_sql_params("UPDATE t SET n = n + $1 WHERE id = $2", &[val("x"), val(1)]).is_err());
-    assert!(s.execute_sql_params("UPDATE t SET n = n + $1 WHERE id = $2", &[val(1)]).is_err());
-    assert!(s.execute_sql("UPDATE t SET n = n + $1 WHERE id = 1").is_err());
-    assert_eq!(t.find().filter("id", "=", val(1)).one().unwrap().unwrap()[1], val(12));
+    assert!(
+        s.execute_sql_params("UPDATE t SET n = n + $1 WHERE id = $2", &[val("x"), val(1)])
+            .is_err()
+    );
+    assert!(
+        s.execute_sql_params("UPDATE t SET n = n + $1 WHERE id = $2", &[val(1)])
+            .is_err()
+    );
+    assert!(
+        s.execute_sql("UPDATE t SET n = n + $1 WHERE id = 1")
+            .is_err()
+    );
+    assert_eq!(
+        t.find().filter("id", "=", val(1)).one().unwrap().unwrap()[1],
+        val(12)
+    );
 
     // literal increments still work
-    s.execute_sql("UPDATE t SET n = n + 8 WHERE id = 1").unwrap();
-    assert_eq!(t.find().filter("id", "=", val(1)).one().unwrap().unwrap()[1], val(20));
+    s.execute_sql("UPDATE t SET n = n + 8 WHERE id = 1")
+        .unwrap();
+    assert_eq!(
+        t.find().filter("id", "=", val(1)).one().unwrap().unwrap()[1],
+        val(20)
+    );
     let _ = std::fs::remove_dir_all(&d);
 }

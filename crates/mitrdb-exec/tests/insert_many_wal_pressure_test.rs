@@ -1,3 +1,9 @@
+#![allow(
+    clippy::ptr_arg,
+    clippy::collapsible_if,
+    clippy::type_complexity,
+    unused_imports
+)]
 use std::sync::Arc;
 
 use mitrdb_exec::{ExecutionResult, Executor};
@@ -66,14 +72,7 @@ fn test_insert_many_pressure_and_rollback() {
 
     // Duplicate key mid-statement: verify statement rollback
     let bad_sql = "INSERT INTO test_many VALUES (500, 'ok1'), (501, 'ok2'), (10, 'dup')";
-    let err = run_sql(
-        &exec,
-        &engine,
-        &catalog,
-        &txn_mgr,
-        &mut active_txn,
-        bad_sql,
-    );
+    let err = run_sql(&exec, &engine, &catalog, &txn_mgr, &mut active_txn, bad_sql);
     assert!(err.is_err(), "Duplicate key in InsertMany must fail");
 
     let _ = std::fs::remove_dir_all(&temp_dir);

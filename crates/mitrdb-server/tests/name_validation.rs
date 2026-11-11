@@ -1,3 +1,9 @@
+#![allow(
+    clippy::ptr_arg,
+    clippy::collapsible_if,
+    clippy::type_complexity,
+    unused_imports
+)]
 use mitrdb_server::Server;
 
 fn open(tag: &str) -> Server {
@@ -67,10 +73,23 @@ fn good_names_still_work() {
 #[test]
 fn reserved_dropped_prefix_is_rejected_for_columns() {
     let s = open("dropped_prefix");
-    assert!(s.execute_sql("CREATE TABLE x (id INT PRIMARY KEY, __dropped_1 TEXT)").is_err());
-    assert!(s.execute_sql("ALTER TABLE t ADD COLUMN __dropped_2 INT").is_err());
-    assert!(s.execute_sql("ALTER TABLE t RENAME COLUMN name TO __dropped_3").is_err());
-    assert!(s.table("y").sync("id int primary key, __dropped_1 text").is_err());
+    assert!(
+        s.execute_sql("CREATE TABLE x (id INT PRIMARY KEY, __dropped_1 TEXT)")
+            .is_err()
+    );
+    assert!(
+        s.execute_sql("ALTER TABLE t ADD COLUMN __dropped_2 INT")
+            .is_err()
+    );
+    assert!(
+        s.execute_sql("ALTER TABLE t RENAME COLUMN name TO __dropped_3")
+            .is_err()
+    );
+    assert!(
+        s.table("y")
+            .sync("id int primary key, __dropped_1 text")
+            .is_err()
+    );
     // nothing was created or changed
     assert!(s.execute_sql("SELECT * FROM x").is_err());
     assert!(s.execute_sql("SELECT id, name FROM t").is_ok());
@@ -80,9 +99,13 @@ fn reserved_dropped_prefix_is_rejected_for_columns() {
 #[test]
 fn dropped_column_cannot_be_renamed_back() {
     let s = open("dropped_rename");
-    s.execute_sql("CREATE TABLE t2 (id INT PRIMARY KEY, a TEXT, b INT)").unwrap();
+    s.execute_sql("CREATE TABLE t2 (id INT PRIMARY KEY, a TEXT, b INT)")
+        .unwrap();
     s.execute_sql("INSERT INTO t2 VALUES (1, 'x', 10)").unwrap();
     s.execute_sql("ALTER TABLE t2 DROP COLUMN b").unwrap();
-    assert!(s.execute_sql("ALTER TABLE t2 RENAME COLUMN __dropped_2 TO c").is_err());
+    assert!(
+        s.execute_sql("ALTER TABLE t2 RENAME COLUMN __dropped_2 TO c")
+            .is_err()
+    );
     assert!(s.execute_sql("SELECT c FROM t2").is_err());
 }

@@ -1,9 +1,18 @@
-use mitrdb_server::{val, Server};
+#![allow(
+    clippy::ptr_arg,
+    clippy::collapsible_if,
+    clippy::type_complexity,
+    unused_imports
+)]
+use mitrdb_server::{Server, val};
 use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 fn mark(name: &str) {
-    let t = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs_f64();
+    let t = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs_f64();
     println!("MARK {name} {t:.6}");
 }
 
@@ -30,36 +39,55 @@ fn summarize(label: &str, mut lat: Vec<Duration>, total: Duration) {
     );
 }
 
-fn dir_sizes(d: &PathBuf) {
+fn dir_sizes(d: &std::path::Path) {
     let mut v: Vec<(String, u64)> = std::fs::read_dir(d)
         .unwrap()
         .flatten()
         .filter_map(|e| {
             let m = e.metadata().ok()?;
-            m.is_file().then(|| (e.file_name().to_string_lossy().to_string(), m.len()))
+            m.is_file()
+                .then(|| (e.file_name().to_string_lossy().to_string(), m.len()))
         })
         .collect();
     v.sort();
-    println!("FILES {}", v.iter().map(|(n, s)| format!("{n}={s}B")).collect::<Vec<_>>().join(" "));
+    println!(
+        "FILES {}",
+        v.iter()
+            .map(|(n, s)| format!("{n}={s}B"))
+            .collect::<Vec<_>>()
+            .join(" ")
+    );
 }
 
 #[test]
 #[ignore]
 fn probe_delete_autocommit() {
-    let n: i64 = std::env::var("MITRDB_N").ok().and_then(|v| v.parse().ok()).unwrap_or(2000);
-    let base = std::env::var("MITRDB_DIR").map(PathBuf::from).unwrap_or_else(|_| std::env::temp_dir());
+    let n: i64 = std::env::var("MITRDB_N")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(2000);
+    let base = std::env::var("MITRDB_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| std::env::temp_dir());
     let d = base.join(format!("delac_{}_{}", std::process::id(), n));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
-    let s = Server::open(d.join("t.db"), d.join("t.wal"), 4096).unwrap().0;
-    s.table("t").sync("id int primary key, g int, name text").unwrap();
+    let s = Server::open(d.join("t.db"), d.join("t.wal"), 4096)
+        .unwrap()
+        .0;
+    s.table("t")
+        .sync("id int primary key, g int, name text")
+        .unwrap();
 
     mark("load_start");
     let mut i = 0i64;
     while i < n {
         let end = (i + 500).min(n);
-        let vals: Vec<String> = (i..end).map(|k| format!("({k},{},'user_{k}')", k % 1000)).collect();
-        s.execute_sql(&format!("INSERT INTO t VALUES {}", vals.join(","))).unwrap();
+        let vals: Vec<String> = (i..end)
+            .map(|k| format!("({k},{},'user_{k}')", k % 1000))
+            .collect();
+        s.execute_sql(&format!("INSERT INTO t VALUES {}", vals.join(",")))
+            .unwrap();
         i = end;
     }
     mark("load_end");
@@ -71,7 +99,12 @@ fn probe_delete_autocommit() {
     let t_all = Instant::now();
     for k in 0..n {
         let t = Instant::now();
-        let c = s.table("t").delete().filter("id", "=", val(k)).run().unwrap();
+        let c = s
+            .table("t")
+            .delete()
+            .filter("id", "=", val(k))
+            .run()
+            .unwrap();
         lat.push(t.elapsed());
         assert_eq!(c, 1, "row {k} not deleted");
     }
@@ -97,7 +130,11 @@ fn probe_delete_autocommit() {
     let t_all = Instant::now();
     for k in 0..n {
         let t = Instant::now();
-        s.execute_sql(&format!("INSERT INTO t VALUES ({k},{},'user_{k}')", k % 1000)).unwrap();
+        s.execute_sql(&format!(
+            "INSERT INTO t VALUES ({k},{},'user_{k}')",
+            k % 1000
+        ))
+        .unwrap();
         lat.push(t.elapsed());
     }
     let ins_total = t_all.elapsed();

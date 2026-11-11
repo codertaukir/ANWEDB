@@ -1,3 +1,9 @@
+#![allow(
+    clippy::ptr_arg,
+    clippy::collapsible_if,
+    clippy::type_complexity,
+    unused_imports
+)]
 use std::sync::{Arc, Barrier, Mutex};
 
 // These tests share GLOBAL_METRICS, so serialize them to avoid counter races.

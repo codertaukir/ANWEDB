@@ -89,7 +89,9 @@ fn unique_columns(spec: &str, wanted: &[ColumnDef]) -> Vec<String> {
             continue;
         }
         let is_unique = tokens[2..].iter().any(|t| t.eq_ignore_ascii_case("unique"));
-        let is_pk = wanted.iter().any(|c| c.name == tokens[0] && c.is_primary_key);
+        let is_pk = wanted
+            .iter()
+            .any(|c| c.name == tokens[0] && c.is_primary_key);
         if is_unique && !is_pk {
             out.push(tokens[0].to_string());
         }
@@ -106,7 +108,9 @@ fn indexed_columns(spec: &str, wanted: &[ColumnDef], uniques: &[String]) -> Vec<
             continue;
         }
         let is_index = tokens[2..].iter().any(|t| t.eq_ignore_ascii_case("index"));
-        let is_pk = wanted.iter().any(|c| c.name == tokens[0] && c.is_primary_key);
+        let is_pk = wanted
+            .iter()
+            .any(|c| c.name == tokens[0] && c.is_primary_key);
         if is_index && !is_pk && !uniques.iter().any(|u| u == tokens[0]) {
             out.push(tokens[0].to_string());
         }
@@ -209,7 +213,11 @@ impl Table<'_> {
                                     "ALTER TABLE {} ALTER COLUMN {} {}",
                                     self.name,
                                     w.name,
-                                    if w.nullable { "DROP NOT NULL" } else { "SET NOT NULL" }
+                                    if w.nullable {
+                                        "DROP NOT NULL"
+                                    } else {
+                                        "SET NOT NULL"
+                                    }
                                 ));
                             }
                         }
@@ -249,7 +257,10 @@ impl Table<'_> {
             }
         }
         for col in &uniques {
-            if existing_idx.iter().any(|i| i.unique && i.column_name == *col) {
+            if existing_idx
+                .iter()
+                .any(|i| i.unique && i.column_name == *col)
+            {
                 continue;
             }
             plan.push(format!(
@@ -347,11 +358,15 @@ impl Table<'_> {
             ),
             Some(Value::Text(t)) => format!(
                 "ALTER TABLE {} ALTER COLUMN {} SET NOT NULL DEFAULT '{}'",
-                self.name, name, t.replace('\'', "''")
+                self.name,
+                name,
+                t.replace('\'', "''")
             ),
             Some(Value::Bool(b)) => format!(
                 "ALTER TABLE {} ALTER COLUMN {} SET NOT NULL DEFAULT {}",
-                self.name, name, if b { "TRUE" } else { "FALSE" }
+                self.name,
+                name,
+                if b { "TRUE" } else { "FALSE" }
             ),
             Some(_) => return Err(bad("default must be an int, text or bool value")),
             None => format!(
@@ -433,7 +448,10 @@ fn check_value(table: &str, col: &ColumnDef, v: &Value) -> Result<()> {
     match v {
         Value::Null => {
             if !col.nullable || col.is_primary_key {
-                Err(bad(format!("NOT NULL constraint failed: {}.{}", table, col.name)))
+                Err(bad(format!(
+                    "NOT NULL constraint failed: {}.{}",
+                    table, col.name
+                )))
             } else {
                 Ok(())
             }
@@ -479,7 +497,10 @@ impl Table<'_> {
             values.push(v);
         }
 
-        match self.server.execute_plan(PhysicalPlan::Insert { schema, values })? {
+        match self
+            .server
+            .execute_plan(PhysicalPlan::Insert { schema, values })?
+        {
             ExecutionResult::Affected(n) => Ok(n),
             _ => Ok(1),
         }
@@ -597,7 +618,11 @@ impl Query<'_> {
             if !known(col) {
                 return Err(bad(format!("unknown column '{}'", col)));
             }
-            sql.push_str(&format!(" ORDER BY {}{}", col, if *desc { " DESC" } else { "" }));
+            sql.push_str(&format!(
+                " ORDER BY {}{}",
+                col,
+                if *desc { " DESC" } else { "" }
+            ));
         }
         if let Some(n) = self.limit {
             sql.push_str(&format!(" LIMIT {}", n));

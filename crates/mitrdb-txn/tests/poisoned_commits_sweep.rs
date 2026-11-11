@@ -1,3 +1,9 @@
+#![allow(
+    clippy::ptr_arg,
+    clippy::collapsible_if,
+    clippy::type_complexity,
+    unused_imports
+)]
 // resolve_poisoned_commits: sweep completes poisoned commits once the WAL heals, releasing their locks.
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -31,7 +37,11 @@ fn sweep_resolves_poisoned_commits_after_wal_heals() {
     let wal_path = dir.join("t.wal");
     let (tree, mgr) = open(&dir);
     if wal_path.is_file() {
-        assert_eq!(std::fs::metadata(&wal_path).unwrap().len(), 0, "wal already has data");
+        assert_eq!(
+            std::fs::metadata(&wal_path).unwrap().len(),
+            0,
+            "wal already has data"
+        );
         std::fs::remove_file(&wal_path).unwrap();
     }
     std::fs::create_dir(&wal_path).unwrap();

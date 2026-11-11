@@ -1,3 +1,9 @@
+#![allow(
+    clippy::ptr_arg,
+    clippy::collapsible_if,
+    clippy::type_complexity,
+    unused_imports
+)]
 use mitrdb_exec::ExecutionResult;
 use mitrdb_server::{Server, Value};
 use std::path::PathBuf;
@@ -7,9 +13,11 @@ fn open(tag: &str) -> (PathBuf, Server) {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let (srv, _) = Server::open(dir.join("t.db"), dir.join("t.wal"), 256).unwrap();
-    srv.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, g INT)").unwrap();
+    srv.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, g INT)")
+        .unwrap();
     let vals: Vec<String> = (0..200).map(|k| format!("({k},{})", k % 10)).collect();
-    srv.execute_sql(&format!("INSERT INTO t VALUES {}", vals.join(","))).unwrap();
+    srv.execute_sql(&format!("INSERT INTO t VALUES {}", vals.join(",")))
+        .unwrap();
     (dir, srv)
 }
 

@@ -53,4 +53,3 @@ fn walk(p: &Path, depth: u32) {
         let _ = std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o600));
     }
 }
-

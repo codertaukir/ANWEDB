@@ -1,3 +1,9 @@
+#![allow(
+    clippy::ptr_arg,
+    clippy::collapsible_if,
+    clippy::type_complexity,
+    unused_imports
+)]
 use std::sync::Arc;
 
 use mitrdb_catalog::{Catalog, ColumnDef, DataType};

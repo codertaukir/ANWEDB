@@ -1,3 +1,9 @@
+#![allow(
+    clippy::ptr_arg,
+    clippy::collapsible_if,
+    clippy::type_complexity,
+    unused_imports
+)]
 use mitrdb_server::{ExecutionResult, Server};
 use std::path::PathBuf;
 
@@ -7,7 +13,7 @@ fn fresh(tag: &str) -> PathBuf {
     std::fs::create_dir_all(&d).unwrap();
     d
 }
-fn open(d: &PathBuf) -> Server {
+fn open(d: &std::path::Path) -> Server {
     Server::open(d.join("t.db"), d.join("t.wal"), 64).unwrap().0
 }
 fn shape(s: &Server, sql: &str) -> (usize, usize) {
@@ -22,8 +28,10 @@ fn drop_column_hides_keeps_insert_working_and_persists() {
     let d = fresh("dropcol");
     {
         let s = open(&d);
-        s.execute_sql("CREATE TABLE t (id int primary key, a text, b int, c text)").unwrap();
-        s.execute_sql("INSERT INTO t VALUES (1, 'x', 10, 'k')").unwrap();
+        s.execute_sql("CREATE TABLE t (id int primary key, a text, b int, c text)")
+            .unwrap();
+        s.execute_sql("INSERT INTO t VALUES (1, 'x', 10, 'k')")
+            .unwrap();
 
         s.execute_sql("ALTER TABLE t DROP COLUMN b").unwrap();
         assert_eq!(shape(&s, "SELECT * FROM t"), (3, 1));
@@ -32,13 +40,15 @@ fn drop_column_hides_keeps_insert_working_and_persists() {
         // positional insert with live columns only
         s.execute_sql("INSERT INTO t VALUES (2, 'y', 'm')").unwrap();
         // column-list insert
-        s.execute_sql("INSERT INTO t (id, a) VALUES (3, 'z')").unwrap();
+        s.execute_sql("INSERT INTO t (id, a) VALUES (3, 'z')")
+            .unwrap();
         assert_eq!(shape(&s, "SELECT * FROM t"), (3, 3));
 
         // refusals
         assert!(s.execute_sql("ALTER TABLE t DROP COLUMN id").is_err());
         assert!(s.execute_sql("ALTER TABLE t DROP COLUMN nope").is_err());
-        s.execute_sql("CREATE UNIQUE INDEX t_c_uq ON t (c)").unwrap();
+        s.execute_sql("CREATE UNIQUE INDEX t_c_uq ON t (c)")
+            .unwrap();
         assert!(s.execute_sql("ALTER TABLE t DROP COLUMN c").is_err());
     }
     let s = open(&d);
@@ -47,7 +57,10 @@ fn drop_column_hides_keeps_insert_working_and_persists() {
     s.execute_sql("ALTER TABLE t ADD COLUMN b int").unwrap();
     assert_eq!(shape(&s, "SELECT * FROM t WHERE b IS NULL"), (4, 3));
     // define_table / sync ignore dropped columns
-    let plan = s.table("t").sync("id int primary key, a text, c text unique, b int").unwrap();
+    let plan = s
+        .table("t")
+        .sync("id int primary key, a text, c text unique, b int")
+        .unwrap();
     assert!(plan.is_empty(), "unexpected plan: {plan:?}");
     let _ = std::fs::remove_dir_all(&d);
 }

@@ -1,4 +1,10 @@
-use mitrdb_server::{val, Server};
+#![allow(
+    clippy::ptr_arg,
+    clippy::collapsible_if,
+    clippy::type_complexity,
+    unused_imports
+)]
+use mitrdb_server::{Server, val};
 use std::io::Write;
 use std::path::PathBuf;
 
@@ -10,7 +16,7 @@ fn dir(tag: &str) -> PathBuf {
 }
 
 // Server/BufferPool par Drop nahi hai: drop = bina checkpoint/flush ke band = crash jaisa.
-fn open(d: &PathBuf) -> Server {
+fn open(d: &std::path::Path) -> Server {
     Server::open(d.join("t.db"), d.join("t.wal"), 64).unwrap().0
 }
 
@@ -23,7 +29,9 @@ fn count(s: &Server, g: Option<i64>) -> usize {
 }
 
 fn setup(s: &Server) {
-    s.table("t").sync("id int primary key, g int index").unwrap();
+    s.table("t")
+        .sync("id int primary key, g int index")
+        .unwrap();
 }
 
 fn insert_range(s: &Server, from: i64, to: i64, g: i64) {
@@ -84,7 +92,11 @@ fn chunked_index_survives_crash_and_uncommitted_change_is_undone() {
         assert_eq!(count(&s, Some(7)), 1500);
         let t = s.table("t");
         s.execute_sql("BEGIN").unwrap();
-        t.update().set("g", val(8)).filter("id", "<", val(1000)).run().unwrap();
+        t.update()
+            .set("g", val(8))
+            .filter("id", "<", val(1000))
+            .run()
+            .unwrap();
         // no COMMIT: crash 2
     }
     let s = open(&d);
@@ -110,9 +122,17 @@ fn torn_wal_tail_is_truncated_and_data_kept() {
         .filter(|p| std::fs::metadata(p).map(|m| m.len() > 0).unwrap_or(false))
         .collect();
     wals.sort();
-    assert!(!wals.is_empty(), "WAL file nahi mili: {:?}", std::fs::read_dir(&d).unwrap().collect::<Vec<_>>());
-    let mut f = std::fs::OpenOptions::new().append(true).open(wals.last().unwrap()).unwrap();
-    f.write_all(&[0xDE, 0xAD, 0xBE, 0xEF, 0x01, 0x02, 0x03]).unwrap();
+    assert!(
+        !wals.is_empty(),
+        "WAL file nahi mili: {:?}",
+        std::fs::read_dir(&d).unwrap().collect::<Vec<_>>()
+    );
+    let mut f = std::fs::OpenOptions::new()
+        .append(true)
+        .open(wals.last().unwrap())
+        .unwrap();
+    f.write_all(&[0xDE, 0xAD, 0xBE, 0xEF, 0x01, 0x02, 0x03])
+        .unwrap();
     f.sync_all().unwrap();
     drop(f);
     let s = open(&d);

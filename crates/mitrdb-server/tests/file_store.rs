@@ -1,3 +1,9 @@
+#![allow(
+    clippy::ptr_arg,
+    clippy::collapsible_if,
+    clippy::type_complexity,
+    unused_imports
+)]
 use mitrdb_server::FileStore;
 use std::io::Read;
 
@@ -80,7 +86,11 @@ fn bad_names_are_rejected() {
         slash.as_str(),
     ];
     for name in attacks {
-        assert!(store.open_read(name).is_err(), "open_read accepted {:?}", name);
+        assert!(
+            store.open_read(name).is_err(),
+            "open_read accepted {:?}",
+            name
+        );
         assert!(store.delete(name).is_err(), "delete accepted {:?}", name);
     }
     assert!(outside.exists());

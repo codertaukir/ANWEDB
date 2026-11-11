@@ -1983,13 +1983,14 @@ impl TxnManager {
                 LockKey::Key(skey.clone()),
                 LockMode::Exclusive,
             )?;
-            let visible = match self.read_key_visible_value(txn_id, isolation, read_ts, tree, k, &skey) {
-                Ok(v) => v,
-                Err(e) => {
-                    self.lock_manager.rollback_delta(txn_id, lock_delta);
-                    return Err(e);
-                }
-            };
+            let visible =
+                match self.read_key_visible_value(txn_id, isolation, read_ts, tree, k, &skey) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        self.lock_manager.rollback_delta(txn_id, lock_delta);
+                        return Err(e);
+                    }
+                };
             {
                 let mut txns = self.txns.lock().unwrap();
                 if let Some(ctx) = txns.get_mut(&txn_id) {
@@ -2035,7 +2036,9 @@ impl TxnManager {
             for (i, (k, skey)) in to_delete.into_iter().enumerate() {
                 let old_val = old_values[i].clone();
                 let chain = versions.entry(skey).or_default();
-                if chain.is_empty() && let Some(ref baseline) = old_val {
+                if chain.is_empty()
+                    && let Some(ref baseline) = old_val
+                {
                     chain.push(VersionedValue {
                         xmin: 0,
                         xmax: Some(txn_id),
@@ -2046,7 +2049,9 @@ impl TxnManager {
                         xmax: None,
                         value: None,
                     });
-                } else if let Some(prev) = chain.last_mut() && prev.xmax.is_none() {
+                } else if let Some(prev) = chain.last_mut()
+                    && prev.xmax.is_none()
+                {
                     prev.xmax = Some(txn_id);
                     chain.push(VersionedValue {
                         xmin: txn_id,
@@ -2229,6 +2234,7 @@ impl TxnManager {
         }
         res
     }
+    #[allow(clippy::collapsible_if)]
     pub fn commit(&self, txn_id: TxnId) -> Result<u64> {
         let profiling = mitrdb_observe::profiling_enabled();
         let commit_started = profiling.then(std::time::Instant::now);
@@ -2315,7 +2321,11 @@ impl TxnManager {
                 }
             };
             // Read-only txn ke paas durable karne ko kuch nahi: commit record buffer mein jata hai, fsync skip.
-            let mut flush_res = if has_writes { wal.flush_up_to(lsn) } else { Ok(()) };
+            let mut flush_res = if has_writes {
+                wal.flush_up_to(lsn)
+            } else {
+                Ok(())
+            };
             // Error branch only: WAL flush error sticky nahi hai aur pending bytes bache rehte hain,
             // to bounded retry transient I/O failure ko poison hone se pehle resolve kar deta hai.
             if flush_res.is_err() {
@@ -2351,6 +2361,7 @@ impl TxnManager {
     /// Poisoned commit (WAL flush kept failing) ko aage badhane ka raasta: commit record dobara
     /// flush karo, durable ho jaye to commit pura karo (commit_ts, locks release).
     /// Abort kabhi nahi: record durable ho sakta hai (doosre txn ka flush use likh deta hai).
+    #[allow(clippy::collapsible_if)]
     pub fn resolve_poisoned_commit(&self, txn_id: TxnId) -> Result<u64> {
         let lsn = {
             let txns = self.txns.lock().unwrap();
@@ -2364,7 +2375,10 @@ impl TxnManager {
                 )));
             }
             ctx.poisoned_commit_lsn.ok_or_else(|| {
-                Error::TransactionError(format!("Transaction {} has no recorded commit LSN", txn_id))
+                Error::TransactionError(format!(
+                    "Transaction {} has no recorded commit LSN",
+                    txn_id
+                ))
             })?
         };
         let wal = self
@@ -2477,9 +2491,9 @@ impl TxnManager {
     /// Number of undo entries so far; used as a statement-rollback mark.
     pub fn write_mark(&self, txn_id: TxnId) -> Result<usize> {
         let txns = self.txns.lock().unwrap();
-        let ctx = txns.get(&txn_id).ok_or_else(|| {
-            Error::TransactionError(format!("Unknown transaction ID {}", txn_id))
-        })?;
+        let ctx = txns
+            .get(&txn_id)
+            .ok_or_else(|| Error::TransactionError(format!("Unknown transaction ID {}", txn_id)))?;
         Ok(ctx.write_set.len())
     }
 

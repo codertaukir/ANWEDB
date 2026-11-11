@@ -1,3 +1,9 @@
+#![allow(
+    clippy::ptr_arg,
+    clippy::collapsible_if,
+    clippy::type_complexity,
+    unused_imports
+)]
 use rustls::{ClientConfig, ClientConnection, RootCertStore, StreamOwned};
 use std::fs::File;
 use std::io::{self, BufReader, Read, Write};

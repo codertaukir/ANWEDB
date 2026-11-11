@@ -506,7 +506,8 @@ impl DiskManager {
                     self.fail_alloc_after.store(-1, AtomicOrdering::Relaxed);
                     return Err(Error::Io("injected allocation failure".to_string()));
                 }
-                self.fail_alloc_after.store(inj - 1, AtomicOrdering::Relaxed);
+                self.fail_alloc_after
+                    .store(inj - 1, AtomicOrdering::Relaxed);
             }
         }
         let mut num_pages = self.num_pages.lock().unwrap();

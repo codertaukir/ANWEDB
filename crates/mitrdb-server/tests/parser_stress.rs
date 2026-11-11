@@ -1,3 +1,9 @@
+#![allow(
+    clippy::ptr_arg,
+    clippy::collapsible_if,
+    clippy::type_complexity,
+    unused_imports
+)]
 use mitrdb_server::Server;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -27,7 +33,11 @@ fn run_with_timeout(name: &str, sql: String) {
 #[test]
 fn deep_brackets() {
     let n = 5000;
-    let sql = format!("SELECT * FROM t WHERE {}id = 1{}", "(".repeat(n), ")".repeat(n));
+    let sql = format!(
+        "SELECT * FROM t WHERE {}id = 1{}",
+        "(".repeat(n),
+        ")".repeat(n)
+    );
     run_with_timeout("deep_brackets", sql);
 }
 
@@ -39,7 +49,10 @@ fn unbalanced_brackets() {
 
 #[test]
 fn many_and_or() {
-    let sql = format!("SELECT * FROM t WHERE id = 1{}", " OR id = 2 AND id = 3".repeat(20000));
+    let sql = format!(
+        "SELECT * FROM t WHERE id = 1{}",
+        " OR id = 2 AND id = 3".repeat(20000)
+    );
     run_with_timeout("many_and_or", sql);
 }
 

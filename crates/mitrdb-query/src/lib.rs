@@ -657,12 +657,17 @@ impl Statement {
                         _ => {
                             return Err(Error::TransactionError(format!(
                                 "Parameter ${} must be an integer (used in {} = {} +/- ${})",
-                                i + 1, col, col, i + 1
+                                i + 1,
+                                col,
+                                col,
+                                i + 1
                             )));
                         }
                     };
-                    let delta = if negative { n.checked_neg() } else { Some(n) }
-                        .ok_or_else(|| Error::TransactionError("Number too large in UPDATE SET".to_string()))?;
+                    let delta =
+                        if negative { n.checked_neg() } else { Some(n) }.ok_or_else(|| {
+                            Error::TransactionError("Number too large in UPDATE SET".to_string())
+                        })?;
                     used[i] = true;
                     increments.push((col, delta));
                 }
@@ -678,11 +683,12 @@ impl Statement {
                     bind_expr(e, params, used)?;
                 }
             }
-            Statement::Delete { filter, .. } => {
-                if let Some(e) = filter {
-                    bind_expr(e, params, used)?;
-                }
+            Statement::Delete {
+                filter: Some(e), ..
+            } => {
+                bind_expr(e, params, used)?;
             }
+            Statement::Delete { filter: None, .. } => {}
             Statement::Union { left, right, .. } => {
                 left.bind_params(params, used)?;
                 right.bind_params(params, used)?;
@@ -1523,17 +1529,19 @@ impl QueryEngine {
                         }
                     }
 
-                    let left_bound_filter = if let Some(expr) = Self::combine_conjuncts(left_conjuncts) {
-                        Self::bind_filter(&left_schema, Some(expr))?
-                    } else {
-                        None
-                    };
+                    let left_bound_filter =
+                        if let Some(expr) = Self::combine_conjuncts(left_conjuncts) {
+                            Self::bind_filter(&left_schema, Some(expr))?
+                        } else {
+                            None
+                        };
 
-                    let right_bound_filter = if let Some(expr) = Self::combine_conjuncts(right_conjuncts) {
-                        Self::bind_filter(&right_schema, Some(expr))?
-                    } else {
-                        None
-                    };
+                    let right_bound_filter =
+                        if let Some(expr) = Self::combine_conjuncts(right_conjuncts) {
+                            Self::bind_filter(&right_schema, Some(expr))?
+                        } else {
+                            None
+                        };
 
                     let all_left_cols = (0..left_schema.columns.len()).collect();
                     let left_plan = self.plan_select_scan(
@@ -1554,11 +1562,12 @@ impl QueryEngine {
                         0,
                     );
 
-                    let bound_join_filter = if let Some(f_expr) = Self::combine_conjuncts(post_join_conjuncts) {
-                        Some(Self::bind_join_filter(f_expr, &left_schema, &right_schema)?)
-                    } else {
-                        None
-                    };
+                    let bound_join_filter =
+                        if let Some(f_expr) = Self::combine_conjuncts(post_join_conjuncts) {
+                            Some(Self::bind_join_filter(f_expr, &left_schema, &right_schema)?)
+                        } else {
+                            None
+                        };
 
                     let effective_offset = offset.unwrap_or(0);
                     let join_limit = if distinct { None } else { limit };
@@ -2296,7 +2305,13 @@ impl QueryEngine {
             Ok(())
         }
 
-        inspect(expr, left_schema, right_schema, &mut has_left, &mut has_right)?;
+        inspect(
+            expr,
+            left_schema,
+            right_schema,
+            &mut has_left,
+            &mut has_right,
+        )?;
         match (has_left, has_right) {
             (true, false) => Ok(Some(true)),
             (false, true) => Ok(Some(false)),
@@ -3953,9 +3968,7 @@ impl QueryEngine {
                         .to_string(),
                 ));
             }
-            if digits.is_empty()
-                || digits.len() > 6
-                || !digits.bytes().all(|b| b.is_ascii_digit())
+            if digits.is_empty() || digits.len() > 6 || !digits.bytes().all(|b| b.is_ascii_digit())
             {
                 return Err(Error::TransactionError(format!(
                     "Invalid parameter placeholder: {}",

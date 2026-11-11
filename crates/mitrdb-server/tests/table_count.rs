@@ -1,4 +1,10 @@
-use mitrdb_server::{val, Server, Value};
+#![allow(
+    clippy::ptr_arg,
+    clippy::collapsible_if,
+    clippy::type_complexity,
+    unused_imports
+)]
+use mitrdb_server::{Server, Value, val};
 
 #[test]
 fn count_and_one() {
@@ -11,14 +17,23 @@ fn count_and_one() {
     t.sync("id int primary key, name text, age int").unwrap();
     assert_eq!(t.count().unwrap(), 0);
 
-    t.insert(&[("id", val(1)), ("name", val("O'Brien")), ("age", val(20))]).unwrap();
-    t.insert(&[("id", val(2)), ("name", val("Rahul")), ("age", val(30))]).unwrap();
-    t.insert(&[("id", val(3)), ("name", val("Amit")), ("age", val(40))]).unwrap();
+    t.insert(&[("id", val(1)), ("name", val("O'Brien")), ("age", val(20))])
+        .unwrap();
+    t.insert(&[("id", val(2)), ("name", val("Rahul")), ("age", val(30))])
+        .unwrap();
+    t.insert(&[("id", val(3)), ("name", val("Amit")), ("age", val(40))])
+        .unwrap();
 
     assert_eq!(t.count().unwrap(), 3);
     assert_eq!(t.find().filter("age", ">", val(25)).count().unwrap(), 2);
     assert_eq!(t.find().filter("age", ">", val(99)).count().unwrap(), 0);
-    assert_eq!(t.find().filter("name", "=", val("O'Brien")).count().unwrap(), 1);
+    assert_eq!(
+        t.find()
+            .filter("name", "=", val("O'Brien"))
+            .count()
+            .unwrap(),
+        1
+    );
 
     // one()
     let row = t.find().filter("id", "=", val(2)).one().unwrap().unwrap();

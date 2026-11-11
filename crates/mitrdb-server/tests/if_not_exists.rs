@@ -1,10 +1,18 @@
+#![allow(
+    clippy::ptr_arg,
+    clippy::collapsible_if,
+    clippy::type_complexity,
+    unused_imports
+)]
 use mitrdb_server::{ExecutionResult, Server};
 
 fn open(tag: &str) -> Server {
     let dir = std::env::temp_dir().join(format!("mitrdb_ine_{}_{}", std::process::id(), tag));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    Server::open(dir.join("t.db"), dir.join("t.wal"), 64).unwrap().0
+    Server::open(dir.join("t.db"), dir.join("t.wal"), 64)
+        .unwrap()
+        .0
 }
 
 fn count(s: &Server) -> usize {
@@ -21,14 +29,19 @@ fn create_table_if_not_exists() {
     assert!(matches!(r.unwrap(), ExecutionResult::Affected(0)));
     assert_eq!(count(&s), 1);
     s.execute_sql("INSERT INTO t VALUES (2,'b')").unwrap();
-    assert!(s.execute_sql("CREATE TABLE t (id INT PRIMARY KEY)").is_err());
+    assert!(
+        s.execute_sql("CREATE TABLE t (id INT PRIMARY KEY)")
+            .is_err()
+    );
 }
 
 #[test]
 fn create_index_if_not_exists() {
     let s = open("b");
-    s.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, name TEXT)").unwrap();
-    s.execute_sql("CREATE UNIQUE INDEX IF NOT EXISTS idx_name ON t (name)").unwrap();
+    s.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, name TEXT)")
+        .unwrap();
+    s.execute_sql("CREATE UNIQUE INDEX IF NOT EXISTS idx_name ON t (name)")
+        .unwrap();
     let r = s.execute_sql("create index if not exists idx_name on t (name)");
     assert!(matches!(r.unwrap(), ExecutionResult::Affected(0)));
     assert!(s.execute_sql("CREATE INDEX idx_name ON t (name)").is_err());
@@ -39,7 +52,8 @@ fn create_index_if_not_exists() {
 #[test]
 fn bad_forms_are_rejected() {
     let s = open("c");
-    s.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, name TEXT)").unwrap();
+    s.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, name TEXT)")
+        .unwrap();
     for q in [
         "CREATE TABLE IF NOT EXISTS (id INT PRIMARY KEY)",
         "CREATE TABLE IF NOT EXISTS",
@@ -55,8 +69,10 @@ fn bad_forms_are_rejected() {
 #[test]
 fn trailing_semicolon_is_accepted() {
     let s = open("d");
-    s.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, name TEXT);").unwrap();
+    s.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, name TEXT);")
+        .unwrap();
     s.execute_sql("INSERT INTO t VALUES (1,'a');").unwrap();
-    s.execute_sql("INSERT INTO t VALUES (2,'b'),(3,'c');").unwrap();
+    s.execute_sql("INSERT INTO t VALUES (2,'b'),(3,'c');")
+        .unwrap();
     assert_eq!(count(&s), 3);
 }

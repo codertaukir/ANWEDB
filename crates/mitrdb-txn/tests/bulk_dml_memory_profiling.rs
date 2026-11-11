@@ -1,3 +1,9 @@
+#![allow(
+    clippy::ptr_arg,
+    clippy::collapsible_if,
+    clippy::type_complexity,
+    unused_imports
+)]
 use std::mem::size_of;
 use std::sync::Arc;
 
@@ -19,7 +25,9 @@ fn test_bulk_dml_transient_memory_profiling() {
     let tree = Arc::new(BPlusTree::create(bpm.clone(), Some(wal.clone()), 4).unwrap());
     let txn_mgr = TxnManager::with_storage(wal, bpm);
 
-    let tid = txn_mgr.begin_with_isolation(IsolationLevel::ReadCommitted).unwrap();
+    let tid = txn_mgr
+        .begin_with_isolation(IsolationLevel::ReadCommitted)
+        .unwrap();
     let num_rows: usize = 5000;
 
     let mut total_key_bytes = 0usize;
@@ -44,7 +52,8 @@ fn test_bulk_dml_transient_memory_profiling() {
     let lock_point_overhead = num_rows * (32 + 24 + 16 + 64);
 
     // 3. MVCC Version Store: versions (HashMap entry) + VersionedValue + keys_by_tree (BTreeSet node)
-    let mvcc_heap = num_rows * (32 + 24 + (total_key_bytes / num_rows) + 48 + (total_val_bytes / num_rows) + 64);
+    let mvcc_heap = num_rows
+        * (32 + 24 + (total_key_bytes / num_rows) + 48 + (total_val_bytes / num_rows) + 64);
 
     let total_transient_mem = write_set_heap + lock_point_overhead + mvcc_heap;
     let per_row_bytes = total_transient_mem / num_rows;
@@ -53,17 +62,38 @@ fn test_bulk_dml_transient_memory_profiling() {
     println!("        BULK DML TRANSIENT MEMORY BREAKDOWN           ");
     println!("=======================================================");
     println!(" Rows Simulated           : {}", num_rows);
-    println!(" Raw Payload Data Size    : {:.2} KB", (total_key_bytes + total_val_bytes) as f64 / 1024.0);
+    println!(
+        " Raw Payload Data Size    : {:.2} KB",
+        (total_key_bytes + total_val_bytes) as f64 / 1024.0
+    );
     println!("-------------------------------------------------------");
-    println!(" 1. write_set (UndoAction): {} KB (~{} B/row)", write_set_heap / 1024, write_set_heap / num_rows);
-    println!(" 2. LockManager           : {} KB (~{} B/row)", lock_point_overhead / 1024, lock_point_overhead / num_rows);
-    println!(" 3. MvccVersionStore      : {} KB (~{} B/row)", mvcc_heap / 1024, mvcc_heap / num_rows);
+    println!(
+        " 1. write_set (UndoAction): {} KB (~{} B/row)",
+        write_set_heap / 1024,
+        write_set_heap / num_rows
+    );
+    println!(
+        " 2. LockManager           : {} KB (~{} B/row)",
+        lock_point_overhead / 1024,
+        lock_point_overhead / num_rows
+    );
+    println!(
+        " 3. MvccVersionStore      : {} KB (~{} B/row)",
+        mvcc_heap / 1024,
+        mvcc_heap / num_rows
+    );
     println!("-------------------------------------------------------");
-    println!(" Total Transient Heap     : {} KB", total_transient_mem / 1024);
+    println!(
+        " Total Transient Heap     : {} KB",
+        total_transient_mem / 1024
+    );
     println!(" Average Memory / Row     : {} Bytes", per_row_bytes);
     println!("=======================================================\n");
 
-    assert!(per_row_bytes < 1024, "Transient memory exceeded 1KB per row budget");
+    assert!(
+        per_row_bytes < 1024,
+        "Transient memory exceeded 1KB per row budget"
+    );
 
     txn_mgr.commit(tid).unwrap();
     let _ = std::fs::remove_dir_all(&temp_dir);

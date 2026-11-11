@@ -1,3 +1,9 @@
+#![allow(
+    clippy::ptr_arg,
+    clippy::collapsible_if,
+    clippy::type_complexity,
+    unused_imports
+)]
 // Regression: a failing read in the split chain (split_internal child) must not touch WAL or tree.
 use std::io::{Seek, SeekFrom, Write};
 use std::path::Path;
@@ -28,11 +34,15 @@ fn build(dir: &Path, n: u64) -> Option<Target> {
     let bpm = Arc::new(BufferPoolManager::new(disk.clone(), 256));
     let wal = Arc::new(WalManager::open_or_create(dir.join("t.wal").as_path()).unwrap());
     let mut prev = wal.append_record(LogRecord::new_begin(0, 1)).unwrap();
-    let tree = BPlusTree::create_logged(bpm.clone(), Some(wal.clone()), MAXK, 1, &mut prev).unwrap();
+    let tree =
+        BPlusTree::create_logged(bpm.clone(), Some(wal.clone()), MAXK, 1, &mut prev).unwrap();
     for i in 0..n {
-        tree.insert_logged(1, &mut prev, &key(2 * i), &[7u8; 8]).unwrap();
+        tree.insert_logged(1, &mut prev, &key(2 * i), &[7u8; 8])
+            .unwrap();
     }
-    let c = wal.append_record(LogRecord::new_commit(0, 1, prev)).unwrap();
+    let c = wal
+        .append_record(LogRecord::new_commit(0, 1, prev))
+        .unwrap();
     wal.flush_up_to(c).unwrap();
     let root = tree.root_page_id();
     let mut stack = vec![root];
@@ -83,8 +93,12 @@ fn split_chain_read_failure_leaves_tree_and_wal_untouched() {
     }
     let (t, n) = chosen.expect("no suitable full internal node found");
     {
-        let mut f = std::fs::OpenOptions::new().write(true).open(dir.join("t.db")).unwrap();
-        f.seek(SeekFrom::Start(t.corrupt_page as u64 * 4096)).unwrap();
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .open(dir.join("t.db"))
+            .unwrap();
+        f.seek(SeekFrom::Start(t.corrupt_page as u64 * 4096))
+            .unwrap();
         f.write_all(&[0xFF; 4]).unwrap();
         f.sync_all().unwrap();
     }
@@ -97,9 +111,16 @@ fn split_chain_read_failure_leaves_tree_and_wal_untouched() {
     let next_before = wal.next_lsn();
 
     let res = tree.insert_logged(2, &mut prev, &key(t.insert_key), &[9u8; 8]);
-    assert!(res.is_err(), "insert should fail: corrupt child is in the split chain");
+    assert!(
+        res.is_err(),
+        "insert should fail: corrupt child is in the split chain"
+    );
     assert_eq!(prev, prev_before, "failed split must not advance prev_lsn");
-    assert_eq!(wal.next_lsn(), next_before, "failed split must not append WAL records");
+    assert_eq!(
+        wal.next_lsn(),
+        next_before,
+        "failed split must not append WAL records"
+    );
     let corrupt: std::collections::HashSet<Vec<u8>> = t.corrupt_keys.iter().cloned().collect();
     for i in 0..n {
         let kb = key(2 * i).to_vec();

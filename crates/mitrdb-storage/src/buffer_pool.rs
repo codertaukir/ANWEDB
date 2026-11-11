@@ -344,9 +344,7 @@ impl BufferPoolManager {
                         "Page ID modified during mutate_page".to_string(),
                     ));
                 }
-                if let Err(e) = frame.page.validate_structure() {
-                    return Err(e);
-                }
+                frame.page.validate_structure()?;
                 frame.is_dirty = true;
                 Ok(val)
             }
@@ -408,12 +406,12 @@ impl BufferPoolManager {
             let mut excluded_count = 0usize;
 
             let (new_page_id, new_page) = loop {
-                let (cand_pid, cand_page) = self
-                    .disk_manager
-                    .allocate_page_with_filter(page_type, |cand_pid| {
-                        !page_table.contains_key(&cand_pid)
-                            && !excluded_candidates[..excluded_count].contains(&cand_pid)
-                    })?;
+                let (cand_pid, cand_page) =
+                    self.disk_manager
+                        .allocate_page_with_filter(page_type, |cand_pid| {
+                            !page_table.contains_key(&cand_pid)
+                                && !excluded_candidates[..excluded_count].contains(&cand_pid)
+                        })?;
 
                 if let Some(&existing_idx) = page_table.get(&cand_pid) {
                     if frames[existing_idx].pin_count > 0

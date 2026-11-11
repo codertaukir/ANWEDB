@@ -24,9 +24,13 @@ fn main() {
         .collect();
     let t0 = Instant::now();
     for k in &keys {
-        tree.insert_logged(1, &mut prev, &k.to_be_bytes(), &[7u8; 8]).unwrap();
+        tree.insert_logged(1, &mut prev, &k.to_be_bytes(), &[7u8; 8])
+            .unwrap();
     }
     let el = t0.elapsed().as_nanos() as f64 / n as f64;
-    println!("SPLITBENCH mode={mode} ns_per_insert={el:.1} root={}", tree.root_page_id());
+    println!(
+        "SPLITBENCH mode={mode} ns_per_insert={el:.1} root={}",
+        tree.root_page_id()
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }

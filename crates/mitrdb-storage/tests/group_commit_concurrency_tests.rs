@@ -1,3 +1,9 @@
+#![allow(
+    clippy::ptr_arg,
+    clippy::collapsible_if,
+    clippy::type_complexity,
+    unused_imports
+)]
 //! Regression tests for concurrent WAL group commit.
 //!
 //! These tests prove that:

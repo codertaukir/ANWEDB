@@ -1,3 +1,9 @@
+#![allow(
+    clippy::ptr_arg,
+    clippy::collapsible_if,
+    clippy::type_complexity,
+    unused_imports
+)]
 use std::sync::Arc;
 
 use mitrdb_catalog::{Catalog, ColumnDef, DataType, IndexMetadata, TableSchema};
@@ -285,9 +291,7 @@ fn test_catalog_root_collapse_and_drop_index_reclaims_pages() {
             let tname = format!("tbl_{:03}", i);
             catalog.create_table(&tname, cols()).unwrap();
             let iname = format!("idx_{:03}", i);
-            catalog
-                .create_index(&iname, &tname, "email", true)
-                .unwrap();
+            catalog.create_index(&iname, &tname, "email", true).unwrap();
         }
 
         let free_before = bpm.free_page_count();
@@ -364,7 +368,6 @@ fn test_populate_index_entries_logged_durability_across_crash_recovery() {
             entries.push((k, v));
         }
         catalog.populate_index_entries(idx_id, &entries).unwrap();
-
     }
 
     {
@@ -379,7 +382,6 @@ fn test_populate_index_entries_logged_durability_across_crash_recovery() {
         let idx_meta = catalog.get_index_by_name("idx_events_tag").unwrap();
         let idx_tree = catalog.index_tree(idx_meta.index_id).unwrap();
         assert_eq!(idx_tree.range_scan(None, None).unwrap().len(), 20);
-
     }
 
     let _ = std::fs::remove_dir_all(&temp_dir);

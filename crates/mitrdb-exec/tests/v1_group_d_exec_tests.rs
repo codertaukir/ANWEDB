@@ -1,3 +1,9 @@
+#![allow(
+    clippy::ptr_arg,
+    clippy::collapsible_if,
+    clippy::type_complexity,
+    unused_imports
+)]
 use std::sync::Arc;
 
 use mitrdb_common::Error;
@@ -690,8 +696,6 @@ fn test_sql_constraints_duplicate_pk_duplicate_doc_id_and_union_order_by_exec() 
         }
     );
 
-
-
     let _ = std::fs::remove_dir_all(&temp_dir);
 }
 
@@ -772,8 +776,6 @@ fn test_create_unique_index_on_duplicate_data_rolls_back_and_logged_backfill_sur
             "CREATE UNIQUE INDEX idx_members_email ON members (email)",
         )
         .unwrap();
-
-
     }
 
     {

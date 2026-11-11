@@ -1,3 +1,9 @@
+#![allow(
+    clippy::ptr_arg,
+    clippy::collapsible_if,
+    clippy::type_complexity,
+    unused_imports
+)]
 // Probe: pehla WAL flush fail (segment path par directory) -> poisoned commit ka behaviour.
 // Run: cargo test --release -p mitrdb-txn --test poisoned_commit_probe -- --ignored --nocapture
 use std::sync::Arc;
@@ -50,7 +56,11 @@ fn probe_poisoned_commit() {
         let commit_a = mgr.commit(a);
         println!("PROBE A commit -> {}", s(&commit_a));
         println!("PROBE A is_commit_poisoned = {}", mgr.is_commit_poisoned(a));
-        println!("PROBE wal flushed_lsn={} next_lsn={}", wal.flushed_lsn(), wal.next_lsn());
+        println!(
+            "PROBE wal flushed_lsn={} next_lsn={}",
+            wal.flushed_lsn(),
+            wal.next_lsn()
+        );
 
         let ab = mgr.abort(a);
         println!("PROBE A abort -> {}", s(&ab));
@@ -58,7 +68,11 @@ fn probe_poisoned_commit() {
         let c = mgr.begin().unwrap();
         let t0 = Instant::now();
         let put_c = mgr.put(c, &tree, b"key_a", b"val_c");
-        println!("PROBE C put same key -> {} after {:?}", s(&put_c), t0.elapsed());
+        println!(
+            "PROBE C put same key -> {} after {:?}",
+            s(&put_c),
+            t0.elapsed()
+        );
         let _ = mgr.abort(c);
 
         std::fs::remove_dir(&wal_path).unwrap();
@@ -68,8 +82,15 @@ fn probe_poisoned_commit() {
         println!("PROBE B put -> {}", s(&put_b));
         let commit_b = mgr.commit(b);
         println!("PROBE B commit -> {}", s(&commit_b));
-        println!("PROBE wal flushed_lsn={} next_lsn={}", wal.flushed_lsn(), wal.next_lsn());
-        println!("PROBE A is_commit_poisoned (memory) = {}", mgr.is_commit_poisoned(a));
+        println!(
+            "PROBE wal flushed_lsn={} next_lsn={}",
+            wal.flushed_lsn(),
+            wal.next_lsn()
+        );
+        println!(
+            "PROBE A is_commit_poisoned (memory) = {}",
+            mgr.is_commit_poisoned(a)
+        );
         // crash: bpm ko flush nahi karte
     }
 
@@ -80,8 +101,14 @@ fn probe_poisoned_commit() {
         let recovery = RecoveryManager::new(wal.clone(), bpm.clone());
         let _ = recovery.recover().unwrap();
         let tree = BPlusTree::open(bpm.clone(), Some(wal.clone()), root_id, 4).unwrap();
-        println!("PROBE after recovery: key_a present = {:?}", tree.get(b"key_a").map(|v| v.is_some()));
-        println!("PROBE after recovery: key_b present = {:?}", tree.get(b"key_b").map(|v| v.is_some()));
+        println!(
+            "PROBE after recovery: key_a present = {:?}",
+            tree.get(b"key_a").map(|v| v.is_some())
+        );
+        println!(
+            "PROBE after recovery: key_b present = {:?}",
+            tree.get(b"key_b").map(|v| v.is_some())
+        );
     }
     let _ = std::fs::remove_dir_all(&dir);
 }

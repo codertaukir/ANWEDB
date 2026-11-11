@@ -1,10 +1,18 @@
-use mitrdb_server::{val, Server, Value};
+#![allow(
+    clippy::ptr_arg,
+    clippy::collapsible_if,
+    clippy::type_complexity,
+    unused_imports
+)]
+use mitrdb_server::{Server, Value, val};
 
 fn open(tag: &str) -> Server {
     let dir = std::env::temp_dir().join(format!("mitrdb_big_{}_{}", std::process::id(), tag));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    Server::open(dir.join("t.db"), dir.join("t.wal"), 64).unwrap().0
+    Server::open(dir.join("t.db"), dir.join("t.wal"), 64)
+        .unwrap()
+        .0
 }
 
 #[test]
@@ -13,7 +21,8 @@ fn small_blob_round_trips() {
     let t = server.table("files");
     t.sync("id int primary key, data bytes").unwrap();
     let blob = vec![7u8; 3900];
-    t.insert(&[("id", val(1)), ("data", val(blob.clone()))]).unwrap();
+    t.insert(&[("id", val(1)), ("data", val(blob.clone()))])
+        .unwrap();
     let r = t.find().filter("id", "=", val(1)).run().unwrap();
     assert!(matches!(&r.rows[0][1], Value::Bytes(b) if *b == blob));
 }
@@ -29,6 +38,7 @@ fn huge_blob_is_refused_without_crash() {
     }
     // DB still works and nothing half-written is left behind
     assert_eq!(t.count().unwrap(), 0);
-    t.insert(&[("id", val(1)), ("data", val(vec![1u8; 100]))]).unwrap();
+    t.insert(&[("id", val(1)), ("data", val(vec![1u8; 100]))])
+        .unwrap();
     assert_eq!(t.count().unwrap(), 1);
 }

@@ -1,10 +1,18 @@
-use mitrdb_server::{val, Server};
+#![allow(
+    clippy::ptr_arg,
+    clippy::collapsible_if,
+    clippy::type_complexity,
+    unused_imports
+)]
+use mitrdb_server::{Server, val};
 
 fn open(tag: &str) -> Server {
     let dir = std::env::temp_dir().join(format!("mitrdb_un_{}_{}", std::process::id(), tag));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    Server::open(dir.join("t.db"), dir.join("t.wal"), 64).unwrap().0
+    Server::open(dir.join("t.db"), dir.join("t.wal"), 64)
+        .unwrap()
+        .0
 }
 
 fn rows(t: &mitrdb_server::Table) -> usize {
@@ -49,8 +57,16 @@ fn update_to_null_twice_is_allowed() {
     t.sync("id int primary key, email text unique").unwrap();
     t.insert(&[("id", val(1)), ("email", val("a"))]).unwrap();
     t.insert(&[("id", val(2)), ("email", val("b"))]).unwrap();
-    s.execute_sql("UPDATE w SET email = NULL WHERE id = 1").unwrap();
-    s.execute_sql("UPDATE w SET email = NULL WHERE id = 2").unwrap();
-    assert!(s.execute_sql("UPDATE w SET email = 'c' WHERE id = 1").is_ok());
-    assert!(s.execute_sql("UPDATE w SET email = 'c' WHERE id = 2").is_err());
+    s.execute_sql("UPDATE w SET email = NULL WHERE id = 1")
+        .unwrap();
+    s.execute_sql("UPDATE w SET email = NULL WHERE id = 2")
+        .unwrap();
+    assert!(
+        s.execute_sql("UPDATE w SET email = 'c' WHERE id = 1")
+            .is_ok()
+    );
+    assert!(
+        s.execute_sql("UPDATE w SET email = 'c' WHERE id = 2")
+            .is_err()
+    );
 }

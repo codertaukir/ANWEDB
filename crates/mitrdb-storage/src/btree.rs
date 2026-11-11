@@ -674,10 +674,16 @@ impl BPlusTree {
                 let mut redo_check = Self::padded_slice(&old_payload, 0, n);
                 let mut undo_check = Self::padded_slice(&new_payload, 0, n);
                 for &(start, end) in &ranges {
-                    redo_check[start..end]
-                        .copy_from_slice(&Self::padded_slice(&new_payload, start, end));
-                    undo_check[start..end]
-                        .copy_from_slice(&Self::padded_slice(&old_payload, start, end));
+                    redo_check[start..end].copy_from_slice(&Self::padded_slice(
+                        &new_payload,
+                        start,
+                        end,
+                    ));
+                    undo_check[start..end].copy_from_slice(&Self::padded_slice(
+                        &old_payload,
+                        start,
+                        end,
+                    ));
                 }
                 assert_eq!(redo_check, Self::padded_slice(&new_payload, 0, n));
                 assert_eq!(undo_check, Self::padded_slice(&old_payload, 0, n));
@@ -745,19 +751,25 @@ impl BPlusTree {
     fn route_internal_page(page: &Page, key: &[u8]) -> Result<Option<PageId>> {
         let ptype = page.page_type();
         if ptype != PAGE_TYPE_BTREE_LEAF && ptype != PAGE_TYPE_BTREE_INTERNAL {
-            return Err(Error::PageCorrupted("Expected B+Tree page type".to_string()));
+            return Err(Error::PageCorrupted(
+                "Expected B+Tree page type".to_string(),
+            ));
         }
         let buf = &page.data[BTREE_NODE_HEADER_OFFSET..PAGE_SIZE];
         if buf[0] == NODE_KIND_LEAF {
             return Ok(None);
         }
         if buf[0] != NODE_KIND_INTERNAL {
-            return Err(Error::PageCorrupted("Invalid B+Tree node kind byte".to_string()));
+            return Err(Error::PageCorrupted(
+                "Invalid B+Tree node kind byte".to_string(),
+            ));
         }
 
         let mut pos = 16;
         if pos + 6 > buf.len() {
-            return Err(Error::PageCorrupted("Truncated internal node header".to_string()));
+            return Err(Error::PageCorrupted(
+                "Truncated internal node header".to_string(),
+            ));
         }
         let key_cnt = u16::from_le_bytes(buf[pos..pos + 2].try_into().unwrap()) as usize;
         let mut target_child = u32::from_le_bytes(buf[pos + 2..pos + 6].try_into().unwrap());
@@ -765,12 +777,16 @@ impl BPlusTree {
 
         for _ in 0..key_cnt {
             if pos + 2 > buf.len() {
-                return Err(Error::PageCorrupted("Truncated internal key len".to_string()));
+                return Err(Error::PageCorrupted(
+                    "Truncated internal key len".to_string(),
+                ));
             }
             let klen = u16::from_le_bytes(buf[pos..pos + 2].try_into().unwrap()) as usize;
             pos += 2;
             if pos + klen + 4 > buf.len() {
-                return Err(Error::PageCorrupted("Truncated internal entry payload".to_string()));
+                return Err(Error::PageCorrupted(
+                    "Truncated internal entry payload".to_string(),
+                ));
             }
             let node_key = &buf[pos..pos + klen];
             pos += klen;
@@ -790,11 +806,15 @@ impl BPlusTree {
     fn search_leaf_page(page: &Page, key: &[u8]) -> Result<Option<Vec<u8>>> {
         let ptype = page.page_type();
         if ptype != PAGE_TYPE_BTREE_LEAF {
-            return Err(Error::PageCorrupted("Expected B+Tree leaf page type".to_string()));
+            return Err(Error::PageCorrupted(
+                "Expected B+Tree leaf page type".to_string(),
+            ));
         }
         let buf = &page.data[BTREE_NODE_HEADER_OFFSET..PAGE_SIZE];
         if buf[0] != NODE_KIND_LEAF {
-            return Err(Error::PageCorrupted("Invalid B+Tree leaf node kind byte".to_string()));
+            return Err(Error::PageCorrupted(
+                "Invalid B+Tree leaf node kind byte".to_string(),
+            ));
         }
 
         let mut pos = 16;
@@ -806,13 +826,17 @@ impl BPlusTree {
 
         for _ in 0..key_cnt {
             if pos + 4 > buf.len() {
-                return Err(Error::PageCorrupted("Truncated leaf entry header".to_string()));
+                return Err(Error::PageCorrupted(
+                    "Truncated leaf entry header".to_string(),
+                ));
             }
             let klen = u16::from_le_bytes(buf[pos..pos + 2].try_into().unwrap()) as usize;
             let vlen = u16::from_le_bytes(buf[pos + 2..pos + 4].try_into().unwrap()) as usize;
             pos += 4;
             if pos + klen + vlen > buf.len() {
-                return Err(Error::PageCorrupted("Truncated leaf entry payload".to_string()));
+                return Err(Error::PageCorrupted(
+                    "Truncated leaf entry payload".to_string(),
+                ));
             }
             let entry_key = &buf[pos..pos + klen];
             pos += klen;
@@ -934,7 +958,7 @@ impl BPlusTree {
         loop {
             let next_id = leaf.next_leaf_page_id;
             // Move keys/values out of the (already owned) leaf instead of cloning.
-            for (k, v) in leaf.keys.into_iter().zip(leaf.values.into_iter()) {
+            for (k, v) in leaf.keys.into_iter().zip(leaf.values) {
                 match &range.start {
                     KeyBound::Included(sk) if k.as_slice() < sk.as_slice() => continue,
                     KeyBound::Excluded(sk) if k.as_slice() <= sk.as_slice() => continue,
@@ -974,7 +998,7 @@ impl BPlusTree {
         let mut out = Vec::new();
         loop {
             let prev_id = leaf.prev_leaf_page_id;
-            for (k, v) in leaf.keys.into_iter().zip(leaf.values.into_iter()).rev() {
+            for (k, v) in leaf.keys.into_iter().zip(leaf.values).rev() {
                 match &range.end {
                     KeyBound::Included(ek) if k.as_slice() > ek.as_slice() => continue,
                     KeyBound::Excluded(ek) if k.as_slice() >= ek.as_slice() => continue,
@@ -2114,7 +2138,8 @@ mod tests {
             let mut last = wal.append_record(LogRecord::new_begin(0, 7)).unwrap();
             for i in 0..5 {
                 let k = format!("key_{:02}", i);
-                tree.insert_logged(7, &mut last, k.as_bytes(), b"v").unwrap();
+                tree.insert_logged(7, &mut last, k.as_bytes(), b"v")
+                    .unwrap();
             }
             wal.commit(7, last).unwrap();
             recovery.create_checkpoint().unwrap();
@@ -2180,7 +2205,8 @@ mod tests {
             let mut last = wal.append_record(LogRecord::new_begin(0, 6)).unwrap();
             for i in 0..2 {
                 let k = format!("key_{:02}", i);
-                tree.insert_logged(6, &mut last, k.as_bytes(), b"v").unwrap();
+                tree.insert_logged(6, &mut last, k.as_bytes(), b"v")
+                    .unwrap();
             }
             wal.commit(6, last).unwrap();
             recovery.create_checkpoint().unwrap();
@@ -2244,7 +2270,8 @@ mod tests {
         {
             let disk = Arc::new(DiskManager::open_or_create(db_path.as_path()).unwrap());
             let bpm = Arc::new(BufferPoolManager::new(disk.clone(), 16));
-            let wal = Arc::new(WalManager::open_with_segment_size(wal_path.as_path(), 256).unwrap());
+            let wal =
+                Arc::new(WalManager::open_with_segment_size(wal_path.as_path(), 256).unwrap());
             let recovery = RecoveryManager::new(wal.clone(), bpm.clone());
             let tree = BPlusTree::create(bpm.clone(), Some(wal.clone()), 4).unwrap();
 
@@ -2252,7 +2279,8 @@ mod tests {
             let mut last = wal.append_record(LogRecord::new_begin(0, 6)).unwrap();
             for i in 0..2 {
                 let k = format!("key_{:02}", i);
-                tree.insert_logged(6, &mut last, k.as_bytes(), b"v").unwrap();
+                tree.insert_logged(6, &mut last, k.as_bytes(), b"v")
+                    .unwrap();
             }
             wal.commit(6, last).unwrap();
             recovery.create_checkpoint().unwrap();
@@ -2285,7 +2313,8 @@ mod tests {
 
         {
             let disk = Arc::new(DiskManager::open_or_create(db_path.as_path()).unwrap());
-            let wal = Arc::new(WalManager::open_with_segment_size(wal_path.as_path(), 256).unwrap());
+            let wal =
+                Arc::new(WalManager::open_with_segment_size(wal_path.as_path(), 256).unwrap());
             let bpm = Arc::new(BufferPoolManager::new(disk.clone(), 16));
             let recovery = RecoveryManager::new(wal.clone(), bpm.clone());
             recovery.recover().unwrap();
@@ -2305,7 +2334,13 @@ mod tests {
 
     #[test]
     fn test_btree_delete_batch_logged_multi_leaf() {
-        let temp_dir = std::env::temp_dir().join(format!("mitrdb_batch_del_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let temp_dir = std::env::temp_dir().join(format!(
+            "mitrdb_batch_del_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
         let _ = std::fs::create_dir_all(&temp_dir);
         let dm = Arc::new(DiskManager::open_or_create(temp_dir.join("test.db")).unwrap());
         let wm = Arc::new(WalManager::open_or_create(temp_dir.join("test.wal")).unwrap());
@@ -2313,13 +2348,18 @@ mod tests {
         let tree = BPlusTree::create(bpm, Some(wm), 64).unwrap();
 
         let mut lsn = 0;
-        let keys: Vec<Vec<u8>> = (0..200).map(|i| format!("key_{:04}", i).into_bytes()).collect();
+        let keys: Vec<Vec<u8>> = (0..200)
+            .map(|i| format!("key_{:04}", i).into_bytes())
+            .collect();
         for k in &keys {
             tree.insert_logged(1, &mut lsn, k, b"val").unwrap();
         }
 
         // Delete even keys in batch
-        let del_keys: Vec<Vec<u8>> = (0..200).filter(|i| i % 2 == 0).map(|i| format!("key_{:04}", i).into_bytes()).collect();
+        let del_keys: Vec<Vec<u8>> = (0..200)
+            .filter(|i| i % 2 == 0)
+            .map(|i| format!("key_{:04}", i).into_bytes())
+            .collect();
         let del_slices: Vec<&[u8]> = del_keys.iter().map(|k| k.as_slice()).collect();
         let deleted = tree.delete_batch_logged(1, &mut lsn, &del_slices).unwrap();
         assert_eq!(deleted, 100);
@@ -2383,7 +2423,10 @@ mod tests {
             leaf = tree.read_node(leaf.next_leaf_page_id).unwrap();
             leaf_count += 1;
         }
-        eprintln!("sequential 1000 keys, max_keys=64: leaf_count={}", leaf_count);
+        eprintln!(
+            "sequential 1000 keys, max_keys=64: leaf_count={}",
+            leaf_count
+        );
         // 50/50 split gives ~31 leaves; append-split should give ~16.
         assert!(leaf_count <= 20, "leaf_count={}", leaf_count);
 

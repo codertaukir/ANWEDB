@@ -1,11 +1,20 @@
+#![allow(
+    clippy::ptr_arg,
+    clippy::collapsible_if,
+    clippy::type_complexity,
+    unused_imports
+)]
 use mitrdb_server::{ExecutionResult, Server, Value};
 
 fn open(tag: &str) -> Server {
     let dir = std::env::temp_dir().join(format!("mitrdb_im_{}_{}", std::process::id(), tag));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    let s = Server::open(dir.join("t.db"), dir.join("t.wal"), 64).unwrap().0;
-    s.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, name TEXT)").unwrap();
+    let s = Server::open(dir.join("t.db"), dir.join("t.wal"), 64)
+        .unwrap()
+        .0;
+    s.execute_sql("CREATE TABLE t (id INT PRIMARY KEY, name TEXT)")
+        .unwrap();
     s
 }
 
@@ -31,7 +40,8 @@ fn many_rows_in_one_command() {
 #[test]
 fn quotes_commas_and_brackets_inside_text_are_kept() {
     let s = open("b");
-    s.execute_sql("INSERT INTO t VALUES (1,'a,b'),(2,'c)(d'),(3,'it''s')").unwrap();
+    s.execute_sql("INSERT INTO t VALUES (1,'a,b'),(2,'c)(d'),(3,'it''s')")
+        .unwrap();
     let names: Vec<Value> = s
         .table("t")
         .find()
@@ -50,11 +60,20 @@ fn quotes_commas_and_brackets_inside_text_are_kept() {
 fn one_bad_row_rolls_back_everything() {
     let s = open("c");
     s.execute_sql("INSERT INTO t VALUES (1,'x')").unwrap();
-    assert!(s.execute_sql("INSERT INTO t VALUES (2,'b'),(1,'dup'),(3,'c')").is_err());
+    assert!(
+        s.execute_sql("INSERT INTO t VALUES (2,'b'),(1,'dup'),(3,'c')")
+            .is_err()
+    );
     assert_eq!(count(&s), 1);
-    assert!(s.execute_sql("INSERT INTO t VALUES (5,'a'),(5,'same')").is_err());
+    assert!(
+        s.execute_sql("INSERT INTO t VALUES (5,'a'),(5,'same')")
+            .is_err()
+    );
     assert_eq!(count(&s), 1);
-    assert!(s.execute_sql("INSERT INTO t VALUES (7,'a'),('x','b')").is_err());
+    assert!(
+        s.execute_sql("INSERT INTO t VALUES (7,'a'),('x','b')")
+            .is_err()
+    );
     assert!(s.execute_sql("INSERT INTO t VALUES (8,'a'),(9)").is_err());
     assert_eq!(count(&s), 1);
 }
@@ -81,10 +100,17 @@ fn malformed_and_injection_forms_are_rejected() {
 fn row_limit_is_enforced() {
     let s = open("e");
     let rows = |n: usize| {
-        (0..n).map(|i| format!("({i},'x')")).collect::<Vec<_>>().join(",")
+        (0..n)
+            .map(|i| format!("({i},'x')"))
+            .collect::<Vec<_>>()
+            .join(",")
     };
-    assert!(s.execute_sql(&format!("INSERT INTO t VALUES {}", rows(1001))).is_err());
+    assert!(
+        s.execute_sql(&format!("INSERT INTO t VALUES {}", rows(1001)))
+            .is_err()
+    );
     assert_eq!(count(&s), 0);
-    s.execute_sql(&format!("INSERT INTO t VALUES {}", rows(1000))).unwrap();
+    s.execute_sql(&format!("INSERT INTO t VALUES {}", rows(1000)))
+        .unwrap();
     assert_eq!(count(&s), 1000);
 }
