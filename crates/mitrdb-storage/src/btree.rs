@@ -1,3 +1,7 @@
+
+thread_local! {
+    static THREAD_LEAF_HINTS: std::cell::RefCell<std::collections::HashMap<u64, PageId>> = std::cell::RefCell::new(std::collections::HashMap::new());
+}
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
@@ -523,16 +527,18 @@ impl BPlusTree {
     pub fn set_root_page_id(&self, root_page_id: PageId) {
         *self.root_page_id.write().unwrap() = root_page_id;
         // Root changed from outside: any cached leaf may no longer belong here.
-        self.last_leaf_hint
-            .store(INVALID_PAGE_ID, Ordering::Relaxed);
+        THREAD_LEAF_HINTS.with(|hints| {
+            hints.borrow_mut().remove(&self.tree_id);
+        });
     }
 
     /// Drops the cached rightmost-leaf hint. Safe to call at any time; the next
     /// insert simply does a normal root-to-leaf descent. Intended for callers
     /// that roll back structural changes (e.g. after an aborted split).
     pub fn invalidate_leaf_hint(&self) {
-        self.last_leaf_hint
-            .store(INVALID_PAGE_ID, Ordering::Relaxed);
+        THREAD_LEAF_HINTS.with(|hints| {
+            hints.borrow_mut().remove(&self.tree_id);
+        });
     }
 
     pub fn read_node(&self, page_id: PageId) -> Result<BTreeNode> {
@@ -1040,7 +1046,9 @@ impl BPlusTree {
 
         // FAST PATH: Optimistic Shared-Root Descent (Non-splitting mutations)
         let root_id = *self.root_page_id.read().unwrap();
-        let hint_pid = self.last_leaf_hint.load(Ordering::Relaxed);
+        let hint_pid = THREAD_LEAF_HINTS.with(|hints| {
+            hints.borrow().get(&self.tree_id).copied().unwrap_or(INVALID_PAGE_ID)
+        });
         let mut leaf = if hint_pid != INVALID_PAGE_ID {
             match self.read_node(hint_pid) {
                 Ok(cached_leaf)
@@ -1071,7 +1079,9 @@ impl BPlusTree {
             let is_rightmost = leaf.next_leaf_page_id == INVALID_PAGE_ID;
             self.write_node(&leaf, txn_id, prev_lsn)?;
             if is_rightmost {
-                self.last_leaf_hint.store(pid, Ordering::Relaxed);
+                THREAD_LEAF_HINTS.with(|hints| {
+                hints.borrow_mut().insert(self.tree_id, pid);
+            });
             }
             return Ok(old_value);
         }
@@ -1094,7 +1104,9 @@ impl BPlusTree {
             let is_rightmost = leaf.next_leaf_page_id == INVALID_PAGE_ID;
             self.write_node(&leaf, txn_id, prev_lsn)?;
             if is_rightmost {
-                self.last_leaf_hint.store(pid, Ordering::Relaxed);
+                THREAD_LEAF_HINTS.with(|hints| {
+                hints.borrow_mut().insert(self.tree_id, pid);
+            });
             }
             return Ok(old_value);
         }
@@ -1497,8 +1509,9 @@ impl BPlusTree {
     pub fn delete_logged(&self, txn_id: TxnId, prev_lsn: &mut Lsn, key: &[u8]) -> Result<bool> {
         let _op_guard = self.bpm.acquire_op_shared();
         let mut root_guard = self.root_page_id.write().unwrap();
-        self.last_leaf_hint
-            .store(INVALID_PAGE_ID, Ordering::Relaxed);
+        THREAD_LEAF_HINTS.with(|hints| {
+            hints.borrow_mut().remove(&self.tree_id);
+        });
         let mut leaf = self.find_leaf_page(*root_guard, key)?;
 
         let idx = match leaf.keys.binary_search_by(|k| k.as_slice().cmp(key)) {
@@ -1524,8 +1537,9 @@ impl BPlusTree {
         }
         let _op_guard = self.bpm.acquire_op_shared();
         let mut root_guard = self.root_page_id.write().unwrap();
-        self.last_leaf_hint
-            .store(INVALID_PAGE_ID, Ordering::Relaxed);
+        THREAD_LEAF_HINTS.with(|hints| {
+            hints.borrow_mut().remove(&self.tree_id);
+        });
 
         let mut deleted_count = 0;
         let mut key_idx = 0;
@@ -2122,8 +2136,9 @@ impl BPlusTree {
     pub fn free_all_pages_logged(&self, txn_id: TxnId, prev_lsn: &mut Lsn) -> Result<()> {
         let _op_guard = self.bpm.acquire_op_shared();
         // Every page of this tree is about to be freed: the cached leaf must not survive.
-        self.last_leaf_hint
-            .store(INVALID_PAGE_ID, Ordering::Relaxed);
+        THREAD_LEAF_HINTS.with(|hints| {
+            hints.borrow_mut().remove(&self.tree_id);
+        });
         let pages = self.collect_all_pages()?;
         for pid in pages {
             self.free_btree_page(pid, txn_id, prev_lsn)?;
