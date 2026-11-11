@@ -4,6 +4,8 @@ Status tracker. `[x]` = done and measured/tested, `[ ]` = pending.
 "measured" = terminal output se confirm, "andaza" = abhi measure nahi hua.
 
 ## Done
+- [x] Crash recovery ARIES local CLR anomaly & split reconciliation (19ebf03): local CLR updates se page LSN advance hone par contiguous backward undo slices ko stale samajhne ka bug fix kiya (`generated_clrs` tracking). Page splits/churn se skipped uncommitted records ko capture karne ke liye `SkippedUndo` mechanism add kiya aur `Server::open` mein `catalog.all_table_trees()` ke zariye post-recovery B+Tree key reconciliation implement ki. `ckpt_reclaim` aur `v1_group_f_server_tests` 100% pass, insert throughput ~52k rows/sec maintain raha.
+
 - [x] B+Tree, MVCC + Serializable, WAL + crash recovery + group commit, checkpoint + vacuum, backup/restore, indexes, SQL, TCP + TLS, metrics, CI
 
 - [x] Read-only commit ka WAL fsync skip (7c0f366)
