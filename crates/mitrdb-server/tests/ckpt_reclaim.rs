@@ -93,6 +93,9 @@ fn crash_recovery_with_active_txn_across_checkpoint_and_reclaim() {
 
     let (srv, report) = Server::open_with_segment_size(dir.join("t.db"), dir.join("t.wal"), 256, SEG).unwrap();
     eprintln!("CRASH recovery report: {:?}", report);
+    if let Ok(res) = srv.execute_sql("SELECT id, name FROM t LIMIT 5") {
+        eprintln!("DEBUG_ROWS_IN_T: {:?}", res);
+    }
     assert_eq!(count(&srv), 2500, "uncommitted row must be gone, committed rows intact");
     match srv.execute_sql("SELECT COUNT(*) FROM t WHERE id = 900000").unwrap() {
         ExecutionResult::Rows { rows, .. } => assert_eq!(rows[0][0], Value::Int64(0)),

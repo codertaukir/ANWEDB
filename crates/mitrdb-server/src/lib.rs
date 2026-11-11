@@ -126,6 +126,24 @@ impl Server {
         perms::restrict_db_files(&db_copy, &wal_copy);
 
         let catalog = Arc::new(Catalog::with_storage(bpm.clone(), Some(wal.clone())));
+
+        // Post-recovery reconciliation: prune uncommitted keys whose physical undo was skipped
+        if !report.skipped_undos.is_empty() {
+            let trees = catalog.all_table_trees();
+            for tree in trees {
+                if let Ok(records) = tree.range_scan_bounds(&mitrdb_storage::btree::KeyRange::full()) {
+                    for (k, _) in records {
+                        for skipped in &report.skipped_undos {
+                            if skipped.redo_data.windows(k.len()).any(|window| window == k.as_slice()) {
+                                let mut dummy_lsn = 0;
+                                let _ = tree.delete_logged(skipped.txn_id, &mut dummy_lsn, &k);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         let txn_mgr = Arc::new(TxnManager::with_storage(wal.clone(), bpm.clone()));
         let query_engine = QueryEngine::new(catalog.clone());
         let executor = Executor::new();

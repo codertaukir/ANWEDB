@@ -1619,21 +1619,27 @@ impl BPlusTree {
             cand_left.next_leaf_page_id = old_next;
 
             if cand_left.keys.len() <= (self.max_keys as usize) && cand_left.fits_in_page() {
-                left_sibling = cand_left;
-                self.write_node(&left_sibling, txn_id, prev_lsn)?;
-
-                if old_next != INVALID_PAGE_ID {
-                    let mut next_leaf = self.read_node(old_next)?;
-                    next_leaf.prev_leaf_page_id = left_sibling.page_id;
-                    self.write_node(&next_leaf, txn_id, prev_lsn)?;
-                }
+                let next_leaf_opt = if old_next != INVALID_PAGE_ID {
+                    let mut nl = self.read_node(old_next)?;
+                    nl.prev_leaf_page_id = cand_left.page_id;
+                    Some(nl)
+                } else {
+                    None
+                };
 
                 let mut next_parent = parent;
                 next_parent.keys.remove(leaf_idx - 1);
                 next_parent.children.remove(leaf_idx);
 
+                left_sibling = cand_left;
+                self.write_node(&left_sibling, txn_id, prev_lsn)?;
+                if let Some(ref nl) = next_leaf_opt {
+                    self.write_node(nl, txn_id, prev_lsn)?;
+                }
+
+                self.rebalance_internal(root_guard, next_parent, txn_id, prev_lsn)?;
                 self.free_btree_page(leaf.page_id, txn_id, prev_lsn)?;
-                return self.rebalance_internal(root_guard, next_parent, txn_id, prev_lsn);
+                return Ok(());
             }
         } else {
             let right_sibling_id = parent.children[1];
@@ -1648,20 +1654,26 @@ impl BPlusTree {
             cand_leaf.next_leaf_page_id = old_next;
 
             if cand_leaf.keys.len() <= (self.max_keys as usize) && cand_leaf.fits_in_page() {
-                self.write_node(&cand_leaf, txn_id, prev_lsn)?;
-
-                if old_next != INVALID_PAGE_ID {
-                    let mut next_leaf = self.read_node(old_next)?;
-                    next_leaf.prev_leaf_page_id = cand_leaf.page_id;
-                    self.write_node(&next_leaf, txn_id, prev_lsn)?;
-                }
+                let next_leaf_opt = if old_next != INVALID_PAGE_ID {
+                    let mut nl = self.read_node(old_next)?;
+                    nl.prev_leaf_page_id = cand_leaf.page_id;
+                    Some(nl)
+                } else {
+                    None
+                };
 
                 let mut next_parent = parent;
                 next_parent.keys.remove(0);
                 next_parent.children.remove(1);
 
+                self.write_node(&cand_leaf, txn_id, prev_lsn)?;
+                if let Some(ref nl) = next_leaf_opt {
+                    self.write_node(nl, txn_id, prev_lsn)?;
+                }
+
+                self.rebalance_internal(root_guard, next_parent, txn_id, prev_lsn)?;
                 self.free_btree_page(right_sibling.page_id, txn_id, prev_lsn)?;
-                return self.rebalance_internal(root_guard, next_parent, txn_id, prev_lsn);
+                return Ok(());
             }
         }
 
@@ -1675,17 +1687,26 @@ impl BPlusTree {
             let mut left_sibling = self.read_node(left_sibling_id)?;
             let old_next = leaf.next_leaf_page_id;
             left_sibling.next_leaf_page_id = old_next;
-            self.write_node(&left_sibling, txn_id, prev_lsn)?;
-            if old_next != INVALID_PAGE_ID {
-                let mut next_leaf = self.read_node(old_next)?;
-                next_leaf.prev_leaf_page_id = left_sibling.page_id;
-                self.write_node(&next_leaf, txn_id, prev_lsn)?;
-            }
+
+            let next_leaf_opt = if old_next != INVALID_PAGE_ID {
+                let mut nl = self.read_node(old_next)?;
+                nl.prev_leaf_page_id = left_sibling.page_id;
+                Some(nl)
+            } else {
+                None
+            };
+
             let mut next_parent = parent;
             next_parent.keys.remove(leaf_idx - 1);
             next_parent.children.remove(leaf_idx);
-            self.free_btree_page(leaf.page_id, txn_id, prev_lsn)?;
-            self.rebalance_internal(root_guard, next_parent, txn_id, prev_lsn)
+
+            self.write_node(&left_sibling, txn_id, prev_lsn)?;
+            if let Some(ref nl) = next_leaf_opt {
+                self.write_node(nl, txn_id, prev_lsn)?;
+            }
+
+            self.rebalance_internal(root_guard, next_parent, txn_id, prev_lsn)?;
+            self.free_btree_page(leaf.page_id, txn_id, prev_lsn)
         } else {
             let right_sibling_id = parent.children[1];
             let right_sibling = self.read_node(right_sibling_id)?;
@@ -1693,17 +1714,26 @@ impl BPlusTree {
             leaf.keys = right_sibling.keys;
             leaf.values = right_sibling.values;
             leaf.next_leaf_page_id = old_next;
-            self.write_node(&leaf, txn_id, prev_lsn)?;
-            if old_next != INVALID_PAGE_ID {
-                let mut next_leaf = self.read_node(old_next)?;
-                next_leaf.prev_leaf_page_id = leaf.page_id;
-                self.write_node(&next_leaf, txn_id, prev_lsn)?;
-            }
+
+            let next_leaf_opt = if old_next != INVALID_PAGE_ID {
+                let mut nl = self.read_node(old_next)?;
+                nl.prev_leaf_page_id = leaf.page_id;
+                Some(nl)
+            } else {
+                None
+            };
+
             let mut next_parent = parent;
             next_parent.keys.remove(0);
             next_parent.children.remove(1);
-            self.free_btree_page(right_sibling.page_id, txn_id, prev_lsn)?;
-            self.rebalance_internal(root_guard, next_parent, txn_id, prev_lsn)
+
+            self.write_node(&leaf, txn_id, prev_lsn)?;
+            if let Some(ref nl) = next_leaf_opt {
+                self.write_node(nl, txn_id, prev_lsn)?;
+            }
+
+            self.rebalance_internal(root_guard, next_parent, txn_id, prev_lsn)?;
+            self.free_btree_page(right_sibling.page_id, txn_id, prev_lsn)
         }
     }
 
@@ -1845,15 +1875,21 @@ impl BPlusTree {
             cand_left.children.extend(node.children.iter().cloned());
 
             if cand_left.keys.len() <= (self.max_keys as usize) && cand_left.fits_in_page() {
-                for cid in moved_children {
+                let mut prepared_children = Vec::with_capacity(moved_children.len());
+                for &cid in &moved_children {
                     let mut child = self.read_node(cid)?;
                     child.parent_page_id = cand_left.page_id;
-                    self.write_node(&child, txn_id, prev_lsn)?;
+                    prepared_children.push(child);
                 }
 
+                for child in prepared_children {
+                    self.write_node(&child, txn_id, prev_lsn)?;
+                }
                 self.write_node(&cand_left, txn_id, prev_lsn)?;
+
+                self.rebalance_internal(root_guard, next_parent, txn_id, prev_lsn)?;
                 self.free_btree_page(node.page_id, txn_id, prev_lsn)?;
-                return self.rebalance_internal(root_guard, next_parent, txn_id, prev_lsn);
+                return Ok(());
             } else if !node.keys.is_empty() {
                 self.write_node(&node, txn_id, prev_lsn)?;
                 return Ok(());
@@ -1909,15 +1945,21 @@ impl BPlusTree {
                 .extend(right_sibling.children.iter().cloned());
 
             if cand_node.keys.len() <= (self.max_keys as usize) && cand_node.fits_in_page() {
-                for cid in moved_children {
+                let mut prepared_children = Vec::with_capacity(moved_children.len());
+                for &cid in &moved_children {
                     let mut child = self.read_node(cid)?;
                     child.parent_page_id = cand_node.page_id;
-                    self.write_node(&child, txn_id, prev_lsn)?;
+                    prepared_children.push(child);
                 }
 
+                for child in prepared_children {
+                    self.write_node(&child, txn_id, prev_lsn)?;
+                }
                 self.write_node(&cand_node, txn_id, prev_lsn)?;
+
+                self.rebalance_internal(root_guard, next_parent, txn_id, prev_lsn)?;
                 self.free_btree_page(right_sibling.page_id, txn_id, prev_lsn)?;
-                return self.rebalance_internal(root_guard, next_parent, txn_id, prev_lsn);
+                return Ok(());
             } else if !node.keys.is_empty() {
                 self.write_node(&node, txn_id, prev_lsn)?;
                 return Ok(());

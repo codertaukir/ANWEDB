@@ -9,13 +9,22 @@ use crate::buffer_pool::BufferPoolManager;
 use crate::page::{PAGE_FLAG_FREE, PAGE_TYPE_BTREE_INTERNAL, PAGE_TYPE_BTREE_LEAF, PAGE_TYPE_RAW};
 use crate::wal::{CheckpointMetadata, LogRecord, LogRecordType, WalManager};
 
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SkippedUndo {
+    pub txn_id: TxnId,
+    pub page_id: PageId,
+    pub offset: usize,
+    pub redo_data: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RecoveryReport {
     pub active_txns: Vec<TxnId>,
     pub committed_txns: Vec<TxnId>,
     pub aborted_txns: Vec<TxnId>,
     pub redone_records: usize,
     pub undone_records: usize,
+    pub skipped_undos: Vec<SkippedUndo>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -227,6 +236,8 @@ impl RecoveryManager {
         }
 
         let mut undone_count = 0;
+        let mut generated_clrs = std::collections::HashSet::new();
+        let mut skipped_undos = Vec::new();
         while !active_txns.is_empty() {
             let max_txn = *active_txns
                 .iter()
@@ -302,35 +313,53 @@ impl RecoveryManager {
                     );
                     let clr_lsn = self.wal_manager.append_record(clr)?;
                     self.wal_manager.flush_up_to(clr_lsn)?;
+                    generated_clrs.insert(clr_lsn);
 
                     self.bpm.unmark_page_free(rec.page_id);
-                    self.bpm.update_page_data(rec.page_id, |p| {
-                        p.data[offset..offset + len].copy_from_slice(&undo_payload);
-                        if is_full_btree_payload {
-                            match undo_payload[0] {
-                                NODE_KIND_LEAF => {
-                                    p.set_page_type(PAGE_TYPE_BTREE_LEAF);
-                                    p.set_flags(0);
-                                }
-                                NODE_KIND_INTERNAL => {
-                                    p.set_page_type(PAGE_TYPE_BTREE_INTERNAL);
-                                    p.set_flags(0);
-                                }
-                                NODE_KIND_FREE => {
-                                    p.set_page_type(PAGE_TYPE_RAW);
-                                    p.set_flags(PAGE_FLAG_FREE);
-                                }
-                                0 if rec.page_id == 0 => {
-                                    p.set_page_type(PAGE_TYPE_RAW);
-                                    p.set_flags(0);
-                                }
-                                _ => {}
-                            }
-                        }
-                        p.set_page_lsn(clr_lsn);
-                        Ok(())
-                    })?;
+                    let curr_page = self.bpm.fetch_page(rec.page_id)?;
+                    let curr_page_lsn = curr_page.page_lsn();
+                    self.bpm.unpin_page(rec.page_id, false)?;
+                    eprintln!("UNDO_PAGE_CHECK: page_id={} cur_lsn={} page_lsn={}", rec.page_id, cur_lsn, curr_page_lsn);
 
+                    let is_stale = curr_page_lsn > cur_lsn && !generated_clrs.contains(&curr_page_lsn);
+                    if !is_stale {
+                        self.bpm.update_page_data(rec.page_id, |p| {
+                            p.data[offset..offset + len].copy_from_slice(&undo_payload);
+                            if is_full_btree_payload {
+                                match undo_payload[0] {
+                                    NODE_KIND_LEAF => {
+                                        p.set_page_type(PAGE_TYPE_BTREE_LEAF);
+                                        p.set_flags(0);
+                                    }
+                                    NODE_KIND_INTERNAL => {
+                                        p.set_page_type(PAGE_TYPE_BTREE_INTERNAL);
+                                        p.set_flags(0);
+                                    }
+                                    NODE_KIND_FREE => {
+                                        p.set_page_type(PAGE_TYPE_RAW);
+                                        p.set_flags(PAGE_FLAG_FREE);
+                                    }
+                                    0 if rec.page_id == 0 => {
+                                        p.set_page_type(PAGE_TYPE_RAW);
+                                        p.set_flags(0);
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            p.set_page_lsn(clr_lsn);
+                            Ok(())
+                        })?;
+                    } else {
+                        eprintln!("SKIPPING stale undo slice: page_id={} cur_lsn={} page_lsn={}", rec.page_id, cur_lsn, curr_page_lsn);
+                        skipped_undos.push(SkippedUndo {
+                            txn_id: max_txn,
+                            page_id: rec.page_id,
+                            offset,
+                            redo_data: rec.redo_data.clone(),
+                        });
+                    }
+
+                    eprintln!("RECOVERY_UNDO: txn={} lsn={} page_id={} off={} len={} is_full={}", max_txn, cur_lsn, rec.page_id, offset, len, is_full_btree_payload);
                     GLOBAL_METRICS.record_recovery_undo();
                     undone_count += 1;
 
@@ -404,6 +433,7 @@ impl RecoveryManager {
             aborted_txns: sorted_aborted,
             redone_records: redone_count,
             undone_records: undone_count,
+            skipped_undos,
         })
     }
 
@@ -446,6 +476,7 @@ impl RecoveryManager {
         };
 
         let mut undone_count = 0usize;
+        let mut generated_clrs = std::collections::HashSet::new();
         loop {
             let cur_lsn = entry.undo_next_lsn;
             if cur_lsn == INVALID_LSN {
@@ -508,6 +539,7 @@ impl RecoveryManager {
                     );
                     let clr_lsn = self.wal_manager.append_record(clr)?;
                     self.wal_manager.flush_up_to(clr_lsn)?;
+                    generated_clrs.insert(clr_lsn);
 
                     self.bpm.unmark_page_free(rec.page_id);
                     self.bpm.update_page_data(rec.page_id, |p| {

@@ -404,34 +404,49 @@ impl BufferPoolManager {
 
             let allocate_started =
                 mitrdb_observe::profiling_enabled().then(std::time::Instant::now);
-            let (new_page_id, new_page) = self
-                .disk_manager
-                .allocate_page_with_filter(page_type, |cand_pid| {
-                    !page_table.contains_key(&cand_pid)
-                })?;
+            let mut excluded_candidates: [PageId; 8] = [0; 8];
+            let mut excluded_count = 0usize;
+
+            let (new_page_id, new_page) = loop {
+                let (cand_pid, cand_page) = self
+                    .disk_manager
+                    .allocate_page_with_filter(page_type, |cand_pid| {
+                        !page_table.contains_key(&cand_pid)
+                            && !excluded_candidates[..excluded_count].contains(&cand_pid)
+                    })?;
+
+                if let Some(&existing_idx) = page_table.get(&cand_pid) {
+                    if frames[existing_idx].pin_count > 0
+                        || (frames[existing_idx].is_dirty
+                            && (frames[existing_idx].page.flags() & PAGE_FLAG_FREE) == 0)
+                    {
+                        let _ = self.disk_manager.free_page(cand_pid);
+                        if excluded_count < excluded_candidates.len() {
+                            excluded_candidates[excluded_count] = cand_pid;
+                            excluded_count += 1;
+                            continue;
+                        } else {
+                            return Err(Error::Io(format!(
+                                "Allocated page {} conflicts with pinned or dirty active frame after retry exhaust",
+                                cand_pid
+                            )));
+                        }
+                    }
+                    frames[existing_idx].page_id = None;
+                    frames[existing_idx].pin_count = 0;
+                    frames[existing_idx].is_dirty = false;
+                    frames[existing_idx].ref_bit = false;
+                    page_table.remove(&cand_pid);
+                }
+
+                break (cand_pid, cand_page);
+            };
+
             if let Some(started) = allocate_started {
                 mitrdb_observe::record_profile_duration(
                     mitrdb_observe::ProfilePhase::BufferPoolDiskAllocate,
                     started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
                 );
-            }
-
-            if let Some(&existing_idx) = page_table.get(&new_page_id) {
-                if frames[existing_idx].pin_count > 0
-                    || (frames[existing_idx].is_dirty
-                        && (frames[existing_idx].page.flags() & PAGE_FLAG_FREE) == 0)
-                {
-                    let _ = self.disk_manager.free_page(new_page_id);
-                    return Err(Error::Io(format!(
-                        "Allocated page {} conflicts with pinned or dirty active frame",
-                        new_page_id
-                    )));
-                }
-                frames[existing_idx].page_id = None;
-                frames[existing_idx].pin_count = 0;
-                frames[existing_idx].is_dirty = false;
-                frames[existing_idx].ref_bit = false;
-                page_table.remove(&new_page_id);
             }
 
             let frame = &mut frames[victim_idx];

@@ -1317,6 +1317,11 @@ impl Catalog {
             .collect()
     }
 
+    pub fn all_table_trees(&self) -> Vec<Arc<BPlusTree>> {
+        let state = self.state.read().unwrap();
+        state.table_trees.values().cloned().collect()
+    }
+
     pub fn table_tree(&self, table_id: u32) -> Option<Arc<BPlusTree>> {
         let state = self.state.read().unwrap();
         state.table_trees.get(&table_id).cloned()
