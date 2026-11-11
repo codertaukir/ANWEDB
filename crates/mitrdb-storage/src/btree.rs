@@ -1037,8 +1037,9 @@ impl BPlusTree {
             return Err(Error::OutOfSpace);
         }
         let _op_guard = self.bpm.acquire_op_shared();
-        let mut root_guard = self.root_page_id.write().unwrap();
 
+        // FAST PATH: Optimistic Shared-Root Descent (Non-splitting mutations)
+        let root_id = *self.root_page_id.read().unwrap();
         let hint_pid = self.last_leaf_hint.load(Ordering::Relaxed);
         let mut leaf = if hint_pid != INVALID_PAGE_ID {
             match self.read_node(hint_pid) {
@@ -1050,10 +1051,10 @@ impl BPlusTree {
                 {
                     cached_leaf
                 }
-                _ => self.find_leaf_page(*root_guard, key)?,
+                _ => self.find_leaf_page(root_id, key)?,
             }
         } else {
-            self.find_leaf_page(*root_guard, key)?
+            self.find_leaf_page(root_id, key)?
         };
 
         let old_value = match leaf.keys.binary_search_by(|k| k.as_slice().cmp(key)) {
@@ -1069,16 +1070,35 @@ impl BPlusTree {
             let pid = leaf.page_id;
             let is_rightmost = leaf.next_leaf_page_id == INVALID_PAGE_ID;
             self.write_node(&leaf, txn_id, prev_lsn)?;
-            // Only the rightmost leaf is worth caching (sequential-insert fast path).
-            // Caching a middle leaf never gets reused and only risks going stale.
             if is_rightmost {
                 self.last_leaf_hint.store(pid, Ordering::Relaxed);
             }
             return Ok(old_value);
         }
 
-        // Split branch only: saare reads + saari page allocation kisi bhi write se pehle,
-        // taaki read/alloc fail ho to na WAL record bane, na tree aadha badle.
+        // SLOW PATH: Structural Modification (Split requires exclusive root write lock)
+        let mut root_guard = self.root_page_id.write().unwrap();
+        // Re-read leaf under exclusive root write lock in case root or page changed
+        let mut leaf = self.find_leaf_page(*root_guard, key)?;
+        let old_value = match leaf.keys.binary_search_by(|k| k.as_slice().cmp(key)) {
+            Ok(idx) => Some(std::mem::replace(&mut leaf.values[idx], value.to_vec())),
+            Err(idx) => {
+                leaf.keys.insert(idx, key.to_vec());
+                leaf.values.insert(idx, value.to_vec());
+                None
+            }
+        };
+
+        if leaf.keys.len() <= (self.max_keys as usize) && leaf.fits_in_page() {
+            let pid = leaf.page_id;
+            let is_rightmost = leaf.next_leaf_page_id == INVALID_PAGE_ID;
+            self.write_node(&leaf, txn_id, prev_lsn)?;
+            if is_rightmost {
+                self.last_leaf_hint.store(pid, Ordering::Relaxed);
+            }
+            return Ok(old_value);
+        }
+
         let plan = self.plan_split(&leaf)?;
         let mut pages = self.alloc_split_pages(plan.pages_needed)?;
         let res = self.split_leaf(
