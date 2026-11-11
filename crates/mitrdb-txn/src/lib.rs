@@ -2097,24 +2097,25 @@ impl TxnManager {
         }
 
         let res = (|| -> Result<()> {
-            let mvcc_lock_started = profiling.then(std::time::Instant::now);
-            let mut versions = self.mvcc_versions.lock().unwrap();
-            if let Some(started) = mvcc_lock_started {
-                mitrdb_observe::record_profile_duration(
-                    mitrdb_observe::ProfilePhase::MvccMutexWait,
-                    started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
-                );
-            }
-            let txn_lock_started = profiling.then(std::time::Instant::now);
-            let mut txns = self.txns.lock().unwrap();
-            if let Some(started) = txn_lock_started {
-                mitrdb_observe::record_profile_duration(
-                    mitrdb_observe::ProfilePhase::TxnMutexWait,
-                    started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
-                );
-            }
+            // PHASE 1: Validate, register uncommitted version marker under brief lock
+            let mut last_lsn = {
+                let mvcc_lock_started = profiling.then(std::time::Instant::now);
+                let mut versions = self.mvcc_versions.lock().unwrap();
+                if let Some(started) = mvcc_lock_started {
+                    mitrdb_observe::record_profile_duration(
+                        mitrdb_observe::ProfilePhase::MvccMutexWait,
+                        started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
+                    );
+                }
+                let txn_lock_started = profiling.then(std::time::Instant::now);
+                let txns = self.txns.lock().unwrap();
+                if let Some(started) = txn_lock_started {
+                    mitrdb_observe::record_profile_duration(
+                        mitrdb_observe::ProfilePhase::TxnMutexWait,
+                        started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
+                    );
+                }
 
-            let (isolation, read_ts, mut last_lsn) = {
                 let ctx = txns.get(&txn_id).ok_or_else(|| {
                     Error::TransactionError(format!("Unknown transaction ID {}", txn_id))
                 })?;
@@ -2124,74 +2125,42 @@ impl TxnManager {
                         txn_id
                     )));
                 }
-                (ctx.isolation, ctx.read_ts, ctx.last_lsn)
-            };
+                let (isolation, read_ts, lsn) = (ctx.isolation, ctx.read_ts, ctx.last_lsn);
 
-            if let Some(chain) = versions.get(&skey)
-                && let Some(latest) = chain.last()
-                && latest.xmin != txn_id
-                && let Some(writer) = txns.get(&latest.xmin)
-            {
-                match writer.state {
-                    TxnState::Active | TxnState::Committing => {
-                        return Err(Error::WriteConflict(format!(
-                            "Key modified by active/committing transaction {}",
-                            latest.xmin
-                        )));
-                    }
-                    TxnState::Aborted if writer.in_rollback => {
-                        return Err(Error::WriteConflict(format!(
-                            "Key modified by rolling-back transaction {}",
-                            latest.xmin
-                        )));
-                    }
-                    TxnState::Committed { commit_ts }
-                        if isolation != IsolationLevel::ReadCommitted && commit_ts > read_ts =>
-                    {
-                        return Err(Error::WriteConflict(format!(
-                            "First-committer-wins conflict with transaction {}",
-                            latest.xmin
-                        )));
-                    }
-                    _ => {}
-                }
-            }
-
-            let btree_started = profiling.then(std::time::Instant::now);
-            let old_btree_val = match new_value {
-                Some(val) => tree.insert_or_replace_logged(txn_id, &mut last_lsn, key, val)?,
-                None => {
-                    let old = tree.get(key)?;
-                    let _ = tree.delete_logged(txn_id, &mut last_lsn, key)?;
-                    old
-                }
-            };
-            if let Some(started) = btree_started {
-                mitrdb_observe::record_profile_duration(
-                    mitrdb_observe::ProfilePhase::BtreeMutation,
-                    started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
-                );
-            }
-
-            let version_chain_started = profiling.then(std::time::Instant::now);
-            {
-                let chain = versions.entry(skey).or_default();
-                if chain.is_empty()
-                    && let Some(ref baseline) = old_btree_val
+                if let Some(chain) = versions.get(&skey)
+                    && let Some(latest) = chain.last()
+                    && latest.xmin != txn_id
+                    && let Some(writer) = txns.get(&latest.xmin)
                 {
-                    chain.push(VersionedValue {
-                        xmin: 0,
-                        xmax: Some(txn_id),
-                        value: Some(baseline.clone()),
-                    });
-                    chain.push(VersionedValue {
-                        xmin: txn_id,
-                        xmax: None,
-                        value: new_value.map(|v| v.to_vec()),
-                    });
-                } else if let Some(prev) = chain.last_mut()
-                    && prev.xmax.is_none()
-                {
+                    match writer.state {
+                        TxnState::Active | TxnState::Committing => {
+                            return Err(Error::WriteConflict(format!(
+                                "Key modified by active/committing transaction {}",
+                                latest.xmin
+                            )));
+                        }
+                        TxnState::Aborted if writer.in_rollback => {
+                            return Err(Error::WriteConflict(format!(
+                                "Key modified by rolling-back transaction {}",
+                                latest.xmin
+                            )));
+                        }
+                        TxnState::Committed { commit_ts }
+                            if isolation != IsolationLevel::ReadCommitted && commit_ts > read_ts =>
+                        {
+                            return Err(Error::WriteConflict(format!(
+                                "First-committer-wins conflict with transaction {}",
+                                latest.xmin
+                            )));
+                        }
+                        _ => {}
+                    }
+                }
+
+                // Register uncommitted version in MVCC chain BEFORE mutating B-Tree
+                // so concurrent scans never interpret this in-flight key as an old committed baseline.
+                let chain = versions.entry(skey.clone()).or_default();
+                if let Some(prev) = chain.last_mut() && prev.xmax.is_none() {
                     if prev.xmin == txn_id {
                         prev.value = new_value.map(|v| v.to_vec());
                     } else {
@@ -2209,8 +2178,49 @@ impl TxnManager {
                         value: new_value.map(|v| v.to_vec()),
                     });
                 }
+                versions.index_tree_key(Self::tree_scope_prefix(tree), key);
+
+                lsn
+            };
+
+            // PHASE 2: B+Tree mutation executed WITHOUT holding mvcc or txn locks
+            let btree_started = profiling.then(std::time::Instant::now);
+            let old_btree_val = match new_value {
+                Some(val) => tree.insert_or_replace_logged(txn_id, &mut last_lsn, key, val)?,
+                None => {
+                    let old = tree.get(key)?;
+                    let _ = tree.delete_logged(txn_id, &mut last_lsn, key)?;
+                    old
+                }
+            };
+            if let Some(started) = btree_started {
+                mitrdb_observe::record_profile_duration(
+                    mitrdb_observe::ProfilePhase::BtreeMutation,
+                    started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
+                );
             }
-            versions.index_tree_key(Self::tree_scope_prefix(tree), key);
+
+            // PHASE 3: Attach synthetic baseline only if pre-existing disk record had no prior MVCC chain
+            let version_chain_started = profiling.then(std::time::Instant::now);
+            if let Some(ref baseline) = old_btree_val {
+                let mut versions = self.mvcc_versions.lock().unwrap();
+                if let Some(chain) = versions.get_mut(&skey) {
+                    // Only inject baseline if the chain only contains our in-flight version from Phase 1
+                    if chain.len() == 1 && chain[0].xmin == txn_id {
+                        chain.insert(0, VersionedValue {
+                            xmin: 0,
+                            xmax: Some(txn_id),
+                            value: Some(baseline.clone()),
+                        });
+                    }
+                }
+            }
+            {
+                let mut txns = self.txns.lock().unwrap();
+                if let Some(ctx) = txns.get_mut(&txn_id) {
+                    ctx.last_lsn = last_lsn;
+                }
+            }
             if let Some(started) = version_chain_started {
                 mitrdb_observe::record_profile_duration(
                     mitrdb_observe::ProfilePhase::VersionChainMutation,
@@ -2218,13 +2228,16 @@ impl TxnManager {
                 );
             }
 
-            let ctx = txns.get_mut(&txn_id).unwrap();
-            ctx.last_lsn = last_lsn;
-            ctx.write_set.push(UndoAction::BTreeKey {
-                tree: tree.clone(),
-                key: key.to_vec(),
-                old_value: old_btree_val,
-            });
+            {
+                let mut txns = self.txns.lock().unwrap();
+                let ctx = txns.get_mut(&txn_id).unwrap();
+                ctx.last_lsn = last_lsn;
+                ctx.write_set.push(UndoAction::BTreeKey {
+                    tree: tree.clone(),
+                    key: key.to_vec(),
+                    old_value: old_btree_val,
+                });
+            }
 
             Ok(())
         })();
