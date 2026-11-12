@@ -737,14 +737,20 @@ impl BPlusTree {
             {
                 let needs_fpi = cur_ptype != PAGE_TYPE_BTREE_LEAF
                     || wal.needs_full_page_image(cur_lsn);
-                if needs_fpi || ipos <= 48 {
+                if needs_fpi || new_payload_len <= 1024 {
                     let (wal_start, wal_end) = if needs_fpi {
                         (0usize, max_body)
                     } else {
                         (16usize, new_payload_len)
                     };
-                    let undo = buf[wal_start..wal_end].to_vec();
-                    let mut redo = undo.clone();
+                    let (mut undo, mut redo) = LEAF_WAL_SCRATCH.with(|s| {
+                        let mut s = s.borrow_mut();
+                        (std::mem::take(&mut s.b0), std::mem::take(&mut s.b1))
+                    });
+                    undo.clear();
+                    undo.extend_from_slice(&buf[wal_start..wal_end]);
+                    redo.clear();
+                    redo.extend_from_slice(&undo);
                     let rel_cnt = 16 - wal_start;
                     redo[rel_cnt..rel_cnt + 2].copy_from_slice(&(new_key_cnt as u16).to_le_bytes());
                     let rel_ipos = ipos - wal_start;
@@ -756,7 +762,7 @@ impl BPlusTree {
                     redo[rel_ipos + 4 + key.len()..rel_ipos + new_entry_len].copy_from_slice(value);
 
                     let offset = (PAGE_HEADER_SIZE + wal_start) as u16;
-                    match wal.append_record(LogRecord::new_update(
+                    let mut rec = LogRecord::new_update(
                         0,
                         txn_id,
                         *prev_lsn,
@@ -764,7 +770,14 @@ impl BPlusTree {
                         offset,
                         redo,
                         undo,
-                    )) {
+                    );
+                    let app_res = wal.append_record_ref(&mut rec);
+                    LEAF_WAL_SCRATCH.with(|s| {
+                        let mut s = s.borrow_mut();
+                        s.b0 = std::mem::take(&mut rec.undo_data);
+                        s.b1 = std::mem::take(&mut rec.redo_data);
+                    });
+                    match app_res {
                         Ok(lsn) => {
                             *prev_lsn = lsn;
                             new_lsn = Some(lsn);

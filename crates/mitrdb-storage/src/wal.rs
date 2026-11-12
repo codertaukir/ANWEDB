@@ -1198,9 +1198,7 @@ impl WalManager {
             return Ok(INVALID_LSN);
         }
         if records.len() == 1 {
-            let lsn = self.append_record(records[0].clone())?;
-            records[0].lsn = lsn;
-            return Ok(lsn);
+            return self.append_record_ref(&mut records[0]);
         }
         let profiling = mitrdb_observe::profiling_enabled();
         let append_started = profiling.then(std::time::Instant::now);
@@ -1329,6 +1327,10 @@ impl WalManager {
     }
 
     pub fn append_record(&self, mut record: LogRecord) -> Result<Lsn> {
+        self.append_record_ref(&mut record)
+    }
+
+    pub fn append_record_ref(&self, record: &mut LogRecord) -> Result<Lsn> {
         let profiling = mitrdb_observe::profiling_enabled();
         let append_started = profiling.then(std::time::Instant::now);
         #[cfg(feature = "fault-injection")]
@@ -1398,7 +1400,7 @@ impl WalManager {
         let start = inner.pending_base + inner.pending_bytes.len() as u64;
         record.serialize_append(&mut inner.pending_bytes);
 
-        inner.track_record(&record);
+        inner.track_record(record);
         inner.next_lsn = next_lsn;
         inner.pending.push(PendingRecord {
             lsn: assigned_lsn,
