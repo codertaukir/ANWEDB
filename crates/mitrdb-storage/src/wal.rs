@@ -286,8 +286,7 @@ impl LogRecord {
 
     /// Appends this record's serialized bytes to the END of `buf` (existing
     /// contents are preserved). The CRC covers only the bytes appended here.
-    pub fn serialize_append(&self, buf: &mut Vec<u8>) {
-        let start = buf.len();
+    pub fn serialize_append_without_crc(&self, buf: &mut Vec<u8>) {
         let total_size = self.serialized_size();
         buf.reserve(total_size);
 
@@ -305,9 +304,15 @@ impl LogRecord {
         buf.extend_from_slice(&hdr);
         buf.extend_from_slice(&self.redo_data);
         buf.extend_from_slice(&self.undo_data);
+        buf.extend_from_slice(&[0u8; 4]);
+    }
 
-        let crc = crc32c::checksum(&buf[start..]);
-        buf.extend_from_slice(&crc.to_le_bytes());
+    pub fn serialize_append(&self, buf: &mut Vec<u8>) {
+        let start = buf.len();
+        self.serialize_append_without_crc(buf);
+        let crc_pos = buf.len() - 4;
+        let crc = crc32c::checksum(&buf[start..crc_pos]);
+        buf[crc_pos..].copy_from_slice(&crc.to_le_bytes());
     }
 
     pub fn serialize_into(&self, buf: &mut Vec<u8>) {
@@ -1342,7 +1347,7 @@ impl WalManager {
         WAL_SCRATCH.with(|cell| {
             let mut scratch = cell.borrow_mut();
             scratch.clear();
-            record.serialize_append(&mut scratch);
+            record.serialize_append_without_crc(&mut scratch);
         });
 
         let mut inner = self.inner.lock();
