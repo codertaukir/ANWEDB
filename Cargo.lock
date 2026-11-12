@@ -149,6 +149,7 @@ dependencies = [
  "mitrdb-common",
  "mitrdb-observe",
  "mitrdb-storage",
+ "parking_lot",
 ]
 
 [[package]]

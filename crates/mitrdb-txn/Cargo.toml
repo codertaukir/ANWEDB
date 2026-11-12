@@ -9,6 +9,7 @@ license = "Apache-2.0"
 mitrdb-common = { path = "../mitrdb-common" }
 mitrdb-observe = { path = "../mitrdb-observe" }
 mitrdb-storage = { path = "../mitrdb-storage" }
+parking_lot = "0.12"
 
 [features]
 # Test-only: forwards storage failure injection (DiskManager::set_fail_alloc_after).

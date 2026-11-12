@@ -1,8 +1,9 @@
+use parking_lot::{Condvar, Mutex, MutexGuard};
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Condvar, Mutex, MutexGuard};
+
 
 use std::os::unix::io::AsRawFd;
 
@@ -628,7 +629,6 @@ impl WalManager {
         let startup_ckpt = mgr
             .inner
             .lock()
-            .unwrap()
             .checkpoint_meta
             .map(|m| m.checkpoint_lsn)
             .unwrap_or(0);
@@ -646,9 +646,9 @@ impl WalManager {
     /// callers) must use this instead of `self.inner.lock()`, otherwise they can
     /// write/truncate the same segment concurrently with the leader.
     fn lock_quiesced(&self) -> MutexGuard<'_, WalInner> {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock();
         while inner.flush_in_progress {
-            inner = self.flush_cv.wait(inner).unwrap();
+            self.flush_cv.wait(&mut inner);
         }
         inner
     }
@@ -684,7 +684,7 @@ impl WalManager {
     }
 
     pub fn register_bpm(&self, bpm: &std::sync::Arc<crate::buffer_pool::BufferPoolManager>) {
-        let mut listeners = self.bpm_listeners.lock().unwrap();
+        let mut listeners = self.bpm_listeners.lock();
         listeners.retain(|w| w.strong_count() > 0);
         if !listeners
             .iter()
@@ -698,7 +698,7 @@ impl WalManager {
     /// All listeners are attempted; the first reclamation error is returned.
     pub fn notify_txn_finalized(&self, txn_id: TxnId) -> Result<()> {
         let upgraded: Vec<std::sync::Arc<crate::buffer_pool::BufferPoolManager>> = {
-            let mut listeners = self.bpm_listeners.lock().unwrap();
+            let mut listeners = self.bpm_listeners.lock();
             listeners.retain(|w| w.strong_count() > 0);
             listeners.iter().filter_map(|w| w.upgrade()).collect()
         };
@@ -827,7 +827,7 @@ impl WalManager {
     }
 
     pub fn truncate_torn_tail(&self) -> Result<Vec<LogRecord>> {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock();
         let ckpt_meta = self.load_checkpoint_metadata_from_disk()?;
         let mut discovered = self.discover_segments_on_disk()?;
 
@@ -1088,15 +1088,15 @@ impl WalManager {
     }
 
     pub fn next_lsn(&self) -> Lsn {
-        self.inner.lock().unwrap().next_lsn
+        self.inner.lock().next_lsn
     }
 
     pub fn flushed_lsn(&self) -> Lsn {
-        self.inner.lock().unwrap().flushed_lsn
+        self.inner.lock().flushed_lsn
     }
 
     pub fn max_segment_bytes(&self) -> u64 {
-        self.inner.lock().unwrap().max_segment_bytes
+        self.inner.lock().max_segment_bytes
     }
 
     pub fn set_max_segment_bytes(&self, max_segment_bytes: u64) -> Result<()> {
@@ -1106,14 +1106,13 @@ impl WalManager {
                 max_segment_bytes, MIN_WAL_SEGMENT_BYTES
             )));
         }
-        self.inner.lock().unwrap().max_segment_bytes = max_segment_bytes;
+        self.inner.lock().max_segment_bytes = max_segment_bytes;
         Ok(())
     }
 
     pub fn active_segment_id(&self) -> u64 {
         self.inner
             .lock()
-            .unwrap()
             .segments
             .last()
             .map(|s| s.segment_id)
@@ -1123,7 +1122,6 @@ impl WalManager {
     pub fn segment_ids(&self) -> Vec<u64> {
         self.inner
             .lock()
-            .unwrap()
             .segments
             .iter()
             .map(|s| s.segment_id)
@@ -1132,11 +1130,11 @@ impl WalManager {
 
     /// Flush ka intezaar karte (buffered) WAL bytes. Bulk statements isse memory pressure dekhte hain.
     pub fn pending_bytes_len(&self) -> usize {
-        self.inner.lock().unwrap().pending_bytes.len()
+        self.inner.lock().pending_bytes.len()
     }
 
     pub fn segment_count(&self) -> usize {
-        self.inner.lock().unwrap().segments.len()
+        self.inner.lock().segments.len()
     }
 
     pub fn segment_path_for_id(&self, segment_id: u64) -> PathBuf {
@@ -1148,20 +1146,20 @@ impl WalManager {
     }
 
     pub fn checkpoint_metadata(&self) -> Option<CheckpointMetadata> {
-        self.inner.lock().unwrap().checkpoint_meta
+        self.inner.lock().checkpoint_meta
     }
 
     pub fn max_user_txn_id(&self) -> TxnId {
-        self.inner.lock().unwrap().max_user_txn_id
+        self.inner.lock().max_user_txn_id
     }
 
     pub fn max_sys_txn_id(&self) -> TxnId {
-        self.inner.lock().unwrap().max_sys_txn_id
+        self.inner.lock().max_sys_txn_id
     }
 
     pub fn rotate_segment(&self) -> Result<u64> {
         self.flush_all()?;
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock();
         let Some(last_seg) = inner.segments.last() else {
             return Err(Error::WalCorrupted("WAL has no active segment".to_string()));
         };
@@ -1206,7 +1204,7 @@ impl WalManager {
         let append_started = profiling.then(std::time::Instant::now);
         #[cfg(feature = "fault-injection")]
         self.inject_append_fail()?;
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock();
         let mut last_lsn = INVALID_LSN;
 
         for record in records.iter_mut() {
@@ -1298,7 +1296,7 @@ impl WalManager {
         let append_started = profiling.then(std::time::Instant::now);
         #[cfg(feature = "fault-injection")]
         self.inject_append_fail()?;
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock();
         let assigned_lsn = inner.next_lsn;
         let next_lsn = assigned_lsn
             .checked_add(1)
@@ -1411,7 +1409,7 @@ impl WalManager {
     fn flush_up_to_inner(&self, target_lsn: Lsn) -> Result<()> {
         let flush_started = std::time::Instant::now();
         let lock_wait_started = std::time::Instant::now();
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock();
         GLOBAL_METRICS.record_wal_flush_lock_wait_ns(
             lock_wait_started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
         );
@@ -1448,7 +1446,7 @@ impl WalManager {
                 )));
             }
             if inner.flush_in_progress {
-                inner = self.flush_cv.wait(inner).unwrap();
+                self.flush_cv.wait(&mut inner);
                 continue;
             }
 
@@ -1462,7 +1460,7 @@ impl WalManager {
 
             let io_result = self.perform_flush_io(&batch);
 
-            inner = self.inner.lock().unwrap();
+            inner = self.inner.lock();
             match io_result {
                 Ok(()) => {
                     for (seg_id, nbytes) in batch.bytes_by_seg {
@@ -1572,7 +1570,7 @@ impl WalManager {
     }
 
     fn perform_flush_io(&self, batch: &FlushBatch) -> Result<()> {
-        let mut active_slot = self.active_segment_file.lock().unwrap();
+        let mut active_slot = self.active_segment_file.lock();
 
         for seg in &batch.segments {
             if seg.slice_start == seg.slice_end {
@@ -1913,7 +1911,7 @@ impl WalManager {
     }
 
     pub fn read_all_records(&self) -> Result<Vec<LogRecord>> {
-        let inner = self.inner.lock().unwrap();
+        let inner = self.inner.lock();
         let ckpt_meta = self.load_checkpoint_metadata_from_disk()?;
         let discovered = self.discover_segments_on_disk()?;
         if discovered.is_empty() {
@@ -2034,7 +2032,7 @@ impl WalManager {
     }
 
     pub fn pin_backup_horizon(&self, min_lsn: Lsn) -> u64 {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock();
         let pin_id = inner.next_pin_id;
         inner.next_pin_id += 1;
         inner.backup_pins.insert(pin_id, min_lsn);
@@ -2042,12 +2040,12 @@ impl WalManager {
     }
 
     pub fn unpin_backup_horizon(&self, pin_id: u64) {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock();
         inner.backup_pins.remove(&pin_id);
     }
 
     pub fn list_retained_segments(&self) -> Result<Vec<(u64, PathBuf)>> {
-        let inner = self.inner.lock().unwrap();
+        let inner = self.inner.lock();
         Ok(inner
             .segments
             .iter()
@@ -2095,7 +2093,7 @@ impl WalManager {
         }
 
         let (seg_path, target_len) = {
-            let inner = self.inner.lock().unwrap();
+            let inner = self.inner.lock();
             match inner.segments.iter().find(|s| s.segment_id == segment_id) {
                 Some(s) => (s.path.clone(), Some(s.flushed_bytes)),
                 None => (Self::segment_path(&self.path, segment_id), None),
@@ -2248,10 +2246,10 @@ mod tests {
             ))
             .unwrap();
         }
-        let cap_before = wal.inner.lock().unwrap().pending_bytes.capacity();
+        let cap_before = wal.inner.lock().pending_bytes.capacity();
         wal.flush_all().unwrap();
         let (len_after, cap_after) = {
-            let g = wal.inner.lock().unwrap();
+            let g = wal.inner.lock();
             (g.pending_bytes.len(), g.pending_bytes.capacity())
         };
         println!(

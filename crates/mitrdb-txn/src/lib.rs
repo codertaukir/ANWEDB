@@ -1,7 +1,8 @@
+use parking_lot::{Condvar, Mutex};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ops::{Bound as RangeBound, Deref, DerefMut};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
 
 use mitrdb_common::{Error, INVALID_LSN, Lsn, PAGE_HEADER_SIZE, PAGE_SIZE, PageId, Result, TxnId};
 use mitrdb_observe::GLOBAL_METRICS;
@@ -351,7 +352,7 @@ impl LockManager {
 
     fn drain_fast_shards_into_state(&self, state: &mut LockManagerState) {
         for shard_mutex in self.point_shards.iter() {
-            let mut shard = shard_mutex.lock().unwrap();
+            let mut shard = shard_mutex.lock();
             if shard.locks.is_empty() {
                 continue;
             }
@@ -376,7 +377,7 @@ impl LockManager {
         if self.active_slow_locks.load(Ordering::Acquire) == 0 {
             let idx = lock_shard_idx(skey);
             let mutex_started = profiling.then(std::time::Instant::now);
-            let mut shard = self.point_shards[idx].lock().unwrap();
+            let mut shard = self.point_shards[idx].lock();
             if let Some(started) = mutex_started {
                 mitrdb_observe::record_profile_duration(
                     mitrdb_observe::ProfilePhase::LockMutexWait,
@@ -429,7 +430,7 @@ impl LockManager {
     ) -> Result<()> {
         let profiling = mitrdb_observe::profiling_enabled();
         let mutex_started = profiling.then(std::time::Instant::now);
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock();
 
         if let Some(started) = mutex_started {
             mitrdb_observe::record_profile_duration(
@@ -523,7 +524,7 @@ impl LockManager {
 
         self.active_slow_locks.fetch_add(1, Ordering::AcqRel);
         let mutex_started = profiling.then(std::time::Instant::now);
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock();
         self.drain_fast_shards_into_state(&mut state);
         if let Some(started) = mutex_started {
             mitrdb_observe::record_profile_duration(
@@ -629,16 +630,15 @@ impl LockManager {
 
             let remaining = timeout - elapsed;
             let wait_started = profiling.then(std::time::Instant::now);
-            let result = self.cv.wait_timeout(state, remaining).unwrap();
+            let timed_out = self.cv.wait_for(&mut state, remaining).timed_out();
             if let Some(started) = wait_started {
                 mitrdb_observe::record_profile_duration(
                     mitrdb_observe::ProfilePhase::LockConditionWait,
                     started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
                 );
             }
-            state = result.0;
 
-            if result.1.timed_out() && start_time.elapsed() >= timeout {
+            if timed_out && start_time.elapsed() >= timeout {
                 state.wait_for.remove(&txn_id);
                 drop(state);
                 self.cv.notify_all();
@@ -651,7 +651,7 @@ impl LockManager {
         if delta.changes.is_empty() {
             return;
         }
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock();
         for (key, prev_mode) in delta.changes.into_iter().rev() {
             let mut remove_entry = false;
             if let Some(entry) = state.locks.get_mut(&key) {
@@ -709,22 +709,22 @@ impl LockManager {
     }
 
     pub fn cancel_wait(&self, txn_id: TxnId) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock();
         state.wait_for.remove(&txn_id);
     }
 
     pub fn wait_for_holders(&self, waiter: TxnId) -> HashSet<TxnId> {
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock();
         state.wait_for.get(&waiter).cloned().unwrap_or_default()
     }
 
     pub fn active_lock_count(&self) -> usize {
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock();
         state.locks.values().filter(|e| !e.is_free()).count()
     }
 
     pub fn held_locks_for_txn(&self, txn_id: TxnId) -> Vec<(LockKey, LockMode)> {
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock();
         let mut out = Vec::new();
         if let Some(keys) = state.by_txn.get(&txn_id) {
             for k in keys {
@@ -741,7 +741,7 @@ impl LockManager {
     }
 
     pub fn restore_locks_for_txn(&self, txn_id: TxnId, snapshot: &[(LockKey, LockMode)]) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock();
         if let Some(held_keys) = state.by_txn.remove(&txn_id) {
             for k in held_keys {
                 let mut remove_entry = false;
@@ -780,7 +780,7 @@ impl LockManager {
 
     pub fn release_all(&self, txn_id: TxnId) {
         for shard_mutex in self.point_shards.iter() {
-            let mut shard = shard_mutex.lock().unwrap();
+            let mut shard = shard_mutex.lock();
             if let Some(keys) = shard.by_txn.remove(&txn_id) {
                 for k in keys {
                     if shard.locks.get(&k) == Some(&txn_id) {
@@ -789,7 +789,7 @@ impl LockManager {
                 }
             }
         }
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock();
         if let Some(held_keys) = state.by_txn.remove(&txn_id) {
             for k in held_keys {
                 let mut remove_entry = false;
@@ -817,7 +817,7 @@ impl LockManager {
         self.cv.notify_all();
     }
     pub fn is_key_exclusively_locked_by_other(&self, key: &LockKey, txn_id: TxnId) -> bool {
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock();
         state
             .locks
             .get(key)
@@ -825,12 +825,12 @@ impl LockManager {
     }
     pub fn has_active_prefix_locks(&self, prefix: &[u8; 8]) -> bool {
         for shard_mutex in self.point_shards.iter() {
-            let shard = shard_mutex.lock().unwrap();
+            let shard = shard_mutex.lock();
             if shard.locks.keys().any(|k| k.len() >= 8 && &k[..8] == prefix) {
                 return true;
             }
         }
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock();
         state
             .point_by_tree
             .get(prefix)
@@ -1048,10 +1048,10 @@ impl TxnManager {
         &self.mvcc_shards[lock_shard_idx(skey)]
     }
 
-    fn lock_all_mvcc_shards(&self) -> Vec<std::sync::MutexGuard<'_, MvccVersionStore>> {
+    fn lock_all_mvcc_shards(&self) -> Vec<parking_lot::MutexGuard<'_, MvccVersionStore>> {
         let mut guards = Vec::with_capacity(LOCK_SHARDS);
         for s in self.mvcc_shards.iter() {
-            guards.push(s.lock().unwrap());
+            guards.push(s.lock());
         }
         guards
     }
@@ -1126,7 +1126,7 @@ impl TxnManager {
             return true;
         }
         let shards = self.lock_all_mvcc_shards();
-        let txns = self.txns.lock().unwrap();
+        let txns = self.txns.lock();
         if self.lock_manager.has_active_prefix_locks(&prefix) {
             return true;
         }
@@ -1153,7 +1153,7 @@ impl TxnManager {
             }
         }
         let mut shards = self.lock_all_mvcc_shards();
-        let mut txns = self.txns.lock().unwrap();
+        let mut txns = self.txns.lock();
         for (prefix, tid) in &scoped {
             if self.lock_manager.has_active_prefix_locks(prefix)
                 || shards.iter().any(|v| Self::has_active_tree_references_locked(prefix, *tid, v, &txns))
@@ -1195,7 +1195,7 @@ impl TxnManager {
             INVALID_LSN
         };
 
-        let mut txns = self.txns.lock().unwrap();
+        let mut txns = self.txns.lock();
         let read_ts = self.oracle_ts.load(Ordering::SeqCst);
         let ctx = TransactionContext {
             txn_id,
@@ -1219,17 +1219,16 @@ impl TxnManager {
     }
 
     pub fn isolation_level(&self, txn_id: TxnId) -> Option<IsolationLevel> {
-        self.txns.lock().unwrap().get(&txn_id).map(|t| t.isolation)
+        self.txns.lock().get(&txn_id).map(|t| t.isolation)
     }
 
     pub fn txn_state(&self, txn_id: TxnId) -> Option<TxnState> {
-        self.txns.lock().unwrap().get(&txn_id).map(|t| t.state)
+        self.txns.lock().get(&txn_id).map(|t| t.state)
     }
 
     pub fn is_in_rollback(&self, txn_id: TxnId) -> bool {
         self.txns
             .lock()
-            .unwrap()
             .get(&txn_id)
             .is_some_and(|t| t.in_rollback)
     }
@@ -1237,7 +1236,6 @@ impl TxnManager {
     pub fn is_rollback_poisoned(&self, txn_id: TxnId) -> bool {
         self.txns
             .lock()
-            .unwrap()
             .get(&txn_id)
             .is_some_and(|t| t.rollback_poisoned)
     }
@@ -1245,13 +1243,12 @@ impl TxnManager {
     pub fn is_commit_poisoned(&self, txn_id: TxnId) -> bool {
         self.txns
             .lock()
-            .unwrap()
             .get(&txn_id)
             .is_some_and(|t| t.commit_poisoned)
     }
 
     pub fn oldest_active_snapshot_ts(&self) -> u64 {
-        let txns = self.txns.lock().unwrap();
+        let txns = self.txns.lock();
         let current_oracle_ts = self.oracle_ts.load(Ordering::SeqCst);
         txns.values()
             .filter(|ctx| {
@@ -1265,32 +1262,31 @@ impl TxnManager {
     }
 
     pub fn tracked_txn_count(&self) -> usize {
-        self.txns.lock().unwrap().len()
+        self.txns.lock().len()
     }
 
     pub fn active_txn_count(&self) -> usize {
         self.txns
             .lock()
-            .unwrap()
             .values()
             .filter(|ctx| ctx.state == TxnState::Active)
             .count()
     }
 
     pub fn mvcc_key_count(&self) -> usize {
-        self.mvcc_shards.iter().map(|s| s.lock().unwrap().len()).sum()
+        self.mvcc_shards.iter().map(|s| s.lock().len()).sum()
     }
 
     pub fn mvcc_version_count(&self) -> usize {
         self.mvcc_shards
             .iter()
-            .map(|s| s.lock().unwrap().values().map(Vec::len).sum::<usize>())
+            .map(|s| s.lock().values().map(Vec::len).sum::<usize>())
             .sum()
     }
 
     pub fn vacuum(&self) -> VacuumReport {
         let mut shards = self.lock_all_mvcc_shards();
-        let mut txns = self.txns.lock().unwrap();
+        let mut txns = self.txns.lock();
 
         let current_oracle_ts = self.oracle_ts.load(Ordering::SeqCst);
         let horizon_ts = txns
@@ -1467,7 +1463,7 @@ impl TxnManager {
         )?;
 
         let res = (|| -> Result<Lsn> {
-            let mut txns = self.txns.lock().unwrap();
+            let mut txns = self.txns.lock();
             let ctx = txns.get_mut(&txn_id).ok_or_else(|| {
                 Error::TransactionError(format!("Unknown transaction ID {}", txn_id))
             })?;
@@ -1528,7 +1524,7 @@ impl TxnManager {
     }
 
     fn ensure_active_txn_info(&self, txn_id: TxnId) -> Result<(IsolationLevel, u64)> {
-        let txns = self.txns.lock().unwrap();
+        let txns = self.txns.lock();
         let ctx = txns
             .get(&txn_id)
             .ok_or_else(|| Error::TransactionError(format!("Unknown transaction ID {}", txn_id)))?;
@@ -1565,8 +1561,8 @@ impl TxnManager {
             retries += 1;
         }
 
-        let versions = self.mvcc_shard(skey).lock().unwrap();
-        let txns = self.txns.lock().unwrap();
+        let versions = self.mvcc_shard(skey).lock();
+        let txns = self.txns.lock();
 
         if let Some(chain) = versions.get(skey)
             && !chain.is_empty()
@@ -1603,7 +1599,7 @@ impl TxnManager {
         let val_res = self.read_key_visible_value(txn_id, isolation, read_ts, tree, key, &skey);
         match val_res {
             Ok(val) => {
-                let mut txns = self.txns.lock().unwrap();
+                let mut txns = self.txns.lock();
                 if let Some(ctx) = txns.get_mut(&txn_id) {
                     ctx.read_keys.insert(skey);
                 }
@@ -1706,7 +1702,7 @@ impl TxnManager {
             let mvcc_index_keys_inspected = {
                 let mut inspected = 0usize;
                 for s in self.mvcc_shards.iter() {
-                    inspected += s.lock().unwrap().extend_keys_in_range(prefix, range, &mut candidate_keys);
+                    inspected += s.lock().extend_keys_in_range(prefix, range, &mut candidate_keys);
                 }
                 GLOBAL_METRICS.record_mvcc_entries_inspected(inspected as u64);
                 inspected
@@ -1786,7 +1782,7 @@ impl TxnManager {
                 let mvcc_chunk_started = std::time::Instant::now();
                 {
                     let shards = self.lock_all_mvcc_shards();
-                    let txns = self.txns.lock().unwrap();
+                    let txns = self.txns.lock();
                     let chain_epoch_changed =
                         self.chain_epoch.load(Ordering::SeqCst) != chain_epoch0;
                     for key in key_batch {
@@ -1830,7 +1826,7 @@ impl TxnManager {
             }
 
             {
-                let mut txns = self.txns.lock().unwrap();
+                let mut txns = self.txns.lock();
                 if let Some(ctx) = txns.get_mut(&txn_id) {
                     if isolation == IsolationLevel::Serializable {
                         ctx.read_ranges.push((prefix, range.clone()));
@@ -1898,7 +1894,7 @@ impl TxnManager {
         {
             let mut inspected = 0usize;
             for s in self.mvcc_shards.iter() {
-                inspected += s.lock().unwrap().extend_keys_in_range(prefix, &KeyRange::full(), &mut candidate_keys);
+                inspected += s.lock().extend_keys_in_range(prefix, &KeyRange::full(), &mut candidate_keys);
             }
             GLOBAL_METRICS.record_mvcc_entries_inspected(inspected as u64);
         }
@@ -1912,7 +1908,7 @@ impl TxnManager {
                 Vec::with_capacity(key_batch.len());
             {
                 let shards = self.lock_all_mvcc_shards();
-                let txns = self.txns.lock().unwrap();
+                let txns = self.txns.lock();
                 let chain_epoch_changed = self.chain_epoch.load(Ordering::SeqCst) != chain_epoch0;
                 for key in key_batch {
                     let skey = Self::scoped_key(tree, key.as_slice());
@@ -2077,7 +2073,7 @@ impl TxnManager {
             };
 
         {
-            let mut txns = self.txns.lock().unwrap();
+            let mut txns = self.txns.lock();
             if let Some(ctx) = txns.get_mut(&txn_id) {
                 ctx.read_keys.insert(skey);
             }
@@ -2122,7 +2118,7 @@ impl TxnManager {
                     }
                 };
             {
-                let mut txns = self.txns.lock().unwrap();
+                let mut txns = self.txns.lock();
                 if let Some(ctx) = txns.get_mut(&txn_id) {
                     ctx.read_keys.insert(skey.clone());
                 }
@@ -2142,7 +2138,7 @@ impl TxnManager {
 
         // 3. Physical batch delete on BPlusTree
         let mut last_lsn = {
-            let txns = self.txns.lock().unwrap();
+            let txns = self.txns.lock();
             txns.get(&txn_id).map(|ctx| ctx.last_lsn).unwrap_or(0)
         };
 
@@ -2157,7 +2153,7 @@ impl TxnManager {
         // 4. Update MVCC version chains & transaction write-set
         {
             let mut shards = self.lock_all_mvcc_shards();
-            let mut txns = self.txns.lock().unwrap();
+            let mut txns = self.txns.lock();
             let ctx = txns.get_mut(&txn_id).ok_or_else(|| {
                 Error::TransactionError(format!("Transaction {} context missing", txn_id))
             })?;
@@ -2227,7 +2223,7 @@ impl TxnManager {
             // PHASE 1-3: Keep this key's 1/64th MVCC shard locked across B+Tree mutation
             // so readers never observe an in-flight chain missing its xmin=0 disk baseline.
             let mvcc_lock_started = profiling.then(std::time::Instant::now);
-            let mut versions = self.mvcc_shard(&skey).lock().unwrap();
+            let mut versions = self.mvcc_shard(&skey).lock();
             if let Some(started) = mvcc_lock_started {
                 mitrdb_observe::record_profile_duration(
                     mitrdb_observe::ProfilePhase::MvccMutexWait,
@@ -2237,7 +2233,7 @@ impl TxnManager {
             let mut last_lsn = {
 
                 let txn_lock_started = profiling.then(std::time::Instant::now);
-                let txns = self.txns.lock().unwrap();
+                let txns = self.txns.lock();
                 if let Some(started) = txn_lock_started {
                     mitrdb_observe::record_profile_duration(
                         mitrdb_observe::ProfilePhase::TxnMutexWait,
@@ -2352,7 +2348,7 @@ impl TxnManager {
             }
 
             {
-                let mut txns = self.txns.lock().unwrap();
+                let mut txns = self.txns.lock();
                 let ctx = txns.get_mut(&txn_id).unwrap();
                 ctx.last_lsn = last_lsn;
                 ctx.write_set.push(UndoAction::BTreeKey {
@@ -2366,7 +2362,7 @@ impl TxnManager {
         })();
 
         if res.is_err() {
-            if let Some(d) = lock_delta_opt { self.lock_manager.rollback_delta(txn_id, d); } else { let idx = lock_shard_idx(&skey); let mut sh = self.lock_manager.point_shards[idx].lock().unwrap(); if sh.locks.get(&skey) == Some(&txn_id) { sh.locks.remove(&skey); } }
+            if let Some(d) = lock_delta_opt { self.lock_manager.rollback_delta(txn_id, d); } else { let idx = lock_shard_idx(&skey); let mut sh = self.lock_manager.point_shards[idx].lock(); if sh.locks.get(&skey) == Some(&txn_id) { sh.locks.remove(&skey); } }
         }
         res
     }
@@ -2376,7 +2372,7 @@ impl TxnManager {
         let commit_started = profiling.then(std::time::Instant::now);
         let shards = self.lock_all_mvcc_shards();
         let txn_lock_started = std::time::Instant::now();
-        let mut txns = self.txns.lock().unwrap();
+        let mut txns = self.txns.lock();
         GLOBAL_METRICS.record_txn_mutex_wait_ns(
             txn_lock_started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
         );
@@ -2448,7 +2444,7 @@ impl TxnManager {
                 Ok(lsn) => lsn,
                 Err(err) => {
                     #[allow(clippy::collapsible_if)]
-                    if let Some(ctx) = self.txns.lock().unwrap().get_mut(&txn_id) {
+                    if let Some(ctx) = self.txns.lock().get_mut(&txn_id) {
                         if ctx.state == TxnState::Committing && !ctx.commit_poisoned {
                             ctx.state = TxnState::Active;
                         }
@@ -2475,7 +2471,7 @@ impl TxnManager {
             }
             if let Err(err) = flush_res {
                 if wal.flushed_lsn() < lsn {
-                    if let Some(ctx) = self.txns.lock().unwrap().get_mut(&txn_id) {
+                    if let Some(ctx) = self.txns.lock().get_mut(&txn_id) {
                         ctx.commit_poisoned = true;
                         ctx.poisoned_commit_lsn = Some(lsn);
                         self.poisoned_commits.fetch_add(1, Ordering::SeqCst);
@@ -2500,7 +2496,7 @@ impl TxnManager {
     #[allow(clippy::collapsible_if)]
     pub fn resolve_poisoned_commit(&self, txn_id: TxnId) -> Result<u64> {
         let lsn = {
-            let txns = self.txns.lock().unwrap();
+            let txns = self.txns.lock();
             let ctx = txns.get(&txn_id).ok_or_else(|| {
                 Error::TransactionError(format!("Unknown transaction ID {}", txn_id))
             })?;
@@ -2557,7 +2553,7 @@ impl TxnManager {
             return 0;
         }
         let ids: Vec<TxnId> = {
-            let txns = self.txns.lock().unwrap();
+            let txns = self.txns.lock();
             txns.iter()
                 .filter(|(_, c)| c.state == TxnState::Committing && c.commit_poisoned)
                 .map(|(id, _)| *id)
@@ -2579,7 +2575,7 @@ impl TxnManager {
         commit_started: Option<std::time::Instant>,
     ) -> Result<u64> {
         let txn_lock_started = std::time::Instant::now();
-        let mut txns = self.txns.lock().unwrap();
+        let mut txns = self.txns.lock();
         GLOBAL_METRICS.record_txn_mutex_wait_ns(
             txn_lock_started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
         );
@@ -2626,7 +2622,7 @@ impl TxnManager {
 
     /// Number of undo entries so far; used as a statement-rollback mark.
     pub fn write_mark(&self, txn_id: TxnId) -> Result<usize> {
-        let txns = self.txns.lock().unwrap();
+        let txns = self.txns.lock();
         let ctx = txns
             .get(&txn_id)
             .ok_or_else(|| Error::TransactionError(format!("Unknown transaction ID {}", txn_id)))?;
@@ -2637,7 +2633,7 @@ impl TxnManager {
     /// Caller must abort the whole txn if this returns Err.
     pub fn rollback_to_mark(&self, txn_id: TxnId, mark: usize) -> Result<()> {
         let (mut last_lsn, earlier) = {
-            let txns = self.txns.lock().unwrap();
+            let txns = self.txns.lock();
             let ctx = txns.get(&txn_id).ok_or_else(|| {
                 Error::TransactionError(format!("Unknown transaction ID {}", txn_id))
             })?;
@@ -2662,7 +2658,7 @@ impl TxnManager {
         let mut undone = false;
         loop {
             let next_action = {
-                let txns = self.txns.lock().unwrap();
+                let txns = self.txns.lock();
                 txns.get(&txn_id).and_then(|ctx| {
                     if ctx.write_set.len() > mark {
                         ctx.write_set.last().cloned()
@@ -2693,7 +2689,7 @@ impl TxnManager {
                         None => tree.delete_logged(txn_id, &mut last_lsn, &key).map(|_| ()),
                     };
                     if let Err(e) = undo_res {
-                        let mut txns = self.txns.lock().unwrap();
+                        let mut txns = self.txns.lock();
                         if let Some(ctx) = txns.get_mut(&txn_id) {
                             ctx.last_lsn = last_lsn;
                             if last_lsn != lsn_before || self.wal.is_none() {
@@ -2704,7 +2700,7 @@ impl TxnManager {
                     }
                     let skey = Self::scoped_key(&tree, &key);
                     {
-                        let mut versions = self.mvcc_shard(&skey).lock().unwrap();
+                        let mut versions = self.mvcc_shard(&skey).lock();
                         if let Some(chain) = versions.get_mut(&skey) {
                             if earlier.contains(&skey) {
                                 if let Some(last) = chain.last_mut()
@@ -2726,7 +2722,7 @@ impl TxnManager {
                 }
             }
             {
-                let mut txns = self.txns.lock().unwrap();
+                let mut txns = self.txns.lock();
                 if let Some(ctx) = txns.get_mut(&txn_id) {
                     ctx.last_lsn = last_lsn;
                     ctx.write_set.pop();
@@ -2736,7 +2732,7 @@ impl TxnManager {
 
         if undone {
             for s in self.mvcc_shards.iter() {
-                let mut versions = s.lock().unwrap();
+                let mut versions = s.lock();
                 versions.retain(|_, chain| !chain.is_empty());
                 versions.rebuild_tree_index();
             }
@@ -2747,7 +2743,7 @@ impl TxnManager {
 
     pub fn abort(&self, txn_id: TxnId) -> Result<()> {
         let mut last_lsn = {
-            let mut txns = self.txns.lock().unwrap();
+            let mut txns = self.txns.lock();
             let ctx = txns.get_mut(&txn_id).ok_or_else(|| {
                 Error::TransactionError(format!("Unknown transaction ID {}", txn_id))
             })?;
@@ -2775,7 +2771,7 @@ impl TxnManager {
 
         loop {
             let next_action = {
-                let txns = self.txns.lock().unwrap();
+                let txns = self.txns.lock();
                 txns.get(&txn_id)
                     .and_then(|ctx| ctx.write_set.last().cloned())
             };
@@ -2836,7 +2832,7 @@ impl TxnManager {
                         let _ = bpm.unpin_page(page_id, update_res.is_ok());
                         drop(_op_guard);
                         if let Err(e) = update_res {
-                            let mut txns = self.txns.lock().unwrap();
+                            let mut txns = self.txns.lock();
                             if let Some(ctx) = txns.get_mut(&txn_id) {
                                 ctx.last_lsn = last_lsn;
                                 if clr_lsn != INVALID_LSN {
@@ -2862,7 +2858,7 @@ impl TxnManager {
                         None => tree.delete_logged(txn_id, &mut last_lsn, &key).map(|_| ()),
                     };
                     if let Err(e) = undo_res {
-                        let mut txns = self.txns.lock().unwrap();
+                        let mut txns = self.txns.lock();
                         if let Some(ctx) = txns.get_mut(&txn_id) {
                             ctx.last_lsn = last_lsn;
                             if last_lsn != lsn_before || self.wal.is_none() {
@@ -2875,7 +2871,7 @@ impl TxnManager {
             }
 
             {
-                let mut txns = self.txns.lock().unwrap();
+                let mut txns = self.txns.lock();
                 if let Some(ctx) = txns.get_mut(&txn_id) {
                     ctx.last_lsn = last_lsn;
                     ctx.write_set.pop();
@@ -2885,14 +2881,14 @@ impl TxnManager {
 
         if let Some(ref wal) = self.wal {
             let already_logged = {
-                let txns = self.txns.lock().unwrap();
+                let txns = self.txns.lock();
                 txns.get(&txn_id).and_then(|ctx| ctx.abort_lsn_logged)
             };
             let abort_lsn = match already_logged {
                 Some(lsn) => lsn,
                 None => {
                     let lsn = wal.append_record(LogRecord::new_abort(0, txn_id, last_lsn))?;
-                    let mut txns = self.txns.lock().unwrap();
+                    let mut txns = self.txns.lock();
                     if let Some(ctx) = txns.get_mut(&txn_id) {
                         ctx.last_lsn = lsn;
                         ctx.abort_lsn_logged = Some(lsn);
@@ -2905,7 +2901,7 @@ impl TxnManager {
 
         {
             let mut shards = self.lock_all_mvcc_shards();
-            let mut txns = self.txns.lock().unwrap();
+            let mut txns = self.txns.lock();
             for versions in shards.iter_mut() {
                 for chain in versions.values_mut() {
                     chain.retain(|v| v.xmin != txn_id);
