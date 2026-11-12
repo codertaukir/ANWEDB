@@ -122,7 +122,7 @@ fn main() -> Result<(), String> {
             recorded.push((p.total_ns, phase_names[i], p.count));
         }
     }
-    recorded.sort_by(|a, b| b.0.cmp(&a.0));
+    recorded.sort_by_key(|a| std::cmp::Reverse(a.0));
     for (total_ns, name, count) in recorded {
         let ms = total_ns as f64 / 1_000_000.0;
         let avg_us = if count > 0 { (total_ns as f64 / count as f64) / 1_000.0 } else { 0.0 };

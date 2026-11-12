@@ -338,14 +338,14 @@ impl BufferPoolManager {
                 if let Some(victim_idx) = popped_free {
                     let (new_page_id, new_page) = self.disk_manager.allocate_page(page_type)?;
                     let mut target_shard = self.page_tables[shard_of(new_page_id)].write().unwrap();
-                    if !target_shard.contains_key(&new_page_id) {
+                    if let std::collections::hash_map::Entry::Vacant(entry) = target_shard.entry(new_page_id) {
                         let mut frame = self.frames[victim_idx].write().unwrap();
                         frame.page = new_page.clone();
                         frame.page_id = Some(new_page_id);
                         frame.pin_count.store(1, Ordering::Release);
                         frame.is_dirty.store(false, Ordering::Release);
                         frame.ref_bit.store(true, Ordering::Release);
-                        target_shard.insert(new_page_id, victim_idx);
+                        entry.insert(victim_idx);
                         return Ok((new_page_id, new_page));
                     }
                     drop(target_shard);
@@ -701,7 +701,7 @@ impl BufferPoolManager {
         let shard = self.page_tables[shard_of(page_id)].read().unwrap();
 
         if let Some(&frame_idx) = shard.get(&page_id) {
-            let frame = self.frames[frame_idx].write().unwrap();
+            let frame = self.frames[frame_idx].read().unwrap();
             if frame.is_dirty.load(Ordering::Acquire) {
                 self.enforce_wal_rule(frame.page.page_lsn())?;
                 self.disk_manager.write_page(page_id, &frame.page)?;

@@ -2382,17 +2382,17 @@ impl TxnManager {
 
             // PHASE 3: Attach synthetic baseline only if pre-existing disk record had no prior MVCC chain
             let version_chain_started = profiling.then(std::time::Instant::now);
-            if let Some(ref baseline) = old_btree_val {
-                if let Some(chain) = versions.get_mut(&skey) {
-                    // Only inject baseline if the chain only contains our in-flight version from Phase 1
-                    if chain.len() == 1 && chain[0].xmin == txn_id {
-                        chain.insert(0, VersionedValue {
-                            xmin: 0,
-                            xmax: Some(txn_id),
-                            value: Some(baseline.clone()),
-                        });
-                    }
-                }
+            if let Some(ref baseline) = old_btree_val
+                && let Some(chain) = versions.get_mut(&skey)
+                // Only inject baseline if the chain only contains our in-flight version from Phase 1
+                && chain.len() == 1
+                && chain[0].xmin == txn_id
+            {
+                chain.insert(0, VersionedValue {
+                    xmin: 0,
+                    xmax: Some(txn_id),
+                    value: Some(baseline.clone()),
+                });
             }
             drop(versions);
             if let Some(started) = version_chain_started {

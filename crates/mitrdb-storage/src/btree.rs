@@ -1,6 +1,9 @@
 
+type LeafHintEntry = (u64, PageId, PageId, Option<Vec<u8>>);
+type LeafInsertOutcome = (Option<(Option<Vec<u8>>, PageId)>, bool);
+
 thread_local! {
-    static THREAD_LEAF_HINTS: std::cell::RefCell<std::collections::HashMap<u64, (u64, PageId, PageId, Option<Vec<u8>>)>> = std::cell::RefCell::new(std::collections::HashMap::new());
+    static THREAD_LEAF_HINTS: std::cell::RefCell<std::collections::HashMap<u64, LeafHintEntry>> = std::cell::RefCell::new(std::collections::HashMap::new());
 }
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::cell::RefCell;
@@ -594,7 +597,7 @@ impl BPlusTree {
         prev_lsn: &mut Lsn,
         key: &[u8],
         value: &[u8],
-    ) -> Result<(Option<(Option<Vec<u8>>, PageId)>, bool)> {
+    ) -> Result<LeafInsertOutcome> {
         let max_body = PAGE_SIZE - PAGE_HEADER_SIZE;
         let mut outcome: Option<(Option<Vec<u8>>, PageId)> = None;
         let mut is_full = false;
