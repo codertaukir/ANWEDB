@@ -39,7 +39,7 @@ fn main() -> Result<(), String> {
         WalManager::open_or_create(dir.join("t.wal").as_path()).map_err(|e| format!("{e:?}"))?,
     );
     let tree = Arc::new(
-        BPlusTree::create(bpm.clone(), Some(wal.clone()), 4).map_err(|e| format!("{e:?}"))?,
+        BPlusTree::create(bpm.clone(), Some(wal.clone()), 128).map_err(|e| format!("{e:?}"))?,
     );
     let mgr = Arc::new(TxnManager::with_storage(wal.clone(), bpm.clone()));
     let mut tids = Vec::new();
@@ -72,6 +72,15 @@ fn main() -> Result<(), String> {
         h.join().map_err(|_| "thread panicked".to_string())??;
     }
     let wall = start.elapsed().as_secs_f64();
+    let m = mitrdb_observe::GLOBAL_METRICS.snapshot();
+    println!(
+        "METRICS: buffer_evictions={} buffer_hits={} buffer_misses={} page_reads={} page_writes={}",
+        m.buffer_evictions, m.buffer_hits, m.buffer_misses, m.page_reads, m.page_writes
+    );
+    assert_eq!(
+        m.buffer_evictions, 0,
+        "Eviction detected! Buffer pool thrashed."
+    );
     let total = (t * k) as f64;
     println!(
         "RESULT threads={t} mode={} wall={wall:.3}s ops_per_s={:.0} ns_per_op_per_thread={:.0}",
@@ -79,6 +88,31 @@ fn main() -> Result<(), String> {
         total / wall,
         wall * 1e9 / k as f64
     );
+
+    let snap = mitrdb_observe::profile_snapshot();
+    let phase_names = [
+        "ParsePlan", "PlanExecution", "InsertExecution", "TxnPut", "TxnCommit",
+        "WalAppend", "WalFlush", "LockAcquire", "MvccMutexWait", "TxnMutexWait",
+        "BtreeMutation", "VersionChainMutation", "BtreeTraversal", "BtreePageWrite",
+        "BtreeLeafSplit", "BtreeInternalSplit", "BufferPoolFetch", "BufferPoolDiskRead",
+        "SplitMidSelection", "SplitPageAllocation", "SplitRedistribution", "SplitParentUpdate",
+        "LockMutexWait", "LockTableScan", "LockBookkeeping", "LockConditionWait",
+        "BufferPoolNewPage", "BufferPoolVictimSelect", "BufferPoolDiskAllocate", "BufferPoolUnpin"
+    ];
+    println!("--- PROFILE BREAKDOWN ---");
+    let mut recorded: Vec<(u64, &str, u64)> = Vec::new();
+    for (i, p) in snap.phases.iter().enumerate() {
+        if p.count > 0 {
+            recorded.push((p.total_ns, phase_names[i], p.count));
+        }
+    }
+    recorded.sort_by(|a, b| b.0.cmp(&a.0));
+    for (total_ns, name, count) in recorded {
+        let ms = total_ns as f64 / 1_000_000.0;
+        let avg_us = if count > 0 { (total_ns as f64 / count as f64) / 1_000.0 } else { 0.0 };
+        println!("{:<24} | Total: {:>8.2} ms | Count: {:>8} | Avg: {:>6.2} µs", name, ms, count, avg_us);
+    }
+    println!("-------------------------");
     for tid in tids {
         let _ = mgr.abort(tid);
     }

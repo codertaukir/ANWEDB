@@ -1193,6 +1193,106 @@ impl WalManager {
         Ok(next_seg_id)
     }
 
+    pub fn append_records_batch(&self, records: &mut [LogRecord]) -> Result<Lsn> {
+        if records.is_empty() {
+            return Ok(INVALID_LSN);
+        }
+        if records.len() == 1 {
+            let lsn = self.append_record(records[0].clone())?;
+            records[0].lsn = lsn;
+            return Ok(lsn);
+        }
+        let profiling = mitrdb_observe::profiling_enabled();
+        let append_started = profiling.then(std::time::Instant::now);
+        #[cfg(feature = "fault-injection")]
+        self.inject_append_fail()?;
+        let mut inner = self.inner.lock().unwrap();
+        let mut last_lsn = INVALID_LSN;
+
+        for record in records.iter_mut() {
+            let assigned_lsn = inner.next_lsn;
+            let next_lsn = assigned_lsn
+                .checked_add(1)
+                .ok_or_else(|| Error::WalCorrupted("LSN overflow".to_string()))?;
+            if record.prev_lsn == INVALID_LSN && last_lsn != INVALID_LSN { record.prev_lsn = last_lsn; }
+            record.lsn = assigned_lsn;
+            let rec_len = record.serialized_size() as u64;
+
+            if inner.segments.is_empty() {
+                let seg0_path = Self::segment_path(&self.path, 0);
+                inner.segments.push(WalSegmentMeta {
+                    segment_id: 0,
+                    path: seg0_path,
+                    first_lsn: None,
+                    last_lsn: None,
+                    flushed_bytes: 0,
+                    planned_bytes: 0,
+                });
+            }
+
+            let max_seg_bytes = inner.max_segment_bytes;
+            let should_rotate = {
+                let active = inner.segments.last().unwrap();
+                let projected = active
+                    .planned_bytes
+                    .checked_add(rec_len)
+                    .ok_or_else(|| Error::WalCorrupted("Segment byte count overflow".to_string()))?;
+                active.planned_bytes > 0 && projected > max_seg_bytes
+            };
+
+            if should_rotate {
+                let prev_id = inner.segments.last().unwrap().segment_id;
+                let next_seg_id = prev_id
+                    .checked_add(1)
+                    .ok_or_else(|| Error::WalCorrupted("Segment ID overflow".to_string()))?;
+                let next_path = Self::segment_path(&self.path, next_seg_id);
+                inner.segments.push(WalSegmentMeta {
+                    segment_id: next_seg_id,
+                    path: next_path,
+                    first_lsn: None,
+                    last_lsn: None,
+                    flushed_bytes: 0,
+                    planned_bytes: 0,
+                });
+                GLOBAL_METRICS.record_wal_rotation();
+            }
+
+            let seg_id = {
+                let active = inner.segments.last_mut().unwrap();
+                active.planned_bytes = active
+                    .planned_bytes
+                    .checked_add(rec_len)
+                    .ok_or_else(|| Error::WalCorrupted("Segment byte count overflow".to_string()))?;
+                if active.first_lsn.is_none() {
+                    active.first_lsn = Some(assigned_lsn);
+                }
+                active.last_lsn = Some(assigned_lsn);
+                active.segment_id
+            };
+
+            let start = inner.pending_base + inner.pending_bytes.len() as u64;
+            record.serialize_append(&mut inner.pending_bytes);
+            inner.track_record(record);
+            inner.next_lsn = next_lsn;
+            inner.pending.push(PendingRecord {
+                lsn: assigned_lsn,
+                segment_id: seg_id,
+                start,
+                len: rec_len as u32,
+            });
+            GLOBAL_METRICS.record_wal_append();
+            last_lsn = assigned_lsn;
+        }
+
+        if let Some(started) = append_started {
+            mitrdb_observe::record_profile_duration(
+                mitrdb_observe::ProfilePhase::WalAppend,
+                started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
+            );
+        }
+        Ok(last_lsn)
+    }
+
     pub fn append_record(&self, mut record: LogRecord) -> Result<Lsn> {
         let profiling = mitrdb_observe::profiling_enabled();
         let append_started = profiling.then(std::time::Instant::now);

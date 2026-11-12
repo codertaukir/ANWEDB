@@ -19,7 +19,7 @@ pub struct DiskManager {
     file: Mutex<File>,
     path: PathBuf,
     num_pages: Mutex<u32>,
-    free_pages: Mutex<Vec<PageId>>,
+    free_pages: std::sync::RwLock<Vec<PageId>>,
     pending_free_pages: Mutex<HashMap<TxnId, Vec<PageId>>>,
     backup_dirty_pages: Mutex<Option<BTreeSet<PageId>>>,
     ring: Mutex<Option<io_uring::IoUring>>,
@@ -176,7 +176,7 @@ impl DiskManager {
             file: Mutex::new(file),
             path: path_buf,
             num_pages: Mutex::new(num_pages),
-            free_pages: Mutex::new(free_pages),
+            free_pages: std::sync::RwLock::new(free_pages),
             pending_free_pages: Mutex::new(HashMap::new()),
             backup_dirty_pages: Mutex::new(None),
             ring: Mutex::new(io_uring::IoUring::new(64).ok()),
@@ -221,11 +221,11 @@ impl DiskManager {
     }
 
     pub fn free_page_count(&self) -> usize {
-        self.free_pages.lock().unwrap().len()
+        self.free_pages.read().unwrap().len()
     }
 
     pub fn is_page_free(&self, page_id: PageId) -> bool {
-        self.free_pages.lock().unwrap().contains(&page_id)
+        self.free_pages.read().unwrap().contains(&page_id)
     }
 
     pub fn stage_free_page(&self, txn_id: TxnId, page_id: PageId) {
@@ -259,7 +259,7 @@ impl DiskManager {
     }
 
     pub fn unmark_page_free(&self, page_id: PageId) {
-        let mut free_pages = self.free_pages.lock().unwrap();
+        let mut free_pages = self.free_pages.write().unwrap();
         if let Some(pos) = free_pages.iter().position(|&pid| pid == page_id) {
             free_pages.remove(pos);
             let _ = self.save_freelist_locked(&free_pages);
@@ -275,7 +275,7 @@ impl DiskManager {
         pinned_pages: &std::collections::HashSet<PageId>,
     ) -> Result<Vec<PageId>> {
         let num_pages = *self.num_pages.lock().unwrap();
-        let mut free_pages = self.free_pages.lock().unwrap();
+        let mut free_pages = self.free_pages.write().unwrap();
         let mut pending = self.pending_free_pages.lock().unwrap();
         let mut file = self.file.lock().unwrap();
         let mut rebuilt = Vec::new();
@@ -335,7 +335,7 @@ impl DiskManager {
 
     pub fn read_page(&self, page_id: PageId) -> Result<Page> {
         let num_pages = self.num_pages.lock().unwrap();
-        let free_pages = self.free_pages.lock().unwrap();
+        let free_pages = self.free_pages.write().unwrap();
         if page_id >= *num_pages || free_pages.contains(&page_id) {
             return Err(Error::InvalidPageId(page_id));
         }
@@ -511,7 +511,7 @@ impl DiskManager {
             }
         }
         let mut num_pages = self.num_pages.lock().unwrap();
-        let mut free_pages = self.free_pages.lock().unwrap();
+        let mut free_pages = self.free_pages.write().unwrap();
         let pending = self.pending_free_pages.lock().unwrap();
         free_pages.retain(|&pid| pid > 0 && pid < *num_pages);
         if let Some(pos) = free_pages
@@ -578,7 +578,7 @@ impl DiskManager {
         if page_id >= *num_pages {
             return Err(Error::InvalidPageId(page_id));
         }
-        let mut free_pages = self.free_pages.lock().unwrap();
+        let mut free_pages = self.free_pages.write().unwrap();
         drop(num_pages);
         if free_pages.contains(&page_id) {
             return Ok(());
@@ -609,7 +609,7 @@ impl DiskManager {
             return Ok(());
         }
         let num_pages = self.num_pages.lock().unwrap();
-        let mut free_pages = self.free_pages.lock().unwrap();
+        let mut free_pages = self.free_pages.write().unwrap();
         let np = *num_pages;
         drop(num_pages);
 
@@ -701,7 +701,7 @@ impl DiskManager {
         }
         dest_file.sync_all()?;
         {
-            let _free_guard = self.free_pages.lock().unwrap();
+            let _free_guard = self.free_pages.write().unwrap();
             let src_freelist = Self::freelist_path(&self.path);
             if src_freelist.exists() {
                 let dest_freelist = Self::freelist_path(path_ref);
@@ -749,7 +749,7 @@ impl DiskManager {
     ) -> Result<(u64, u32)> {
         let path_ref = dest_path.as_ref();
         let num_pages_guard = self.num_pages.lock().unwrap();
-        let _free_guard = self.free_pages.lock().unwrap();
+        let _free_guard = self.free_pages.write().unwrap();
         let num_pages = *num_pages_guard;
         let mut file = self.file.lock().unwrap();
         let dirty_pages = self

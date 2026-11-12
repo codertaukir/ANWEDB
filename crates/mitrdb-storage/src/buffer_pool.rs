@@ -1,5 +1,6 @@
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, RwLockReadGuard, RwLockWriteGuard};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::{Arc, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use mitrdb_common::{Error, Lsn, PageId, Result, TxnId};
 use mitrdb_observe::GLOBAL_METRICS;
@@ -7,12 +8,19 @@ use mitrdb_observe::GLOBAL_METRICS;
 use crate::disk::DiskManager;
 use crate::page::{PAGE_FLAG_FREE, Page};
 
+const PAGE_TABLE_SHARDS: usize = 64;
+
+#[inline]
+fn shard_of(page_id: PageId) -> usize {
+    (page_id as usize) & (PAGE_TABLE_SHARDS - 1)
+}
+
 pub struct Frame {
     pub page: Page,
     pub page_id: Option<PageId>,
-    pub pin_count: u32,
-    pub is_dirty: bool,
-    pub ref_bit: bool,
+    pub pin_count: AtomicU32,
+    pub is_dirty: AtomicBool,
+    pub ref_bit: AtomicBool,
 }
 
 pub type WalCheckHook = Box<dyn Fn(Lsn) -> Result<()> + Send + Sync>;
@@ -20,8 +28,9 @@ pub type WalCheckHook = Box<dyn Fn(Lsn) -> Result<()> + Send + Sync>;
 pub struct BufferPoolManager {
     disk_manager: Arc<DiskManager>,
     deferred_free_txns: Mutex<Vec<TxnId>>,
-    frames: Mutex<Vec<Frame>>,
-    page_table: Mutex<HashMap<PageId, usize>>,
+    frames: Box<[RwLock<Frame>]>,
+    free_frames: Mutex<Vec<usize>>,
+    page_tables: Box<[RwLock<HashMap<PageId, usize>>; PAGE_TABLE_SHARDS]>,
     clock_hand: Mutex<usize>,
     pool_size: usize,
     wal_check_fn: Mutex<Option<WalCheckHook>>,
@@ -39,19 +48,20 @@ impl BufferPoolManager {
         assert!(pool_size > 0);
         let mut frames = Vec::with_capacity(pool_size);
         for _ in 0..pool_size {
-            frames.push(Frame {
+            frames.push(RwLock::new(Frame {
                 page: Page::new_empty(0, 0),
                 page_id: None,
-                pin_count: 0,
-                is_dirty: false,
-                ref_bit: false,
-            });
+                pin_count: AtomicU32::new(0),
+                is_dirty: AtomicBool::new(false),
+                ref_bit: AtomicBool::new(false),
+            }));
         }
         BufferPoolManager {
             disk_manager,
             deferred_free_txns: Mutex::new(Vec::new()),
-            frames: Mutex::new(frames),
-            page_table: Mutex::new(HashMap::new()),
+            frames: frames.into_boxed_slice(),
+            free_frames: Mutex::new((0..pool_size).rev().collect()),
+            page_tables: Box::new(std::array::from_fn(|_| RwLock::new(HashMap::new()))),
             clock_hand: Mutex::new(0),
             pool_size,
             wal_check_fn: Mutex::new(None),
@@ -62,6 +72,22 @@ impl BufferPoolManager {
             #[cfg(feature = "fault-injection")]
             fail_miss_after: std::sync::atomic::AtomicI64::new(-1),
         }
+    }
+
+    fn lock_all_shards_write(&self) -> Vec<RwLockWriteGuard<'_, HashMap<PageId, usize>>> {
+        let mut guards = Vec::with_capacity(PAGE_TABLE_SHARDS);
+        for s in self.page_tables.iter() {
+            guards.push(s.write().unwrap());
+        }
+        guards
+    }
+
+    fn lock_all_shards_read(&self) -> Vec<RwLockReadGuard<'_, HashMap<PageId, usize>>> {
+        let mut guards = Vec::with_capacity(PAGE_TABLE_SHARDS);
+        for s in self.page_tables.iter() {
+            guards.push(s.read().unwrap());
+        }
+        guards
     }
 
     pub fn acquire_op_shared(&self) -> RwLockReadGuard<'_, ()> {
@@ -84,14 +110,12 @@ impl BufferPoolManager {
         self.pool_size
     }
 
-    /// Test hook: allow `n` more page ops (fetch/mutate/update), then fail one (-1 = off).
     #[cfg(feature = "fault-injection")]
     pub fn set_fail_page_op_after(&self, n: i64) {
         self.fail_page_op_after
             .store(n, std::sync::atomic::Ordering::Relaxed);
     }
 
-    /// Test hook: backtrace captured at the last injected page-op failure.
     #[cfg(feature = "fault-injection")]
     pub fn take_injection_trace(&self) -> Option<String> {
         self.last_injection_trace.lock().unwrap().take()
@@ -113,7 +137,6 @@ impl BufferPoolManager {
         Ok(())
     }
 
-    /// Test hook: allow `n` more cache MISSES (disk-read path), then fail one (-1 = off).
     #[cfg(feature = "fault-injection")]
     pub fn set_fail_miss_after(&self, n: i64) {
         self.fail_miss_after
@@ -136,56 +159,80 @@ impl BufferPoolManager {
         Ok(())
     }
 
-    pub fn fetch_page(&self, page_id: PageId) -> Result<Page> {
-        #[cfg(feature = "fault-injection")]
-        self.inject_page_op_fail()?;
-        let mut page_table = self.page_table.lock().unwrap();
-        let mut frames = self.frames.lock().unwrap();
+    /// Lock-free / shared-read fast path on cache hits; acquires all shards only on miss/eviction.
+    fn pin_or_load_frame(&self, page_id: PageId) -> Result<usize> {
+        let s_idx = shard_of(page_id);
+        {
+            let shard = self.page_tables[s_idx].read().unwrap();
+            if let Some(&frame_idx) = shard.get(&page_id) {
+                let frame = self.frames[frame_idx].read().unwrap();
+                frame.pin_count.fetch_add(1, Ordering::AcqRel);
+                frame.ref_bit.store(true, Ordering::Release);
+                GLOBAL_METRICS.record_hit();
+                return Ok(frame_idx);
+            }
+            if self.disk_manager.is_page_free(page_id) {
+                return Err(Error::InvalidPageId(page_id));
+            }
+        }
+
+        // Cache miss: acquire shards in canonical order 0..64 to guarantee deadlock freedom during eviction
+        let mut shards = self.lock_all_shards_write();
         if self.disk_manager.is_page_free(page_id) {
             return Err(Error::InvalidPageId(page_id));
         }
-
-        if let Some(&frame_idx) = page_table.get(&page_id) {
-            let frame = &mut frames[frame_idx];
-            frame.pin_count += 1;
-            frame.ref_bit = true;
+        if let Some(&frame_idx) = shards[s_idx].get(&page_id) {
+            let frame = self.frames[frame_idx].read().unwrap();
+            frame.pin_count.fetch_add(1, Ordering::AcqRel);
+            frame.ref_bit.store(true, Ordering::Release);
             GLOBAL_METRICS.record_hit();
-            return Ok(frame.page.clone());
+            return Ok(frame_idx);
         }
 
         GLOBAL_METRICS.record_miss();
         #[cfg(feature = "fault-injection")]
         self.inject_page_op_fail_miss()?;
         let page_on_disk = self.disk_manager.read_page(page_id)?;
-        let victim_idx = self.find_victim_frame(&mut frames, &mut page_table)?;
+        let victim_idx = match self.free_frames.lock().unwrap().pop() {
+            Some(idx) => idx,
+            None => self.find_victim_frame_sharded(&mut shards)?,
+        };
 
-        let frame = &mut frames[victim_idx];
-        frame.page = page_on_disk.clone();
+        let mut frame = self.frames[victim_idx].write().unwrap();
+        frame.page = page_on_disk;
         frame.page_id = Some(page_id);
-        frame.pin_count = 1;
-        frame.is_dirty = false;
-        frame.ref_bit = true;
+        frame.pin_count.store(1, Ordering::Release);
+        frame.is_dirty.store(false, Ordering::Release);
+        frame.ref_bit.store(true, Ordering::Release);
 
-        page_table.insert(page_id, victim_idx);
-        Ok(page_on_disk)
+        shards[s_idx].insert(page_id, victim_idx);
+        Ok(victim_idx)
+    }
+
+    pub fn fetch_page(&self, page_id: PageId) -> Result<Page> {
+        #[cfg(feature = "fault-injection")]
+        self.inject_page_op_fail()?;
+        let frame_idx = self.pin_or_load_frame(page_id)?;
+        let frame = self.frames[frame_idx].read().unwrap();
+        Ok(frame.page.clone())
     }
 
     pub fn unpin_page(&self, page_id: PageId, is_dirty: bool) -> Result<()> {
         let profile_started = mitrdb_observe::profiling_enabled().then(std::time::Instant::now);
         let result = {
-            let page_table = self.page_table.lock().unwrap();
-            let mut frames = self.frames.lock().unwrap();
-            if let Some(&frame_idx) = page_table.get(&page_id) {
-                let frame = &mut frames[frame_idx];
-                if frame.pin_count == 0 {
+            let shard = self.page_tables[shard_of(page_id)].read().unwrap();
+            if let Some(&frame_idx) = shard.get(&page_id) {
+                let frame = self.frames[frame_idx].read().unwrap();
+                let prev = frame.pin_count.load(Ordering::Acquire);
+                if prev == 0 {
                     Err(Error::Io(format!(
                         "Attempted to unpin page {} with pin count 0",
                         page_id
                     )))
                 } else {
-                    frame.pin_count -= 1;
+                    frame.pin_count.fetch_sub(1, Ordering::AcqRel);
                     if is_dirty {
-                        frame.is_dirty = true;
+                        frame.is_dirty.store(true, Ordering::Release);
                     }
                     Ok(())
                 }
@@ -202,42 +249,16 @@ impl BufferPoolManager {
         result
     }
 
-    /// Read-only inspection of a page inside buffer pool without allocating or cloning the Page.
     pub fn with_page<F, R>(&self, page_id: PageId, f: F) -> Result<R>
     where
         F: FnOnce(&Page) -> Result<R>,
     {
         #[cfg(feature = "fault-injection")]
         self.inject_page_op_fail()?;
-        let mut page_table = self.page_table.lock().unwrap();
-        let mut frames = self.frames.lock().unwrap();
-        if self.disk_manager.is_page_free(page_id) {
-            return Err(Error::InvalidPageId(page_id));
-        }
-
-        let frame_idx = if let Some(&idx) = page_table.get(&page_id) {
-            frames[idx].pin_count += 1;
-            frames[idx].ref_bit = true;
-            GLOBAL_METRICS.record_hit();
-            idx
-        } else {
-            GLOBAL_METRICS.record_miss();
-            #[cfg(feature = "fault-injection")]
-            self.inject_page_op_fail_miss()?;
-            let page_on_disk = self.disk_manager.read_page(page_id)?;
-            let victim_idx = self.find_victim_frame(&mut frames, &mut page_table)?;
-            let frame = &mut frames[victim_idx];
-            frame.page = page_on_disk;
-            frame.page_id = Some(page_id);
-            frame.pin_count = 1;
-            frame.is_dirty = false;
-            frame.ref_bit = true;
-            page_table.insert(page_id, victim_idx);
-            victim_idx
-        };
-
-        let res = f(&frames[frame_idx].page);
-        frames[frame_idx].pin_count -= 1;
+        let frame_idx = self.pin_or_load_frame(page_id)?;
+        let frame = self.frames[frame_idx].read().unwrap();
+        let res = f(&frame.page);
+        frame.pin_count.fetch_sub(1, Ordering::AcqRel);
         res
     }
 
@@ -247,55 +268,33 @@ impl BufferPoolManager {
     {
         #[cfg(feature = "fault-injection")]
         self.inject_page_op_fail()?;
-        let mut page_table = self.page_table.lock().unwrap();
-        let mut frames = self.frames.lock().unwrap();
-        if self.disk_manager.is_page_free(page_id) {
-            return Err(Error::InvalidPageId(page_id));
-        }
+        let frame_idx = self.pin_or_load_frame(page_id)?;
 
-        let frame_idx = if let Some(&idx) = page_table.get(&page_id) {
-            frames[idx].pin_count += 1;
-            frames[idx].ref_bit = true;
-            GLOBAL_METRICS.record_hit();
-            idx
-        } else {
-            GLOBAL_METRICS.record_miss();
-            #[cfg(feature = "fault-injection")]
-            self.inject_page_op_fail_miss()?;
-            let page_on_disk = self.disk_manager.read_page(page_id)?;
-            let victim_idx = self.find_victim_frame(&mut frames, &mut page_table)?;
-            let frame = &mut frames[victim_idx];
-            frame.page = page_on_disk;
-            frame.page_id = Some(page_id);
-            frame.pin_count = 1;
-            frame.is_dirty = false;
-            frame.ref_bit = true;
-            page_table.insert(page_id, victim_idx);
-            victim_idx
+        let mut working_page = {
+            let frame = self.frames[frame_idx].read().unwrap();
+            frame.page.clone()
         };
-
-        let mut working_page = frames[frame_idx].page.clone();
         let result = f(&mut working_page);
-        let frame = &mut frames[frame_idx];
+        let mut frame = self.frames[frame_idx].write().unwrap();
         match result {
             Ok(val) => {
                 if working_page.page_id() != page_id {
-                    frame.pin_count -= 1;
+                    frame.pin_count.fetch_sub(1, Ordering::AcqRel);
                     return Err(Error::PageCorrupted(
                         "Page ID modified during update_page_data".to_string(),
                     ));
                 }
                 if let Err(e) = working_page.validate_structure() {
-                    frame.pin_count -= 1;
+                    frame.pin_count.fetch_sub(1, Ordering::AcqRel);
                     return Err(e);
                 }
                 frame.page = working_page;
-                frame.is_dirty = true;
-                frame.pin_count -= 1;
+                frame.is_dirty.store(true, Ordering::Release);
+                frame.pin_count.fetch_sub(1, Ordering::AcqRel);
                 Ok(val)
             }
             Err(e) => {
-                frame.pin_count -= 1;
+                frame.pin_count.fetch_sub(1, Ordering::AcqRel);
                 Err(e)
             }
         }
@@ -307,36 +306,10 @@ impl BufferPoolManager {
     {
         #[cfg(feature = "fault-injection")]
         self.inject_page_op_fail()?;
-        let mut page_table = self.page_table.lock().unwrap();
-        let mut frames = self.frames.lock().unwrap();
-        if self.disk_manager.is_page_free(page_id) {
-            return Err(Error::InvalidPageId(page_id));
-        }
-
-        let frame_idx = if let Some(&idx) = page_table.get(&page_id) {
-            frames[idx].pin_count += 1;
-            frames[idx].ref_bit = true;
-            GLOBAL_METRICS.record_hit();
-            idx
-        } else {
-            GLOBAL_METRICS.record_miss();
-            #[cfg(feature = "fault-injection")]
-            self.inject_page_op_fail_miss()?;
-            let page_on_disk = self.disk_manager.read_page(page_id)?;
-            let victim_idx = self.find_victim_frame(&mut frames, &mut page_table)?;
-            let frame = &mut frames[victim_idx];
-            frame.page = page_on_disk;
-            frame.page_id = Some(page_id);
-            frame.pin_count = 1;
-            frame.is_dirty = false;
-            frame.ref_bit = true;
-            page_table.insert(page_id, victim_idx);
-            victim_idx
-        };
-
-        let frame = &mut frames[frame_idx];
+        let frame_idx = self.pin_or_load_frame(page_id)?;
+        let mut frame = self.frames[frame_idx].write().unwrap();
         let result = f(&mut frame.page);
-        frame.pin_count -= 1;
+        frame.pin_count.fetch_sub(1, Ordering::AcqRel);
         match result {
             Ok(val) => {
                 if frame.page.page_id() != page_id {
@@ -345,7 +318,7 @@ impl BufferPoolManager {
                     ));
                 }
                 frame.page.validate_structure()?;
-                frame.is_dirty = true;
+                frame.is_dirty.store(true, Ordering::Release);
                 Ok(val)
             }
             Err(e) => Err(e),
@@ -355,44 +328,70 @@ impl BufferPoolManager {
     pub fn new_page(&self, page_type: u16) -> Result<(PageId, Page)> {
         let profile_started = mitrdb_observe::profiling_enabled().then(std::time::Instant::now);
         let result = (|| {
+            if self.disk_manager.free_page_count() == 0 {
+                let has_deferred = !self.deferred_free_txns.lock().unwrap().is_empty();
+                if !has_deferred
+                    && let Some(victim_idx) = self.free_frames.lock().unwrap().pop()
+                {
+                    let (new_page_id, new_page) = self.disk_manager.allocate_page(page_type)?;
+                    let mut target_shard = self.page_tables[shard_of(new_page_id)].write().unwrap();
+                    if !target_shard.contains_key(&new_page_id) {
+                        let mut frame = self.frames[victim_idx].write().unwrap();
+                        frame.page = new_page.clone();
+                        frame.page_id = Some(new_page_id);
+                        frame.pin_count.store(1, Ordering::Release);
+                        frame.is_dirty.store(false, Ordering::Release);
+                        frame.ref_bit.store(true, Ordering::Release);
+                        target_shard.insert(new_page_id, victim_idx);
+                        return Ok((new_page_id, new_page));
+                    }
+                    self.free_frames.lock().unwrap().push(victim_idx);
+                }
+            }
             let mut deferred_txns = self.deferred_free_txns.lock().unwrap();
-            let mut page_table = self.page_table.lock().unwrap();
-            let mut frames = self.frames.lock().unwrap();
+            let mut shards = self.lock_all_shards_write();
 
             self.process_deferred_free_txns_locked(
                 &mut deferred_txns,
-                &mut page_table,
-                &mut frames,
+                &mut shards,
                 None,
             )?;
 
-            let resident_pids: Vec<(PageId, usize)> =
-                page_table.iter().map(|(&pid, &idx)| (pid, idx)).collect();
+            let mut resident_pids: Vec<(PageId, usize)> = Vec::new();
+            for s in shards.iter() {
+                for (&pid, &idx) in s.iter() {
+                    resident_pids.push((pid, idx));
+                }
+            }
             for (pid, idx) in resident_pids {
                 if !self.disk_manager.is_page_free(pid) {
                     continue;
                 }
-                if frames[idx].pin_count > 0 {
+                let mut frame = self.frames[idx].write().unwrap();
+                if frame.pin_count.load(Ordering::Acquire) > 0 {
                     self.disk_manager.unmark_page_free(pid);
-                    if (frames[idx].page.flags() & PAGE_FLAG_FREE) != 0 {
+                    if (frame.page.flags() & PAGE_FLAG_FREE) != 0 {
                         self.disk_manager.stage_free_page(0, pid);
                         if !deferred_txns.contains(&0) {
                             deferred_txns.push(0);
                         }
                     }
-                } else if frames[idx].is_dirty && (frames[idx].page.flags() & PAGE_FLAG_FREE) == 0 {
+                } else if frame.is_dirty.load(Ordering::Acquire) && (frame.page.flags() & PAGE_FLAG_FREE) == 0 {
                     self.disk_manager.unmark_page_free(pid);
                 } else {
-                    frames[idx].page_id = None;
-                    frames[idx].pin_count = 0;
-                    frames[idx].is_dirty = false;
-                    frames[idx].ref_bit = false;
-                    page_table.remove(&pid);
+                    frame.page_id = None;
+                    frame.pin_count.store(0, Ordering::Release);
+                    frame.is_dirty.store(false, Ordering::Release);
+                    frame.ref_bit.store(false, Ordering::Release);
+                    shards[shard_of(pid)].remove(&pid);
                 }
             }
 
             let victim_started = mitrdb_observe::profiling_enabled().then(std::time::Instant::now);
-            let victim_idx = self.find_victim_frame(&mut frames, &mut page_table)?;
+            let victim_idx = match self.free_frames.lock().unwrap().pop() {
+                Some(idx) => idx,
+                None => self.find_victim_frame_sharded(&mut shards)?,
+            };
             if let Some(started) = victim_started {
                 mitrdb_observe::record_profile_duration(
                     mitrdb_observe::ProfilePhase::BufferPoolVictimSelect,
@@ -409,15 +408,18 @@ impl BufferPoolManager {
                 let (cand_pid, cand_page) =
                     self.disk_manager
                         .allocate_page_with_filter(page_type, |cand_pid| {
-                            !page_table.contains_key(&cand_pid)
+                            !shards[shard_of(cand_pid)].contains_key(&cand_pid)
                                 && !excluded_candidates[..excluded_count].contains(&cand_pid)
                         })?;
 
-                if let Some(&existing_idx) = page_table.get(&cand_pid) {
-                    if frames[existing_idx].pin_count > 0
-                        || (frames[existing_idx].is_dirty
-                            && (frames[existing_idx].page.flags() & PAGE_FLAG_FREE) == 0)
+                let cs = shard_of(cand_pid);
+                if let Some(&existing_idx) = shards[cs].get(&cand_pid) {
+                    let mut existing = self.frames[existing_idx].write().unwrap();
+                    if existing.pin_count.load(Ordering::Acquire) > 0
+                        || (existing.is_dirty.load(Ordering::Acquire)
+                            && (existing.page.flags() & PAGE_FLAG_FREE) == 0)
                     {
+                        drop(existing);
                         let _ = self.disk_manager.free_page(cand_pid);
                         if excluded_count < excluded_candidates.len() {
                             excluded_candidates[excluded_count] = cand_pid;
@@ -430,11 +432,11 @@ impl BufferPoolManager {
                             )));
                         }
                     }
-                    frames[existing_idx].page_id = None;
-                    frames[existing_idx].pin_count = 0;
-                    frames[existing_idx].is_dirty = false;
-                    frames[existing_idx].ref_bit = false;
-                    page_table.remove(&cand_pid);
+                    existing.page_id = None;
+                    existing.pin_count.store(0, Ordering::Release);
+                    existing.is_dirty.store(false, Ordering::Release);
+                    existing.ref_bit.store(false, Ordering::Release);
+                    shards[cs].remove(&cand_pid);
                 }
 
                 break (cand_pid, cand_page);
@@ -447,14 +449,14 @@ impl BufferPoolManager {
                 );
             }
 
-            let frame = &mut frames[victim_idx];
+            let mut frame = self.frames[victim_idx].write().unwrap();
             frame.page = new_page.clone();
             frame.page_id = Some(new_page_id);
-            frame.pin_count = 1;
-            frame.is_dirty = false;
-            frame.ref_bit = true;
+            frame.pin_count.store(1, Ordering::Release);
+            frame.is_dirty.store(false, Ordering::Release);
+            frame.ref_bit.store(true, Ordering::Release);
 
-            page_table.insert(new_page_id, victim_idx);
+            shards[shard_of(new_page_id)].insert(new_page_id, victim_idx);
             Ok((new_page_id, new_page))
         })();
         if let Some(started) = profile_started {
@@ -472,21 +474,22 @@ impl BufferPoolManager {
     }
 
     pub(crate) fn free_page_in_op(&self, page_id: PageId) -> Result<()> {
-        let mut page_table = self.page_table.lock().unwrap();
-        let mut frames = self.frames.lock().unwrap();
-        if let Some(&frame_idx) = page_table.get(&page_id) {
-            if frames[frame_idx].pin_count > 0 {
+        let mut shard = self.page_tables[shard_of(page_id)].write().unwrap();
+        if let Some(&frame_idx) = shard.get(&page_id) {
+            let mut frame = self.frames[frame_idx].write().unwrap();
+            if frame.pin_count.load(Ordering::Acquire) > 0 {
                 return Err(Error::Io(format!(
                     "Attempted to free pinned page {}",
                     page_id
                 )));
             }
             self.disk_manager.free_page(page_id)?;
-            frames[frame_idx].is_dirty = false;
-            frames[frame_idx].page_id = None;
-            frames[frame_idx].pin_count = 0;
-            frames[frame_idx].ref_bit = false;
-            page_table.remove(&page_id);
+            frame.is_dirty.store(false, Ordering::Release);
+            frame.page_id = None;
+            frame.pin_count.store(0, Ordering::Release);
+            frame.ref_bit.store(false, Ordering::Release);
+            shard.remove(&page_id);
+            self.free_frames.lock().unwrap().push(frame_idx);
             return Ok(());
         }
         self.disk_manager.free_page(page_id)
@@ -505,12 +508,10 @@ impl BufferPoolManager {
     pub fn finalize_free_pages(&self, txn_id: TxnId) -> Result<()> {
         let _op_guard = self.acquire_op_shared();
         let mut deferred_txns = self.deferred_free_txns.lock().unwrap();
-        let mut page_table = self.page_table.lock().unwrap();
-        let mut frames = self.frames.lock().unwrap();
+        let mut shards = self.lock_all_shards_write();
         self.process_deferred_free_txns_locked(
             &mut deferred_txns,
-            &mut page_table,
-            &mut frames,
+            &mut shards,
             Some(txn_id),
         )
     }
@@ -518,8 +519,7 @@ impl BufferPoolManager {
     fn process_deferred_free_txns_locked(
         &self,
         deferred_txns: &mut Vec<TxnId>,
-        page_table: &mut HashMap<PageId, usize>,
-        frames: &mut [Frame],
+        shards: &mut [RwLockWriteGuard<'_, HashMap<PageId, usize>>],
         extra_txn_id: Option<TxnId>,
     ) -> Result<()> {
         let mut txns_to_process: Vec<TxnId> = std::mem::take(deferred_txns);
@@ -540,11 +540,12 @@ impl BufferPoolManager {
                 if pid == 0 {
                     continue;
                 }
-                if let Some(&frame_idx) = page_table.get(&pid) {
-                    if frames[frame_idx].pin_count > 0 {
+                if let Some(&frame_idx) = shards[shard_of(pid)].get(&pid) {
+                    let frame = self.frames[frame_idx].read().unwrap();
+                    if frame.pin_count.load(Ordering::Acquire) > 0 {
                         self.disk_manager.stage_free_page(tid, pid);
                         keep_tid_deferred = true;
-                    } else if (frames[frame_idx].page.flags() & PAGE_FLAG_FREE) != 0 {
+                    } else if (frame.page.flags() & PAGE_FLAG_FREE) != 0 {
                         to_free.push((pid, Some(frame_idx)));
                     }
                 } else if self.disk_manager.is_page_free(pid) {
@@ -573,11 +574,12 @@ impl BufferPoolManager {
                     Ok(()) => {
                         for (pid, fidx) in &to_free {
                             if let Some(frame_idx) = *fidx {
-                                frames[frame_idx].is_dirty = false;
-                                frames[frame_idx].page_id = None;
-                                frames[frame_idx].pin_count = 0;
-                                frames[frame_idx].ref_bit = false;
-                                page_table.remove(pid);
+                                let mut frame = self.frames[frame_idx].write().unwrap();
+                                frame.is_dirty.store(false, Ordering::Release);
+                                frame.page_id = None;
+                                frame.pin_count.store(0, Ordering::Release);
+                                frame.ref_bit.store(false, Ordering::Release);
+                                shards[shard_of(*pid)].remove(pid);
                             }
                         }
                     }
@@ -604,22 +606,20 @@ impl BufferPoolManager {
         Ok(())
     }
 
-    /// Recovery only: put a blank, dirty page into the pool without reading the (torn)
-    /// on-disk copy. The caller must follow up with a full-page-image redo record.
     pub fn install_blank_page(&self, page_id: PageId) -> Result<()> {
-        let mut page_table = self.page_table.lock().unwrap();
-        let mut frames = self.frames.lock().unwrap();
-        if page_table.contains_key(&page_id) {
+        let mut shards = self.lock_all_shards_write();
+        let s = shard_of(page_id);
+        if shards[s].contains_key(&page_id) {
             return Ok(());
         }
-        let victim_idx = self.find_victim_frame(&mut frames, &mut page_table)?;
-        let frame = &mut frames[victim_idx];
+        let victim_idx = self.find_victim_frame_sharded(&mut shards)?;
+        let mut frame = self.frames[victim_idx].write().unwrap();
         frame.page = Page::new_empty(page_id, crate::page::PAGE_TYPE_RAW);
         frame.page_id = Some(page_id);
-        frame.pin_count = 0;
-        frame.is_dirty = true;
-        frame.ref_bit = true;
-        page_table.insert(page_id, victim_idx);
+        frame.pin_count.store(0, Ordering::Release);
+        frame.is_dirty.store(true, Ordering::Release);
+        frame.ref_bit.store(true, Ordering::Release);
+        shards[s].insert(page_id, victim_idx);
         Ok(())
     }
 
@@ -630,30 +630,36 @@ impl BufferPoolManager {
     pub fn rebuild_freelist_from_disk(&self) -> Result<()> {
         let _op_guard = self.acquire_op_shared();
         let mut deferred_txns = self.deferred_free_txns.lock().unwrap();
-        let mut page_table = self.page_table.lock().unwrap();
-        let mut frames = self.frames.lock().unwrap();
+        let mut shards = self.lock_all_shards_write();
 
         let mut dirty_batch = Vec::new();
-        for (&page_id, &frame_idx) in page_table.iter() {
-            let frame = &frames[frame_idx];
-            if frame.is_dirty {
-                self.enforce_wal_rule(frame.page.page_lsn())?;
-                dirty_batch.push((page_id, frame.page.clone()));
+        for s in shards.iter() {
+            for (&page_id, &frame_idx) in s.iter() {
+                let frame = self.frames[frame_idx].read().unwrap();
+                if frame.is_dirty.load(Ordering::Acquire) {
+                    self.enforce_wal_rule(frame.page.page_lsn())?;
+                    dirty_batch.push((page_id, frame.page.clone()));
+                }
             }
         }
         self.disk_manager.write_pages_batch(&dirty_batch)?;
         self.disk_manager.sync()?;
-        for (&_page_id, &frame_idx) in page_table.iter() {
-            let frame = &mut frames[frame_idx];
-            if frame.is_dirty {
-                frame.is_dirty = false;
+        for s in shards.iter() {
+            for (&_page_id, &frame_idx) in s.iter() {
+                let frame = self.frames[frame_idx].read().unwrap();
+                if frame.is_dirty.load(Ordering::Acquire) {
+                    frame.is_dirty.store(false, Ordering::Release);
+                }
             }
         }
 
         let mut pinned_pages = std::collections::HashSet::new();
-        for (&pid, &frame_idx) in page_table.iter() {
-            if frames[frame_idx].pin_count > 0 {
-                pinned_pages.insert(pid);
+        for s in shards.iter() {
+            for (&pid, &frame_idx) in s.iter() {
+                let frame = self.frames[frame_idx].read().unwrap();
+                if frame.pin_count.load(Ordering::Acquire) > 0 {
+                    pinned_pages.insert(pid);
+                }
             }
         }
 
@@ -661,14 +667,16 @@ impl BufferPoolManager {
             .disk_manager
             .rebuild_freelist_from_disk_excluding(&pinned_pages)?;
         for pid in free_list {
-            if let Some(&frame_idx) = page_table.get(&pid)
-                && frames[frame_idx].pin_count == 0
-            {
-                frames[frame_idx].is_dirty = false;
-                frames[frame_idx].page_id = None;
-                frames[frame_idx].pin_count = 0;
-                frames[frame_idx].ref_bit = false;
-                page_table.remove(&pid);
+            let s = shard_of(pid);
+            if let Some(&frame_idx) = shards[s].get(&pid) {
+                let mut frame = self.frames[frame_idx].write().unwrap();
+                if frame.pin_count.load(Ordering::Acquire) == 0 {
+                    frame.is_dirty.store(false, Ordering::Release);
+                    frame.page_id = None;
+                    frame.pin_count.store(0, Ordering::Release);
+                    frame.ref_bit.store(false, Ordering::Release);
+                    shards[s].remove(&pid);
+                }
             }
         }
 
@@ -685,52 +693,55 @@ impl BufferPoolManager {
     }
 
     pub fn flush_page(&self, page_id: PageId) -> Result<()> {
-        let page_table = self.page_table.lock().unwrap();
-        let mut frames = self.frames.lock().unwrap();
+        let shard = self.page_tables[shard_of(page_id)].read().unwrap();
 
-        if let Some(&frame_idx) = page_table.get(&page_id) {
-            let frame = &mut frames[frame_idx];
-            if frame.is_dirty {
+        if let Some(&frame_idx) = shard.get(&page_id) {
+            let frame = self.frames[frame_idx].write().unwrap();
+            if frame.is_dirty.load(Ordering::Acquire) {
                 self.enforce_wal_rule(frame.page.page_lsn())?;
                 self.disk_manager.write_page(page_id, &frame.page)?;
                 self.disk_manager.sync()?;
-                frame.is_dirty = false;
+                frame.is_dirty.store(false, Ordering::Release);
             }
         }
         Ok(())
     }
 
     pub fn flush_all(&self) -> Result<()> {
-        let page_table = self.page_table.lock().unwrap();
-        let mut frames = self.frames.lock().unwrap();
+        let shards = self.lock_all_shards_read();
 
         let mut dirty_batch = Vec::new();
-        for (&page_id, &frame_idx) in page_table.iter() {
-            let frame = &frames[frame_idx];
-            if frame.is_dirty {
-                self.enforce_wal_rule(frame.page.page_lsn())?;
-                dirty_batch.push((page_id, frame.page.clone()));
+        for s in shards.iter() {
+            for (&page_id, &frame_idx) in s.iter() {
+                let frame = self.frames[frame_idx].read().unwrap();
+                if frame.is_dirty.load(Ordering::Acquire) {
+                    self.enforce_wal_rule(frame.page.page_lsn())?;
+                    dirty_batch.push((page_id, frame.page.clone()));
+                }
             }
         }
         self.disk_manager.write_pages_batch(&dirty_batch)?;
         self.disk_manager.sync()?;
-        for (&_page_id, &frame_idx) in page_table.iter() {
-            let frame = &mut frames[frame_idx];
-            if frame.is_dirty {
-                frame.is_dirty = false;
+        for s in shards.iter() {
+            for (&_page_id, &frame_idx) in s.iter() {
+                let frame = self.frames[frame_idx].read().unwrap();
+                if frame.is_dirty.load(Ordering::Acquire) {
+                    frame.is_dirty.store(false, Ordering::Release);
+                }
             }
         }
         Ok(())
     }
 
     pub fn dirty_page_lsns(&self) -> Vec<(PageId, Lsn)> {
-        let page_table = self.page_table.lock().unwrap();
-        let frames = self.frames.lock().unwrap();
+        let shards = self.lock_all_shards_read();
         let mut out = Vec::new();
-        for (&page_id, &frame_idx) in page_table.iter() {
-            let frame = &frames[frame_idx];
-            if frame.is_dirty && frame.page.page_lsn() > 0 {
-                out.push((page_id, frame.page.page_lsn()));
+        for s in shards.iter() {
+            for (&page_id, &frame_idx) in s.iter() {
+                let frame = self.frames[frame_idx].read().unwrap();
+                if frame.is_dirty.load(Ordering::Acquire) && frame.page.page_lsn() > 0 {
+                    out.push((page_id, frame.page.page_lsn()));
+                }
             }
         }
         out
@@ -740,23 +751,26 @@ impl BufferPoolManager {
     where
         F: FnOnce() -> Result<R>,
     {
-        let page_table = self.page_table.lock().unwrap();
-        let mut frames = self.frames.lock().unwrap();
+        let shards = self.lock_all_shards_read();
 
         let mut dirty_batch = Vec::new();
-        for (&page_id, &frame_idx) in page_table.iter() {
-            let frame = &frames[frame_idx];
-            if frame.is_dirty {
-                self.enforce_wal_rule(frame.page.page_lsn())?;
-                dirty_batch.push((page_id, frame.page.clone()));
+        for s in shards.iter() {
+            for (&page_id, &frame_idx) in s.iter() {
+                let frame = self.frames[frame_idx].read().unwrap();
+                if frame.is_dirty.load(Ordering::Acquire) {
+                    self.enforce_wal_rule(frame.page.page_lsn())?;
+                    dirty_batch.push((page_id, frame.page.clone()));
+                }
             }
         }
         self.disk_manager.write_pages_batch(&dirty_batch)?;
         self.disk_manager.sync()?;
-        for (&_page_id, &frame_idx) in page_table.iter() {
-            let frame = &mut frames[frame_idx];
-            if frame.is_dirty {
-                frame.is_dirty = false;
+        for s in shards.iter() {
+            for (&_page_id, &frame_idx) in s.iter() {
+                let frame = self.frames[frame_idx].read().unwrap();
+                if frame.is_dirty.load(Ordering::Acquire) {
+                    frame.is_dirty.store(false, Ordering::Release);
+                }
             }
         }
 
@@ -771,12 +785,12 @@ impl BufferPoolManager {
         Ok(())
     }
 
-    fn find_victim_frame(
+    fn find_victim_frame_sharded(
         &self,
-        frames: &mut [Frame],
-        page_table: &mut HashMap<PageId, usize>,
+        shards: &mut [RwLockWriteGuard<'_, HashMap<PageId, usize>>],
     ) -> Result<usize> {
-        for (i, frame) in frames.iter().enumerate() {
+        for (i, frame_lock) in self.frames.iter().enumerate() {
+            let frame = frame_lock.read().unwrap();
             if frame.page_id.is_none() {
                 return Ok(i);
             }
@@ -790,21 +804,21 @@ impl BufferPoolManager {
             let idx = *clock_hand;
             *clock_hand = (*clock_hand + 1) % total_frames;
 
-            if frames[idx].pin_count > 0 {
+            let mut frame = self.frames[idx].write().unwrap();
+            if frame.pin_count.load(Ordering::Acquire) > 0 {
                 continue;
             }
 
-            if frames[idx].ref_bit {
-                frames[idx].ref_bit = false;
+            if frame.ref_bit.load(Ordering::Acquire) {
+                frame.ref_bit.store(false, Ordering::Release);
             } else {
-                let frame = &mut frames[idx];
                 if let Some(old_page_id) = frame.page_id {
-                    if frame.is_dirty {
+                    if frame.is_dirty.load(Ordering::Acquire) {
                         self.enforce_wal_rule(frame.page.page_lsn())?;
                         self.disk_manager.write_page(old_page_id, &frame.page)?;
-                        frame.is_dirty = false;
+                        frame.is_dirty.store(false, Ordering::Release);
                     }
-                    page_table.remove(&old_page_id);
+                    shards[shard_of(old_page_id)].remove(&old_page_id);
                     frame.page_id = None;
                 }
                 GLOBAL_METRICS.record_eviction();
@@ -817,17 +831,17 @@ impl BufferPoolManager {
     }
 
     pub fn inspect_frames(&self) -> Vec<(usize, Option<PageId>, u32, bool, bool, Lsn)> {
-        let frames = self.frames.lock().unwrap();
-        frames
+        self.frames
             .iter()
             .enumerate()
-            .map(|(i, f)| {
+            .map(|(i, f_lock)| {
+                let f = f_lock.read().unwrap();
                 (
                     i,
                     f.page_id,
-                    f.pin_count,
-                    f.is_dirty,
-                    f.ref_bit,
+                    f.pin_count.load(Ordering::Acquire),
+                    f.is_dirty.load(Ordering::Acquire),
+                    f.ref_bit.load(Ordering::Acquire),
                     f.page.page_lsn(),
                 )
             })

@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ops::{Bound as RangeBound, Deref, DerefMut};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 
 use mitrdb_common::{Error, INVALID_LSN, Lsn, PAGE_HEADER_SIZE, PAGE_SIZE, PageId, Result, TxnId};
@@ -314,7 +314,27 @@ impl LockManagerState {
     }
 }
 
+const LOCK_SHARDS: usize = 64;
+
+#[inline]
+fn lock_shard_idx(skey: &[u8]) -> usize {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for &b in skey {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    ((h ^ (h >> 32)) as usize) & (LOCK_SHARDS - 1)
+}
+
+#[derive(Default)]
+struct PointLockShard {
+    locks: HashMap<Vec<u8>, TxnId>,
+    by_txn: HashMap<TxnId, Vec<Vec<u8>>>,
+}
+
 pub struct LockManager {
+    point_shards: Box<[Mutex<PointLockShard>; LOCK_SHARDS]>,
+    active_slow_locks: AtomicUsize,
     state: Mutex<LockManagerState>,
     cv: Condvar,
 }
@@ -322,9 +342,77 @@ pub struct LockManager {
 impl LockManager {
     pub fn new() -> Self {
         LockManager {
+            point_shards: Box::new(std::array::from_fn(|_| Mutex::new(PointLockShard::default()))),
+            active_slow_locks: AtomicUsize::new(0),
             state: Mutex::new(LockManagerState::new()),
             cv: Condvar::new(),
         }
+    }
+
+    fn drain_fast_shards_into_state(&self, state: &mut LockManagerState) {
+        for shard_mutex in self.point_shards.iter() {
+            let mut shard = shard_mutex.lock().unwrap();
+            if shard.locks.is_empty() {
+                continue;
+            }
+            for (skey, owner) in shard.locks.drain() {
+                let lkey = LockKey::Key(skey);
+                state.index_lock_key(&lkey);
+                let entry = state.locks.entry(lkey.clone()).or_insert_with(LockEntry::new);
+                entry.shared_holders.remove(&owner);
+                entry.exclusive_holder = Some(owner);
+                state.by_txn.entry(owner).or_default().insert(lkey);
+            }
+            shard.by_txn.clear();
+        }
+    }
+
+    pub fn acquire_point_exclusive_sharded(
+        &self,
+        txn_id: TxnId,
+        skey: &[u8],
+    ) -> Result<Option<LockDelta>> {
+        let profiling = mitrdb_observe::profiling_enabled();
+        if self.active_slow_locks.load(Ordering::Acquire) == 0 {
+            let idx = lock_shard_idx(skey);
+            let mutex_started = profiling.then(std::time::Instant::now);
+            let mut shard = self.point_shards[idx].lock().unwrap();
+            if let Some(started) = mutex_started {
+                mitrdb_observe::record_profile_duration(
+                    mitrdb_observe::ProfilePhase::LockMutexWait,
+                    started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
+                );
+            }
+            if self.active_slow_locks.load(Ordering::Acquire) == 0 {
+                match shard.locks.get(skey) {
+                    None => {
+                        let book_started = profiling.then(std::time::Instant::now);
+                        let owned = skey.to_vec();
+                        shard.locks.insert(owned.clone(), txn_id);
+                        shard.by_txn.entry(txn_id).or_default().push(owned);
+                        if let Some(started) = book_started {
+                            mitrdb_observe::record_profile_duration(
+                                mitrdb_observe::ProfilePhase::LockBookkeeping,
+                                started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
+                            );
+                        }
+                        return Ok(None);
+                    }
+                    Some(&holder) if holder == txn_id => {
+                        return Ok(None);
+                    }
+                    Some(_) => {}
+                }
+            }
+        }
+
+        self.active_slow_locks.fetch_add(1, Ordering::AcqRel);
+        let delta = self.acquire_batch_with_rollback(
+            txn_id,
+            std::slice::from_ref(&LockKey::Key(skey.to_vec())),
+            LockMode::Exclusive,
+        )?;
+        Ok(Some(delta))
     }
 
     pub fn acquire(&self, txn_id: TxnId, key: LockKey, mode: LockMode) -> Result<()> {
@@ -433,8 +521,10 @@ impl LockManager {
         let start_time = std::time::Instant::now();
         let timeout = std::time::Duration::from_millis(50);
 
+        self.active_slow_locks.fetch_add(1, Ordering::AcqRel);
         let mutex_started = profiling.then(std::time::Instant::now);
         let mut state = self.state.lock().unwrap();
+        self.drain_fast_shards_into_state(&mut state);
         if let Some(started) = mutex_started {
             mitrdb_observe::record_profile_duration(
                 mitrdb_observe::ProfilePhase::LockMutexWait,
@@ -593,6 +683,9 @@ impl LockManager {
                 state.unindex_lock_key(&key);
             }
         }
+        if state.locks.is_empty() {
+            self.active_slow_locks.store(0, Ordering::Release);
+        }
         drop(state);
         self.cv.notify_all();
     }
@@ -686,6 +779,16 @@ impl LockManager {
     }
 
     pub fn release_all(&self, txn_id: TxnId) {
+        for shard_mutex in self.point_shards.iter() {
+            let mut shard = shard_mutex.lock().unwrap();
+            if let Some(keys) = shard.by_txn.remove(&txn_id) {
+                for k in keys {
+                    if shard.locks.get(&k) == Some(&txn_id) {
+                        shard.locks.remove(&k);
+                    }
+                }
+            }
+        }
         let mut state = self.state.lock().unwrap();
         if let Some(held_keys) = state.by_txn.remove(&txn_id) {
             for k in held_keys {
@@ -721,6 +824,12 @@ impl LockManager {
             .is_some_and(|e| e.exclusive_holder.is_some_and(|h| h != txn_id))
     }
     pub fn has_active_prefix_locks(&self, prefix: &[u8; 8]) -> bool {
+        for shard_mutex in self.point_shards.iter() {
+            let shard = shard_mutex.lock().unwrap();
+            if shard.locks.keys().any(|k| k.len() >= 8 && &k[..8] == prefix) {
+                return true;
+            }
+        }
         let state = self.state.lock().unwrap();
         state
             .point_by_tree
@@ -884,7 +993,7 @@ pub struct TxnManager {
     lock_manager: Arc<LockManager>,
     txns: Mutex<HashMap<TxnId, TransactionContext>>,
     poisoned_commits: std::sync::atomic::AtomicUsize,
-    mvcc_versions: Mutex<MvccVersionStore>,
+    mvcc_shards: Box<[Mutex<MvccVersionStore>; LOCK_SHARDS]>,
     chain_epoch: AtomicU64,
 }
 
@@ -898,7 +1007,7 @@ impl TxnManager {
             lock_manager: Arc::new(LockManager::new()),
             txns: Mutex::new(HashMap::new()),
             poisoned_commits: std::sync::atomic::AtomicUsize::new(0),
-            mvcc_versions: Mutex::new(MvccVersionStore::default()),
+            mvcc_shards: Box::new(std::array::from_fn(|_| Mutex::new(MvccVersionStore::default()))),
             chain_epoch: AtomicU64::new(0),
         }
     }
@@ -925,13 +1034,26 @@ impl TxnManager {
             lock_manager: Arc::new(LockManager::new()),
             txns: Mutex::new(HashMap::new()),
             poisoned_commits: std::sync::atomic::AtomicUsize::new(0),
-            mvcc_versions: Mutex::new(MvccVersionStore::default()),
+            mvcc_shards: Box::new(std::array::from_fn(|_| Mutex::new(MvccVersionStore::default()))),
             chain_epoch: AtomicU64::new(0),
         }
     }
 
     fn tree_scope_prefix(tree: &Arc<BPlusTree>) -> [u8; 8] {
         tree.tree_id().to_le_bytes()
+    }
+
+    #[inline]
+    fn mvcc_shard(&self, skey: &[u8]) -> &Mutex<MvccVersionStore> {
+        &self.mvcc_shards[lock_shard_idx(skey)]
+    }
+
+    fn lock_all_mvcc_shards(&self) -> Vec<std::sync::MutexGuard<'_, MvccVersionStore>> {
+        let mut guards = Vec::with_capacity(LOCK_SHARDS);
+        for s in self.mvcc_shards.iter() {
+            guards.push(s.lock().unwrap());
+        }
+        guards
     }
 
     fn scoped_key(tree: &Arc<BPlusTree>, key: &[u8]) -> Vec<u8> {
@@ -1003,12 +1125,12 @@ impl TxnManager {
         if self.lock_manager.has_active_prefix_locks(&prefix) {
             return true;
         }
-        let versions = self.mvcc_versions.lock().unwrap();
+        let shards = self.lock_all_mvcc_shards();
         let txns = self.txns.lock().unwrap();
         if self.lock_manager.has_active_prefix_locks(&prefix) {
             return true;
         }
-        Self::has_active_tree_references_locked(&prefix, tid, &versions, &txns)
+        shards.iter().any(|v| Self::has_active_tree_references_locked(&prefix, tid, v, &txns))
     }
 
     pub fn purge_tree_state(&self, tree: &Arc<BPlusTree>) -> Result<()> {
@@ -1030,21 +1152,23 @@ impl TxnManager {
                 ));
             }
         }
-        let mut versions = self.mvcc_versions.lock().unwrap();
+        let mut shards = self.lock_all_mvcc_shards();
         let mut txns = self.txns.lock().unwrap();
         for (prefix, tid) in &scoped {
             if self.lock_manager.has_active_prefix_locks(prefix)
-                || Self::has_active_tree_references_locked(prefix, *tid, &versions, &txns)
+                || shards.iter().any(|v| Self::has_active_tree_references_locked(prefix, *tid, v, &txns))
             {
                 return Err(Error::WriteConflict(
                     "Cannot purge tree state while referenced by an active transaction".to_string(),
                 ));
             }
         }
-        versions.retain(|skey, _| {
-            !(skey.len() >= 8 && scoped.iter().any(|(prefix, _)| &skey[..8] == prefix))
-        });
-        versions.rebuild_tree_index();
+        for versions in shards.iter_mut() {
+            versions.retain(|skey, _| {
+                !(skey.len() >= 8 && scoped.iter().any(|(prefix, _)| &skey[..8] == prefix))
+            });
+            versions.rebuild_tree_index();
+        }
         for ctx in txns.values_mut() {
             ctx.read_keys.retain(|skey| {
                 !(skey.len() >= 8 && scoped.iter().any(|(prefix, _)| &skey[..8] == prefix))
@@ -1154,20 +1278,18 @@ impl TxnManager {
     }
 
     pub fn mvcc_key_count(&self) -> usize {
-        self.mvcc_versions.lock().unwrap().len()
+        self.mvcc_shards.iter().map(|s| s.lock().unwrap().len()).sum()
     }
 
     pub fn mvcc_version_count(&self) -> usize {
-        self.mvcc_versions
-            .lock()
-            .unwrap()
-            .values()
-            .map(Vec::len)
+        self.mvcc_shards
+            .iter()
+            .map(|s| s.lock().unwrap().values().map(Vec::len).sum::<usize>())
             .sum()
     }
 
     pub fn vacuum(&self) -> VacuumReport {
-        let mut versions = self.mvcc_versions.lock().unwrap();
+        let mut shards = self.lock_all_mvcc_shards();
         let mut txns = self.txns.lock().unwrap();
 
         let current_oracle_ts = self.oracle_ts.load(Ordering::SeqCst);
@@ -1183,7 +1305,9 @@ impl TxnManager {
             .unwrap_or(current_oracle_ts);
 
         let mut versions_pruned = 0usize;
+        let mut keys_cleared = 0usize;
 
+        for versions in shards.iter_mut() {
         for chain in versions.values_mut() {
             if chain.is_empty() {
                 continue;
@@ -1260,21 +1384,24 @@ impl TxnManager {
 
         let before_keys = versions.len();
         versions.retain(|_, chain| !chain.is_empty());
-        let keys_cleared = before_keys - versions.len();
+        keys_cleared += before_keys - versions.len();
         versions.rebuild_tree_index();
+        }
 
         if versions_pruned > 0 || keys_cleared > 0 {
             self.chain_epoch.fetch_add(1, Ordering::SeqCst);
         }
 
         let mut referenced_txns = HashSet::new();
-        for chain in versions.values() {
-            for v in chain {
-                if v.xmin != 0 {
-                    referenced_txns.insert(v.xmin);
-                }
-                if let Some(xmax) = v.xmax {
-                    referenced_txns.insert(xmax);
+        for versions in shards.iter() {
+            for chain in versions.values() {
+                for v in chain {
+                    if v.xmin != 0 {
+                        referenced_txns.insert(v.xmin);
+                    }
+                    if let Some(xmax) = v.xmax {
+                        referenced_txns.insert(xmax);
+                    }
                 }
             }
         }
@@ -1438,7 +1565,7 @@ impl TxnManager {
             retries += 1;
         }
 
-        let versions = self.mvcc_versions.lock().unwrap();
+        let versions = self.mvcc_shard(skey).lock().unwrap();
         let txns = self.txns.lock().unwrap();
 
         if let Some(chain) = versions.get(skey)
@@ -1577,8 +1704,10 @@ impl TxnManager {
 
             let mvcc_merge_started = std::time::Instant::now();
             let mvcc_index_keys_inspected = {
-                let versions = self.mvcc_versions.lock().unwrap();
-                let inspected = versions.extend_keys_in_range(prefix, range, &mut candidate_keys);
+                let mut inspected = 0usize;
+                for s in self.mvcc_shards.iter() {
+                    inspected += s.lock().unwrap().extend_keys_in_range(prefix, range, &mut candidate_keys);
+                }
                 GLOBAL_METRICS.record_mvcc_entries_inspected(inspected as u64);
                 inspected
             };
@@ -1656,13 +1785,13 @@ impl TxnManager {
 
                 let mvcc_chunk_started = std::time::Instant::now();
                 {
-                    let versions = self.mvcc_versions.lock().unwrap();
+                    let shards = self.lock_all_mvcc_shards();
                     let txns = self.txns.lock().unwrap();
                     let chain_epoch_changed =
                         self.chain_epoch.load(Ordering::SeqCst) != chain_epoch0;
                     for key in key_batch {
                         let skey = Self::scoped_key(tree, (*key).as_slice());
-                        if let Some(chain) = versions.get(&skey)
+                        if let Some(chain) = shards[lock_shard_idx(&skey)].get(&skey)
                             && !chain.is_empty()
                         {
                             let visible = chain
@@ -1767,9 +1896,10 @@ impl TxnManager {
         }
 
         {
-            let versions = self.mvcc_versions.lock().unwrap();
-            let inspected =
-                versions.extend_keys_in_range(prefix, &KeyRange::full(), &mut candidate_keys);
+            let mut inspected = 0usize;
+            for s in self.mvcc_shards.iter() {
+                inspected += s.lock().unwrap().extend_keys_in_range(prefix, &KeyRange::full(), &mut candidate_keys);
+            }
             GLOBAL_METRICS.record_mvcc_entries_inspected(inspected as u64);
         }
 
@@ -1781,12 +1911,12 @@ impl TxnManager {
             let mut resolved: Vec<(Vec<u8>, Option<Vec<u8>>, bool)> =
                 Vec::with_capacity(key_batch.len());
             {
-                let versions = self.mvcc_versions.lock().unwrap();
+                let shards = self.lock_all_mvcc_shards();
                 let txns = self.txns.lock().unwrap();
                 let chain_epoch_changed = self.chain_epoch.load(Ordering::SeqCst) != chain_epoch0;
                 for key in key_batch {
                     let skey = Self::scoped_key(tree, key.as_slice());
-                    if let Some(chain) = versions.get(&skey)
+                    if let Some(chain) = shards[lock_shard_idx(&skey)].get(&skey)
                         && !chain.is_empty()
                     {
                         let visible = chain
@@ -2026,7 +2156,7 @@ impl TxnManager {
 
         // 4. Update MVCC version chains & transaction write-set
         {
-            let mut versions = self.mvcc_versions.lock().unwrap();
+            let mut shards = self.lock_all_mvcc_shards();
             let mut txns = self.txns.lock().unwrap();
             let ctx = txns.get_mut(&txn_id).ok_or_else(|| {
                 Error::TransactionError(format!("Transaction {} context missing", txn_id))
@@ -2035,6 +2165,7 @@ impl TxnManager {
 
             for (i, (k, skey)) in to_delete.into_iter().enumerate() {
                 let old_val = old_values[i].clone();
+                let versions = &mut shards[lock_shard_idx(&skey)];
                 let chain = versions.entry(skey).or_default();
                 if chain.is_empty()
                     && let Some(ref baseline) = old_val
@@ -2084,11 +2215,7 @@ impl TxnManager {
         let skey = Self::scoped_key(tree, key);
 
         let lock_started = profiling.then(std::time::Instant::now);
-        let lock_delta = self.lock_manager.acquire_with_rollback(
-            txn_id,
-            LockKey::Key(skey.clone()),
-            LockMode::Exclusive,
-        )?;
+        let lock_delta_opt = self.lock_manager.acquire_point_exclusive_sharded(txn_id, &skey)?;
         if let Some(started) = lock_started {
             mitrdb_observe::record_profile_duration(
                 mitrdb_observe::ProfilePhase::LockAcquire,
@@ -2097,16 +2224,18 @@ impl TxnManager {
         }
 
         let res = (|| -> Result<()> {
-            // PHASE 1: Validate, register uncommitted version marker under brief lock
+            // PHASE 1-3: Keep this key's 1/64th MVCC shard locked across B+Tree mutation
+            // so readers never observe an in-flight chain missing its xmin=0 disk baseline.
+            let mvcc_lock_started = profiling.then(std::time::Instant::now);
+            let mut versions = self.mvcc_shard(&skey).lock().unwrap();
+            if let Some(started) = mvcc_lock_started {
+                mitrdb_observe::record_profile_duration(
+                    mitrdb_observe::ProfilePhase::MvccMutexWait,
+                    started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
+                );
+            }
             let mut last_lsn = {
-                let mvcc_lock_started = profiling.then(std::time::Instant::now);
-                let mut versions = self.mvcc_versions.lock().unwrap();
-                if let Some(started) = mvcc_lock_started {
-                    mitrdb_observe::record_profile_duration(
-                        mitrdb_observe::ProfilePhase::MvccMutexWait,
-                        started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
-                    );
-                }
+
                 let txn_lock_started = profiling.then(std::time::Instant::now);
                 let txns = self.txns.lock().unwrap();
                 if let Some(started) = txn_lock_started {
@@ -2203,7 +2332,6 @@ impl TxnManager {
             // PHASE 3: Attach synthetic baseline only if pre-existing disk record had no prior MVCC chain
             let version_chain_started = profiling.then(std::time::Instant::now);
             if let Some(ref baseline) = old_btree_val {
-                let mut versions = self.mvcc_versions.lock().unwrap();
                 if let Some(chain) = versions.get_mut(&skey) {
                     // Only inject baseline if the chain only contains our in-flight version from Phase 1
                     if chain.len() == 1 && chain[0].xmin == txn_id {
@@ -2215,12 +2343,7 @@ impl TxnManager {
                     }
                 }
             }
-            {
-                let mut txns = self.txns.lock().unwrap();
-                if let Some(ctx) = txns.get_mut(&txn_id) {
-                    ctx.last_lsn = last_lsn;
-                }
-            }
+            drop(versions);
             if let Some(started) = version_chain_started {
                 mitrdb_observe::record_profile_duration(
                     mitrdb_observe::ProfilePhase::VersionChainMutation,
@@ -2243,7 +2366,7 @@ impl TxnManager {
         })();
 
         if res.is_err() {
-            self.lock_manager.rollback_delta(txn_id, lock_delta);
+            if let Some(d) = lock_delta_opt { self.lock_manager.rollback_delta(txn_id, d); } else { let idx = lock_shard_idx(&skey); let mut sh = self.lock_manager.point_shards[idx].lock().unwrap(); if sh.locks.get(&skey) == Some(&txn_id) { sh.locks.remove(&skey); } }
         }
         res
     }
@@ -2251,7 +2374,7 @@ impl TxnManager {
     pub fn commit(&self, txn_id: TxnId) -> Result<u64> {
         let profiling = mitrdb_observe::profiling_enabled();
         let commit_started = profiling.then(std::time::Instant::now);
-        let versions = self.mvcc_versions.lock().unwrap();
+        let shards = self.lock_all_mvcc_shards();
         let txn_lock_started = std::time::Instant::now();
         let mut txns = self.txns.lock().unwrap();
         GLOBAL_METRICS.record_txn_mutex_wait_ns(
@@ -2281,7 +2404,7 @@ impl TxnManager {
 
         if isolation == IsolationLevel::Serializable && has_writes {
             for skey in &read_keys {
-                if let Some(chain) = versions.get(skey)
+                if let Some(chain) = shards[lock_shard_idx(skey)].get(skey)
                     && Self::has_concurrent_committed_modification(chain, txn_id, read_ts, &txns)
                 {
                     return Err(Error::WriteConflict(format!(
@@ -2291,11 +2414,11 @@ impl TxnManager {
                 }
             }
             for (prefix, range) in &read_ranges {
-                for raw_key in versions.keys_in_range(*prefix, range) {
+                for raw_key in shards.iter().flat_map(|s| s.keys_in_range(*prefix, range)) {
                     let mut scoped_key = Vec::with_capacity(8 + raw_key.len());
                     scoped_key.extend_from_slice(prefix);
                     scoped_key.extend_from_slice(&raw_key);
-                    if let Some(chain) = versions.get(&scoped_key)
+                    if let Some(chain) = shards[lock_shard_idx(&scoped_key)].get(&scoped_key)
                         && Self::has_concurrent_committed_modification(
                             chain, txn_id, read_ts, &txns,
                         )
@@ -2308,7 +2431,7 @@ impl TxnManager {
                 }
             }
         }
-        drop(versions);
+        drop(shards);
 
         let ctx = txns.get_mut(&txn_id).expect("transaction validated above");
         ctx.state = TxnState::Committing;
@@ -2581,7 +2704,7 @@ impl TxnManager {
                     }
                     let skey = Self::scoped_key(&tree, &key);
                     {
-                        let mut versions = self.mvcc_versions.lock().unwrap();
+                        let mut versions = self.mvcc_shard(&skey).lock().unwrap();
                         if let Some(chain) = versions.get_mut(&skey) {
                             if earlier.contains(&skey) {
                                 if let Some(last) = chain.last_mut()
@@ -2612,10 +2735,12 @@ impl TxnManager {
         }
 
         if undone {
-            let mut versions = self.mvcc_versions.lock().unwrap();
-            versions.retain(|_, chain| !chain.is_empty());
+            for s in self.mvcc_shards.iter() {
+                let mut versions = s.lock().unwrap();
+                versions.retain(|_, chain| !chain.is_empty());
+                versions.rebuild_tree_index();
+            }
             self.chain_epoch.fetch_add(1, Ordering::SeqCst);
-            versions.rebuild_tree_index();
         }
         Ok(())
     }
@@ -2779,22 +2904,21 @@ impl TxnManager {
         }
 
         {
-            let mut versions = self.mvcc_versions.lock().unwrap();
+            let mut shards = self.lock_all_mvcc_shards();
             let mut txns = self.txns.lock().unwrap();
-            for chain in versions.values_mut() {
-                chain.retain(|v| v.xmin != txn_id);
-                for v in chain.iter_mut() {
-                    if v.xmax == Some(txn_id) {
-                        v.xmax = None;
+            for versions in shards.iter_mut() {
+                for chain in versions.values_mut() {
+                    chain.retain(|v| v.xmin != txn_id);
+                    for v in chain.iter_mut() {
+                        if v.xmax == Some(txn_id) {
+                            v.xmax = None;
+                        }
                     }
                 }
-                // if chain.len() == 1 && chain[0].xmin == 0 && chain[0].xmax.is_none() {
-                //     chain.clear();
-                // }
+                versions.retain(|_, chain| !chain.is_empty());
+                versions.rebuild_tree_index();
             }
-            versions.retain(|_, chain| !chain.is_empty());
             self.chain_epoch.fetch_add(1, Ordering::SeqCst);
-            versions.rebuild_tree_index();
 
             if let Some(ctx) = txns.get_mut(&txn_id) {
                 ctx.read_keys.clear();

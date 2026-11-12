@@ -24,3 +24,4 @@ target/
 
 # Test-only TLS fixtures (fake CA/cert/key, safe to commit)
 !crates/*/tests/fixtures/tls/*.pem
+perf.data*

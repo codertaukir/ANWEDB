@@ -1,6 +1,6 @@
 
 thread_local! {
-    static THREAD_LEAF_HINTS: std::cell::RefCell<std::collections::HashMap<u64, PageId>> = std::cell::RefCell::new(std::collections::HashMap::new());
+    static THREAD_LEAF_HINTS: std::cell::RefCell<std::collections::HashMap<u64, (PageId, PageId, Option<Vec<u8>>)>> = std::cell::RefCell::new(std::collections::HashMap::new());
 }
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
@@ -449,10 +449,8 @@ pub struct BPlusTree {
     wal: Option<Arc<WalManager>>,
     root_page_id: RwLock<PageId>,
     max_keys: u16,
-    /// Cached rightmost leaf of THIS tree, used only by the insert fast path.
-    /// It is only ever written while holding the root write lock, and it is
-    /// reset (under that same lock) whenever this tree frees pages.
     last_leaf_hint: AtomicU32,
+    leaf_latches: Box<[std::sync::Mutex<()>; 64]>,
 }
 
 impl BPlusTree {
@@ -486,6 +484,7 @@ impl BPlusTree {
             root_page_id: RwLock::new(root_id),
             max_keys,
             last_leaf_hint: AtomicU32::new(INVALID_PAGE_ID),
+            leaf_latches: Box::new(std::array::from_fn(|_| std::sync::Mutex::new(()))),
         };
         let root_node = BTreeNode::new_leaf(root_id, max_keys);
         tree.write_node(&root_node, txn_id, prev_lsn)?;
@@ -513,6 +512,7 @@ impl BPlusTree {
             root_page_id: RwLock::new(root_page_id),
             max_keys,
             last_leaf_hint: AtomicU32::new(INVALID_PAGE_ID),
+            leaf_latches: Box::new(std::array::from_fn(|_| std::sync::Mutex::new(()))),
         })
     }
 
@@ -539,6 +539,291 @@ impl BPlusTree {
         THREAD_LEAF_HINTS.with(|hints| {
             hints.borrow_mut().remove(&self.tree_id);
         });
+    }
+
+    fn read_first_key_zero_copy(&self, page_id: PageId) -> Option<Vec<u8>> {
+        self.bpm
+            .with_page(page_id, |page| {
+                let buf = &page.data[PAGE_HEADER_SIZE..PAGE_SIZE];
+                if buf.len() < 22 || buf[0] != NODE_KIND_LEAF {
+                    return Ok(None);
+                }
+                let key_cnt = u16::from_le_bytes([buf[16], buf[17]]) as usize;
+                if key_cnt == 0 {
+                    return Ok(None);
+                }
+                let klen = u16::from_le_bytes([buf[18], buf[19]]) as usize;
+                if 22 + klen > buf.len() {
+                    return Ok(None);
+                }
+                Ok(Some(buf[22..22 + klen].to_vec()))
+            })
+            .ok()
+            .flatten()
+    }
+
+    /// Zero-allocation in-place leaf insert/replace directly inside the buffer pool frame.
+    /// Returns:
+    /// - `Ok(Some((old_val, next_pid)))` if mutated in-place (or `Err` on validation/WAL failure)
+    /// - `Ok(None)` if hint check failed or leaf is full and needs a split.
+    fn try_mutate_leaf_in_place(
+        &self,
+        pid: PageId,
+        hint_check: Option<(PageId, &Option<Vec<u8>>)>,
+        txn_id: TxnId,
+        prev_lsn: &mut Lsn,
+        key: &[u8],
+        value: &[u8],
+    ) -> Result<Option<(Option<Vec<u8>>, PageId)>> {
+        let max_body = PAGE_SIZE - PAGE_HEADER_SIZE;
+        let mut outcome: Option<(Option<Vec<u8>>, PageId)> = None;
+        let mut wal_err: Option<Error> = None;
+
+        self.bpm.mutate_page(pid, |page| {
+            let cur_ptype = page.page_type();
+            let cur_lsn = page.page_lsn();
+            let mut new_lsn: Option<Lsn> = None;
+            let buf = &mut page.data[PAGE_HEADER_SIZE..PAGE_SIZE];
+            if buf.len() < 18 || buf[0] != NODE_KIND_LEAF {
+                return Ok(());
+            }
+            let next_pid = u32::from_le_bytes([buf[12], buf[13], buf[14], buf[15]]);
+            let key_cnt = u16::from_le_bytes([buf[16], buf[17]]) as usize;
+
+            if let Some((exp_next, high_key)) = hint_check {
+                if next_pid != exp_next {
+                    return Ok(());
+                }
+                if let Some(hk) = high_key {
+                    if key >= hk.as_slice() {
+                        return Ok(());
+                    }
+                }
+                if key_cnt > 0 {
+                    let first_klen = u16::from_le_bytes([buf[18], buf[19]]) as usize;
+                    if 22 + first_klen > buf.len() || key < &buf[22..22 + first_klen] {
+                        return Ok(());
+                    }
+                }
+            }
+
+            // Scan packed entries directly on page slice without heap allocations
+            let mut pos = 18usize;
+            let mut insert_pos = None;
+            let mut replace_info: Option<(usize, usize, usize)> = None; // (entry_start, entry_end, val_start)
+
+            for _ in 0..key_cnt {
+                if pos + 4 > buf.len() {
+                    return Err(Error::PageCorrupted("Truncated B+Tree leaf entry".to_string()));
+                }
+                let klen = u16::from_le_bytes([buf[pos], buf[pos + 1]]) as usize;
+                let vlen = u16::from_le_bytes([buf[pos + 2], buf[pos + 3]]) as usize;
+                let entry_end = pos + 4 + klen + vlen;
+                if entry_end > buf.len() {
+                    return Err(Error::PageCorrupted("Truncated B+Tree leaf key/value".to_string()));
+                }
+                if insert_pos.is_none() && replace_info.is_none() {
+                    let cur_key = &buf[pos + 4..pos + 4 + klen];
+                    match cur_key.cmp(key) {
+                        std::cmp::Ordering::Equal => {
+                            replace_info = Some((pos, entry_end, pos + 4 + klen));
+                        }
+                        std::cmp::Ordering::Greater => {
+                            insert_pos = Some(pos);
+                        }
+                        std::cmp::Ordering::Less => {}
+                    }
+                }
+                pos = entry_end;
+            }
+            let old_payload_len = pos;
+            let new_entry_len = 4 + key.len() + value.len();
+
+            if let Some((estart, eend, vstart)) = replace_info {
+                let old_entry_len = eend - estart;
+                let new_payload_len = old_payload_len - old_entry_len + new_entry_len;
+                if new_payload_len > max_body {
+                    return Ok(()); // needs split
+                }
+                let old_val = buf[vstart..eend].to_vec();
+
+                if let Some(ref wal) = self.wal
+                    && txn_id != 0
+                {
+                    let needs_fpi = cur_ptype != PAGE_TYPE_BTREE_LEAF
+                        || wal.needs_full_page_image(cur_lsn);
+                    let (wal_start, wal_end) = if needs_fpi {
+                        (0usize, max_body)
+                    } else {
+                        (estart, old_payload_len.max(new_payload_len))
+                    };
+                    let undo = buf[wal_start..wal_end].to_vec();
+                    let mut redo = undo.clone();
+                    let rel_estart = estart - wal_start;
+                    let rel_eend = eend - wal_start;
+                    let rel_old_end = old_payload_len - wal_start;
+                    redo.copy_within(rel_eend..rel_old_end, rel_estart + new_entry_len);
+                    redo[rel_estart..rel_estart + 2].copy_from_slice(&(key.len() as u16).to_le_bytes());
+                    redo[rel_estart + 2..rel_estart + 4].copy_from_slice(&(value.len() as u16).to_le_bytes());
+                    redo[rel_estart + 4..rel_estart + 4 + key.len()].copy_from_slice(key);
+                    redo[rel_estart + 4 + key.len()..rel_estart + new_entry_len].copy_from_slice(value);
+                    if new_payload_len < old_payload_len {
+                        redo[(new_payload_len - wal_start)..rel_old_end].fill(0);
+                    }
+
+                    let offset = (PAGE_HEADER_SIZE + wal_start) as u16;
+                    match wal.append_record(LogRecord::new_update(
+                        0,
+                        txn_id,
+                        *prev_lsn,
+                        pid,
+                        offset,
+                        redo,
+                        undo,
+                    )) {
+                        Ok(lsn) => {
+                            *prev_lsn = lsn;
+                            new_lsn = Some(lsn);
+                        }
+                        Err(e) => {
+                            wal_err = Some(e);
+                            return Ok(());
+                        }
+                    }
+                }
+
+                buf.copy_within(eend..old_payload_len, estart + new_entry_len);
+                buf[estart..estart + 2].copy_from_slice(&(key.len() as u16).to_le_bytes());
+                buf[estart + 2..estart + 4].copy_from_slice(&(value.len() as u16).to_le_bytes());
+                buf[estart + 4..estart + 4 + key.len()].copy_from_slice(key);
+                buf[estart + 4 + key.len()..estart + new_entry_len].copy_from_slice(value);
+                if new_payload_len < old_payload_len {
+                    buf[new_payload_len..old_payload_len].fill(0);
+                }
+                if let Some(lsn) = new_lsn { page.set_page_lsn(lsn); }
+                page.set_page_type(PAGE_TYPE_BTREE_LEAF);
+                page.set_flags(0);
+                page.update_checksum();
+                outcome = Some((Some(old_val), next_pid));
+                return Ok(());
+            }
+
+            // Pure insert
+            let new_key_cnt = key_cnt + 1;
+            let new_payload_len = old_payload_len + new_entry_len;
+            if new_key_cnt > (self.max_keys as usize) || new_payload_len > max_body {
+                return Ok(()); // needs split
+            }
+            let ipos = insert_pos.unwrap_or(old_payload_len);
+
+            if let Some(ref wal) = self.wal
+                && txn_id != 0
+            {
+                let needs_fpi = cur_ptype != PAGE_TYPE_BTREE_LEAF
+                    || wal.needs_full_page_image(cur_lsn);
+                if needs_fpi || ipos <= 48 {
+                    let (wal_start, wal_end) = if needs_fpi {
+                        (0usize, max_body)
+                    } else {
+                        (16usize, new_payload_len)
+                    };
+                    let undo = buf[wal_start..wal_end].to_vec();
+                    let mut redo = undo.clone();
+                    let rel_cnt = 16 - wal_start;
+                    redo[rel_cnt..rel_cnt + 2].copy_from_slice(&(new_key_cnt as u16).to_le_bytes());
+                    let rel_ipos = ipos - wal_start;
+                    let rel_old_end = old_payload_len - wal_start;
+                    redo.copy_within(rel_ipos..rel_old_end, rel_ipos + new_entry_len);
+                    redo[rel_ipos..rel_ipos + 2].copy_from_slice(&(key.len() as u16).to_le_bytes());
+                    redo[rel_ipos + 2..rel_ipos + 4].copy_from_slice(&(value.len() as u16).to_le_bytes());
+                    redo[rel_ipos + 4..rel_ipos + 4 + key.len()].copy_from_slice(key);
+                    redo[rel_ipos + 4 + key.len()..rel_ipos + new_entry_len].copy_from_slice(value);
+
+                    let offset = (PAGE_HEADER_SIZE + wal_start) as u16;
+                    match wal.append_record(LogRecord::new_update(
+                        0,
+                        txn_id,
+                        *prev_lsn,
+                        pid,
+                        offset,
+                        redo,
+                        undo,
+                    )) {
+                        Ok(lsn) => {
+                            *prev_lsn = lsn;
+                            new_lsn = Some(lsn);
+                        }
+                        Err(e) => {
+                            wal_err = Some(e);
+                            return Ok(());
+                        }
+                    }
+                } else {
+                    // Log only the 2-byte key_cnt (16..18) and the newly shifted/inserted tail (ipos..new_payload_len)
+                    let undo_cnt = buf[16..18].to_vec();
+                    let redo_cnt = (new_key_cnt as u16).to_le_bytes().to_vec();
+                    let tail_len = new_payload_len - ipos;
+                    let mut undo_tail = vec![0u8; tail_len];
+                    let existing_tail = old_payload_len - ipos;
+                    undo_tail[..existing_tail].copy_from_slice(&buf[ipos..old_payload_len]);
+                    let mut redo_tail = vec![0u8; tail_len];
+                    redo_tail[..2].copy_from_slice(&(key.len() as u16).to_le_bytes());
+                    redo_tail[2..4].copy_from_slice(&(value.len() as u16).to_le_bytes());
+                    redo_tail[4..4 + key.len()].copy_from_slice(key);
+                    redo_tail[4 + key.len()..new_entry_len].copy_from_slice(value);
+                    redo_tail[new_entry_len..].copy_from_slice(&buf[ipos..old_payload_len]);
+
+                    let mut recs = [
+                        LogRecord::new_update(
+                            0,
+                            txn_id,
+                            *prev_lsn,
+                            pid,
+                            (PAGE_HEADER_SIZE + 16) as u16,
+                            redo_cnt,
+                            undo_cnt,
+                        ),
+                        LogRecord::new_update(
+                            0,
+                            txn_id,
+                            INVALID_LSN,
+                            pid,
+                            (PAGE_HEADER_SIZE + ipos) as u16,
+                            redo_tail,
+                            undo_tail,
+                        ),
+                    ];
+                    match wal.append_records_batch(&mut recs) {
+                        Ok(lsn2) => {
+                            *prev_lsn = lsn2;
+                            new_lsn = Some(lsn2);
+                        }
+                        Err(e) => {
+                            wal_err = Some(e);
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+
+            buf[16..18].copy_from_slice(&(new_key_cnt as u16).to_le_bytes());
+            buf.copy_within(ipos..old_payload_len, ipos + new_entry_len);
+            buf[ipos..ipos + 2].copy_from_slice(&(key.len() as u16).to_le_bytes());
+            buf[ipos + 2..ipos + 4].copy_from_slice(&(value.len() as u16).to_le_bytes());
+            buf[ipos + 4..ipos + 4 + key.len()].copy_from_slice(key);
+            buf[ipos + 4 + key.len()..ipos + new_entry_len].copy_from_slice(value);
+            if let Some(lsn) = new_lsn { page.set_page_lsn(lsn); }
+                page.set_page_type(PAGE_TYPE_BTREE_LEAF);
+            page.set_flags(0);
+            page.update_checksum();
+            outcome = Some((None, next_pid));
+            Ok(())
+        })?;
+
+        if let Some(e) = wal_err {
+            return Err(e);
+        }
+        Ok(outcome)
     }
 
     pub fn read_node(&self, page_id: PageId) -> Result<BTreeNode> {
@@ -1044,52 +1329,62 @@ impl BPlusTree {
         }
         let _op_guard = self.bpm.acquire_op_shared();
 
-        // FAST PATH: Optimistic Shared-Root Descent (Non-splitting mutations)
-        let root_id = *self.root_page_id.read().unwrap();
-        let hint_pid = THREAD_LEAF_HINTS.with(|hints| {
-            hints.borrow().get(&self.tree_id).copied().unwrap_or(INVALID_PAGE_ID)
-        });
-        let mut leaf = if hint_pid != INVALID_PAGE_ID {
-            match self.read_node(hint_pid) {
-                Ok(cached_leaf)
-                    if cached_leaf.is_leaf
-                        && cached_leaf.next_leaf_page_id == INVALID_PAGE_ID
-                        && (cached_leaf.keys.is_empty()
-                            || key >= cached_leaf.keys[0].as_slice()) =>
-                {
-                    cached_leaf
-                }
-                _ => self.find_leaf_page(root_id, key)?,
-            }
-        } else {
-            self.find_leaf_page(root_id, key)?
-        };
-
-        let old_value = match leaf.keys.binary_search_by(|k| k.as_slice().cmp(key)) {
-            Ok(idx) => Some(std::mem::replace(&mut leaf.values[idx], value.to_vec())),
-            Err(idx) => {
-                leaf.keys.insert(idx, key.to_vec());
-                leaf.values.insert(idx, value.to_vec());
-                None
-            }
-        };
-
-        if leaf.keys.len() <= (self.max_keys as usize) && leaf.fits_in_page() {
-            let pid = leaf.page_id;
-            let is_rightmost = leaf.next_leaf_page_id == INVALID_PAGE_ID;
-            self.write_node(&leaf, txn_id, prev_lsn)?;
-            if is_rightmost {
-                THREAD_LEAF_HINTS.with(|hints| {
-                hints.borrow_mut().insert(self.tree_id, pid);
+        // FAST PATH: Zero-Allocation In-Place Leaf Mutation with Latched Range Hints
+        {
+            let root_guard = self.root_page_id.read().unwrap();
+            let root_id = *root_guard;
+            let hint = THREAD_LEAF_HINTS.with(|hints| {
+                hints.borrow().get(&self.tree_id).cloned()
             });
+
+            let mut tried_hint = false;
+            if let Some((hint_pid, exp_next, ref high_key)) = hint {
+                if high_key.is_none() || key < high_key.as_ref().unwrap().as_slice() {
+                    tried_hint = true;
+                    let _leaf_latch = self.leaf_latches[(hint_pid as usize) & 63].lock().unwrap();
+                    if let Some((old_value, _next_pid)) = self.try_mutate_leaf_in_place(
+                        hint_pid,
+                        Some((exp_next, high_key)),
+                        txn_id,
+                        prev_lsn,
+                        key,
+                        value,
+                    )? {
+                        return Ok(old_value);
+                    }
+                }
             }
-            return Ok(old_value);
+
+            if !tried_hint || hint.is_some() {
+                let real_pid = self.find_leaf_page_id(root_id, key)?;
+                let _leaf_latch = self.leaf_latches[(real_pid as usize) & 63].lock().unwrap();
+                if let Some((old_value, next_pid)) = self.try_mutate_leaf_in_place(
+                    real_pid,
+                    None,
+                    txn_id,
+                    prev_lsn,
+                    key,
+                    value,
+                )? {
+                    let high_key = if next_pid == INVALID_PAGE_ID {
+                        None
+                    } else {
+                        self.read_first_key_zero_copy(next_pid)
+                    };
+                    if next_pid == INVALID_PAGE_ID || high_key.is_some() {
+                        THREAD_LEAF_HINTS.with(|hints| {
+                            hints.borrow_mut().insert(self.tree_id, (real_pid, next_pid, high_key));
+                        });
+                    }
+                    return Ok(old_value);
+                }
+            }
         }
 
         // SLOW PATH: Structural Modification (Split requires exclusive root write lock)
         let mut root_guard = self.root_page_id.write().unwrap();
-        // Re-read leaf under exclusive root write lock in case root or page changed
         let mut leaf = self.find_leaf_page(*root_guard, key)?;
+        let _leaf_latch = self.leaf_latches[(leaf.page_id as usize) & 63].lock().unwrap();
         let old_value = match leaf.keys.binary_search_by(|k| k.as_slice().cmp(key)) {
             Ok(idx) => Some(std::mem::replace(&mut leaf.values[idx], value.to_vec())),
             Err(idx) => {
@@ -1101,15 +1396,21 @@ impl BPlusTree {
 
         if leaf.keys.len() <= (self.max_keys as usize) && leaf.fits_in_page() {
             let pid = leaf.page_id;
-            let is_rightmost = leaf.next_leaf_page_id == INVALID_PAGE_ID;
+            let next_pid = leaf.next_leaf_page_id;
             self.write_node(&leaf, txn_id, prev_lsn)?;
-            if is_rightmost {
+            let high_key = if next_pid == INVALID_PAGE_ID {
+                None
+            } else {
+                self.read_node(next_pid).ok().and_then(|n| n.keys.first().cloned())
+            };
+            if next_pid == INVALID_PAGE_ID || high_key.is_some() {
                 THREAD_LEAF_HINTS.with(|hints| {
-                hints.borrow_mut().insert(self.tree_id, pid);
-            });
+                    hints.borrow_mut().insert(self.tree_id, (pid, next_pid, high_key));
+                });
             }
             return Ok(old_value);
         }
+        drop(_leaf_latch);
 
         let plan = self.plan_split(&leaf)?;
         let mut pages = self.alloc_split_pages(plan.pages_needed)?;
@@ -1351,16 +1652,29 @@ impl BPlusTree {
             self.write_node(&next_leaf, txn_id, prev_lsn)?;
         }
 
+        let left_pid = left_leaf.page_id;
+        let right_pid = right_leaf.page_id;
+        let next_after_right = right_leaf.next_leaf_page_id;
         let result = self.insert_into_parent(
             root_guard,
             pages,
             left_leaf.parent_page_id,
-            left_leaf.page_id,
+            left_pid,
             separator_key,
-            right_leaf.page_id,
+            right_pid,
             txn_id,
             prev_lsn,
         );
+        if result.is_ok() {
+            let right_high = if next_after_right == INVALID_PAGE_ID {
+                None
+            } else {
+                self.read_first_key_zero_copy(next_after_right)
+            };
+            THREAD_LEAF_HINTS.with(|hints| {
+                hints.borrow_mut().insert(self.tree_id, (right_pid, next_after_right, right_high));
+            });
+        }
         if let Some(started) = parent_started {
             mitrdb_observe::record_profile_duration(
                 mitrdb_observe::ProfilePhase::SplitParentUpdate,
