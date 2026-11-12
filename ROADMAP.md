@@ -84,6 +84,13 @@ Status tracker. `[x]` = done and measured/tested, `[ ]` = pending.
 
 - [x] Batch delete per leaf (4042419, fdc2679): `delete_batch_logged` (btree.rs) + `rebalance_leaf` isolation, `delete_batch` (mitrdb-txn), aur `exec_delete` wiring. N=5000 delete_probe: 257us/row, 81 page writes, 0 evictions; delete_autocommit_probe: N=2000 avg=741us, p50=718us, 32 page writes, 0 evictions
 
+- [x] High-concurrency B+Tree insert scaling, WAL zero-copy batching & hint_epoch safety (`e95efea`..`87daf71`):
+  - 64-shard `txn_table`, `mimalloc` global allocator (`b299f41`), 47-byte packed WAL header + batch txn tracking (`57bb563`), and thread-local WAL scratch buffers (`06c56c5`, `ce051b2`).
+  - `LeafFull` vs `HintMiss` fast-path split + balanced `75/25` interior leaf splits (`bf7b6eb`).
+  - Cross-thread `hint_epoch` invalidation on delete/rebalance verified inside `_leaf_latch` + exclusive `root_page_id.write()` on splits (`2fe8d16`), eliminating `PageCorrupted` and half-split traversal races (`auto_checkpoint_under_concurrent_sessions` 5/5 pass, workspace 100% pass).
+  - Deferred per-insert 4 KB page checksums to `DiskManager` flush/eviction and pre-serialized WAL records outside `WalManager::inner` lock (`87daf71`).
+  - Measured (`write_mark_real`, nomark, CPU pinned): `1T` = `219,914 ops/s` (`4.54 µs/op`), `2T` = `206,653 ops/s` (`9.67 µs/op`), `4T` = `148,475 ops/s` (`26.9 µs/op`).
+
 - [x] Concurrent DDL locking & isolation (4875019): DDL statements (`DROP TABLE`, `CREATE INDEX`, `DROP INDEX`, `ALTER TABLE ADD/RENAME/DROP COLUMN`, `SET NOT NULL`, `CHANGE TYPE`) par `DdlTableLockGuard` exclusive table lock acquire karta hai; DML execution (`SELECT`, `INSERT`, `UPDATE`, `DELETE`) par `acquire_table_shared` integrate kiya. `LockTimeout` / `Deadlock` errors `Error::WriteConflict` mein map hue; `DropIndex` double-guard acquire bug fix hua; `schema_persist` test suite + poora workspace tests green (100% passed).
 
 
@@ -122,7 +129,12 @@ Status tracker. `[x]` = done and measured/tested, `[ ]` = pending.
 
 
 ## P1: Architecture & Concurrency
-- [ ] Concurrent B-Tree (read/write scaling): MvccMutex contention hatane ke liye concurrent B-tree design doc aur implementation (T=4 put scaling fix).
+- [~] Concurrent B-Tree & WAL 4T scaling (in progress — `1T` 220k, `2T` 207k, `4T` 148k ops/s achieved):
+  - **Next resumption target (`4T` `blocked ~14-18 µs/op` reduction):**
+    1. `crates/mitrdb-storage/src/wal.rs` (`append_record_ref` / `flush_up_to`): Replace global `WalManager::inner` mutex contention on multi-thread appends/commits with atomic LSN reservation + lock-free/striped append ring or faster group-commit leader handoff.
+    2. `crates/mitrdb-storage/src/buffer_pool.rs` (`mutate_page`): Reduce per-frame `RwLock` + shard lock contention when 4 threads concurrently mutate hot right-edge leaf pages.
+    3. `crates/mitrdb-storage/src/btree.rs` (`SLOW PATH A`): Explore optimistic parent version/latch coupling so non-root leaf splits don't block concurrent fast-path readers/writers on `root_page_id.write()`.
+  - **Resume command:** `cargo build --release -p mitrdb-server --example write_mark_real && taskset -c 0,1,2,3 target/release/examples/write_mark_real /tmp/bench4 4 nomark 25000`
 
 - [x] Query Planner & Join Execution Optimization (5fa0485, cea2550):
   - Planner predicate pushdown (`mitrdb-query`): WHERE clause ke single-table predicates ko scan nodes (`SeqScan` / `IndexScan`) ke `bound_filter` mein pushdown kiya; post-join filter overhead eliminate hua (`bound_join_filter: None`); outer-join semantics preserve kiye.
