@@ -291,16 +291,18 @@ impl LogRecord {
         let total_size = self.serialized_size();
         buf.reserve(total_size);
 
-        buf.extend_from_slice(&(total_size as u32).to_le_bytes());
-        buf.extend_from_slice(&self.lsn.to_le_bytes());
-        buf.extend_from_slice(&self.prev_lsn.to_le_bytes());
-        buf.extend_from_slice(&self.txn_id.to_le_bytes());
-        buf.push(self.record_type as u8);
-        buf.extend_from_slice(&self.page_id.to_le_bytes());
-        buf.extend_from_slice(&self.offset.to_le_bytes());
-        buf.extend_from_slice(&self.undo_next_lsn.to_le_bytes());
-        buf.extend_from_slice(&(self.redo_data.len() as u16).to_le_bytes());
-        buf.extend_from_slice(&(self.undo_data.len() as u16).to_le_bytes());
+        let mut hdr = [0u8; 47];
+        hdr[0..4].copy_from_slice(&(total_size as u32).to_le_bytes());
+        hdr[4..12].copy_from_slice(&self.lsn.to_le_bytes());
+        hdr[12..20].copy_from_slice(&self.prev_lsn.to_le_bytes());
+        hdr[20..28].copy_from_slice(&self.txn_id.to_le_bytes());
+        hdr[28] = self.record_type as u8;
+        hdr[29..33].copy_from_slice(&self.page_id.to_le_bytes());
+        hdr[33..35].copy_from_slice(&self.offset.to_le_bytes());
+        hdr[35..43].copy_from_slice(&self.undo_next_lsn.to_le_bytes());
+        hdr[43..45].copy_from_slice(&(self.redo_data.len() as u16).to_le_bytes());
+        hdr[45..47].copy_from_slice(&(self.undo_data.len() as u16).to_le_bytes());
+        buf.extend_from_slice(&hdr);
         buf.extend_from_slice(&self.redo_data);
         buf.extend_from_slice(&self.undo_data);
 
@@ -1204,8 +1206,12 @@ impl WalManager {
         let append_started = profiling.then(std::time::Instant::now);
         #[cfg(feature = "fault-injection")]
         self.inject_append_fail()?;
+        let total_batch_bytes: usize = records.iter().map(|r| r.serialized_size()).sum();
         let mut inner = self.inner.lock();
+        inner.pending_bytes.reserve(total_batch_bytes);
+        inner.pending.reserve(records.len());
         let mut last_lsn = INVALID_LSN;
+        let mut last_tracked_update: Option<(TxnId, Lsn)> = None;
 
         for record in records.iter_mut() {
             let assigned_lsn = inner.next_lsn;
@@ -1270,7 +1276,33 @@ impl WalManager {
 
             let start = inner.pending_base + inner.pending_bytes.len() as u64;
             record.serialize_append(&mut inner.pending_bytes);
-            inner.track_record(record);
+            if record.txn_id != 0
+                && matches!(
+                    record.record_type,
+                    LogRecordType::Begin | LogRecordType::Update | LogRecordType::Clr
+                )
+            {
+                if let Some((prev_tid, _)) = last_tracked_update
+                    && prev_tid == record.txn_id
+                {
+                    last_tracked_update = Some((record.txn_id, assigned_lsn));
+                } else {
+                    if let Some((prev_tid, prev_lsn_val)) = last_tracked_update.take()
+                        && let Some(e) = inner.txn_trackers.get_mut(&prev_tid)
+                    {
+                        e.last_lsn = prev_lsn_val;
+                    }
+                    inner.track_record(record);
+                    last_tracked_update = Some((record.txn_id, assigned_lsn));
+                }
+            } else {
+                if let Some((prev_tid, prev_lsn_val)) = last_tracked_update.take()
+                    && let Some(e) = inner.txn_trackers.get_mut(&prev_tid)
+                {
+                    e.last_lsn = prev_lsn_val;
+                }
+                inner.track_record(record);
+            }
             inner.next_lsn = next_lsn;
             inner.pending.push(PendingRecord {
                 lsn: assigned_lsn,
@@ -1280,6 +1312,11 @@ impl WalManager {
             });
             GLOBAL_METRICS.record_wal_append();
             last_lsn = assigned_lsn;
+        }
+        if let Some((prev_tid, prev_lsn_val)) = last_tracked_update
+            && let Some(e) = inner.txn_trackers.get_mut(&prev_tid)
+        {
+            e.last_lsn = prev_lsn_val;
         }
 
         if let Some(started) = append_started {
