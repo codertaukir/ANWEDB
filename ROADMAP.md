@@ -103,7 +103,7 @@ Status tracker. `[x]` = done and measured/tested, `[ ]` = pending.
 
 - [x] Bulk DML transient memory profiling: measured per-structure breakdown (~136B write_set, ~136B LockManager, ~248B MVCC store; ~520B/row total transient heap across 5k rows).
 
-- [ ] Btree multi-write remaining edge cases (low priority): `free_btree_page`, delete merge/borrow/rebalance_internal error-path isolation aur buffer pool new_page conflict free-page leak guard.
+- [x] Btree multi-write remaining edge cases: `BufferPoolManager::new_page` fast-path conflict free-page reclaim guard, `free_btree_page` zero-copy `with_page` + atomic `mutate_page`, aur `rebalance_internal` split-redistribution read-before-write child isolation (`mitrdb-storage` 81/81 + `ckpt_reclaim` pass).
 
 
 ## Performance

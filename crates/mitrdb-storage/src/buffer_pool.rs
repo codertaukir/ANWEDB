@@ -345,6 +345,8 @@ impl BufferPoolManager {
                         target_shard.insert(new_page_id, victim_idx);
                         return Ok((new_page_id, new_page));
                     }
+                    drop(target_shard);
+                    let _ = self.disk_manager.free_page(new_page_id);
                     self.free_frames.lock().unwrap().push(victim_idx);
                 }
             }

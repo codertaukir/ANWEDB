@@ -2388,19 +2388,23 @@ impl BPlusTree {
                 let mut updated_parent = parent;
                 updated_parent.keys[node_idx - 1] = new_sep;
 
+                let mut updated_children = Vec::new();
                 for &cid in &new_left.children {
                     let mut child = self.read_node(cid)?;
                     if child.parent_page_id != new_left.page_id {
                         child.parent_page_id = new_left.page_id;
-                        self.write_node(&child, txn_id, prev_lsn)?;
+                        updated_children.push(child);
                     }
                 }
                 for &cid in &node.children {
                     let mut child = self.read_node(cid)?;
                     if child.parent_page_id != node.page_id {
                         child.parent_page_id = node.page_id;
-                        self.write_node(&child, txn_id, prev_lsn)?;
+                        updated_children.push(child);
                     }
+                }
+                for child in &updated_children {
+                    self.write_node(child, txn_id, prev_lsn)?;
                 }
 
                 self.write_node(&new_left, txn_id, prev_lsn)?;
@@ -2458,19 +2462,23 @@ impl BPlusTree {
                 let mut updated_parent = parent;
                 updated_parent.keys[0] = new_sep;
 
+                let mut updated_children = Vec::new();
                 for &cid in &node.children {
                     let mut child = self.read_node(cid)?;
                     if child.parent_page_id != node.page_id {
                         child.parent_page_id = node.page_id;
-                        self.write_node(&child, txn_id, prev_lsn)?;
+                        updated_children.push(child);
                     }
                 }
                 for &cid in &new_right.children {
                     let mut child = self.read_node(cid)?;
                     if child.parent_page_id != new_right.page_id {
                         child.parent_page_id = new_right.page_id;
-                        self.write_node(&child, txn_id, prev_lsn)?;
+                        updated_children.push(child);
                     }
+                }
+                for child in &updated_children {
+                    self.write_node(child, txn_id, prev_lsn)?;
                 }
 
                 self.write_node(&node, txn_id, prev_lsn)?;
@@ -2490,12 +2498,13 @@ impl BPlusTree {
         if let Some(ref wal) = self.wal
             && txn_id != 0
         {
-            let cur_page = self.bpm.fetch_page(page_id)?;
-            let old_payload = cur_page.data[PAGE_HEADER_SIZE..PAGE_SIZE].to_vec();
+            let old_payload = self
+                .bpm
+                .with_page(page_id, |page| Ok(page.data[PAGE_HEADER_SIZE..PAGE_SIZE].to_vec()))?;
 
             let mut empty_payload = vec![0u8; PAGE_SIZE - PAGE_HEADER_SIZE];
             empty_payload[0] = NODE_KIND_FREE;
-            let append_res = wal.append_record(LogRecord::new_update(
+            let lsn = wal.append_record(LogRecord::new_update(
                 0,
                 txn_id,
                 *prev_lsn,
@@ -2503,22 +2512,10 @@ impl BPlusTree {
                 PAGE_HEADER_SIZE as u16,
                 empty_payload.clone(),
                 old_payload,
-            ));
+            ))?;
+            *prev_lsn = lsn;
 
-            let lsn = match append_res {
-                Ok(l) => {
-                    *prev_lsn = l;
-                    l
-                }
-                Err(e) => {
-                    let _ = self.bpm.unpin_page(page_id, false);
-                    return Err(e);
-                }
-            };
-
-            self.bpm.unpin_page(page_id, false)?;
-
-            self.bpm.update_page_data(page_id, |page| {
+            self.bpm.mutate_page(page_id, |page| {
                 page.set_page_type(PAGE_TYPE_RAW);
                 page.set_flags(PAGE_FLAG_FREE);
                 page.data[PAGE_HEADER_SIZE..PAGE_SIZE].copy_from_slice(&empty_payload);
