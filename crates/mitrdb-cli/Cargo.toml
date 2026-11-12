@@ -6,6 +6,7 @@ publish = false
 license = "Apache-2.0"
 
 [dependencies]
+mimalloc = { version = "0.1", default-features = false }
 mitrdb-common = { path = "../mitrdb-common" }
 mitrdb-server = { path = "../mitrdb-server" }
 zeroize = "1.9"

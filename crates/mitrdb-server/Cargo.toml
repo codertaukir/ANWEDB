@@ -26,3 +26,6 @@ fault-injection = ["mitrdb-storage/fault-injection"]
 [[test]]
 name = "alter_type_inject"
 required-features = ["fault-injection"]
+
+[dev-dependencies]
+mimalloc = { version = "0.1", default-features = false }

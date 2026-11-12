@@ -1,6 +1,10 @@
 //! Probe (variant b): write_mark next to real puts. T threads, each with its own explicit txn and
 //! unique keys, doing K puts. mode=mark calls write_mark before every put (as a statement would),
 //! mode=nomark does only puts. Compare total ops/s. Use a fresh directory.
+
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use std::hint::black_box;
 use std::path::Path;
 use std::sync::{Arc, Barrier};
