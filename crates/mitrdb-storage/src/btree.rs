@@ -3,7 +3,20 @@ thread_local! {
     static THREAD_LEAF_HINTS: std::cell::RefCell<std::collections::HashMap<u64, (PageId, PageId, Option<Vec<u8>>)>> = std::cell::RefCell::new(std::collections::HashMap::new());
 }
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::cell::RefCell;
 use std::sync::Arc;
+
+#[derive(Default)]
+struct LeafWalScratch {
+    b0: Vec<u8>,
+    b1: Vec<u8>,
+    b2: Vec<u8>,
+    b3: Vec<u8>,
+}
+
+thread_local! {
+    static LEAF_WAL_SCRATCH: RefCell<LeafWalScratch> = RefCell::new(LeafWalScratch::default());
+}
 
 use mitrdb_common::{
     Error, INVALID_LSN, INVALID_PAGE_ID, Lsn, PAGE_HEADER_SIZE, PAGE_SIZE, PageId, Result, TxnId,
@@ -763,13 +776,26 @@ impl BPlusTree {
                     }
                 } else {
                     // Log only the 2-byte key_cnt (16..18) and the newly shifted/inserted tail (ipos..new_payload_len)
-                    let undo_cnt = buf[16..18].to_vec();
-                    let redo_cnt = (new_key_cnt as u16).to_le_bytes().to_vec();
+                    let (mut undo_cnt, mut redo_cnt, mut undo_tail, mut redo_tail) = LEAF_WAL_SCRATCH.with(|s| {
+                        let mut s = s.borrow_mut();
+                        (
+                            std::mem::take(&mut s.b0),
+                            std::mem::take(&mut s.b1),
+                            std::mem::take(&mut s.b2),
+                            std::mem::take(&mut s.b3),
+                        )
+                    });
+                    undo_cnt.clear();
+                    undo_cnt.extend_from_slice(&buf[16..18]);
+                    redo_cnt.clear();
+                    redo_cnt.extend_from_slice(&(new_key_cnt as u16).to_le_bytes());
                     let tail_len = new_payload_len - ipos;
-                    let mut undo_tail = vec![0u8; tail_len];
+                    undo_tail.clear();
+                    undo_tail.resize(tail_len, 0);
                     let existing_tail = old_payload_len - ipos;
                     undo_tail[..existing_tail].copy_from_slice(&buf[ipos..old_payload_len]);
-                    let mut redo_tail = vec![0u8; tail_len];
+                    redo_tail.clear();
+                    redo_tail.resize(tail_len, 0);
                     redo_tail[..2].copy_from_slice(&(key.len() as u16).to_le_bytes());
                     redo_tail[2..4].copy_from_slice(&(value.len() as u16).to_le_bytes());
                     redo_tail[4..4 + key.len()].copy_from_slice(key);
@@ -796,7 +822,15 @@ impl BPlusTree {
                             undo_tail,
                         ),
                     ];
-                    match wal.append_records_batch(&mut recs) {
+                    let batch_res = wal.append_records_batch(&mut recs);
+                    LEAF_WAL_SCRATCH.with(|s| {
+                        let mut s = s.borrow_mut();
+                        s.b0 = std::mem::take(&mut recs[0].undo_data);
+                        s.b1 = std::mem::take(&mut recs[0].redo_data);
+                        s.b2 = std::mem::take(&mut recs[1].undo_data);
+                        s.b3 = std::mem::take(&mut recs[1].redo_data);
+                    });
+                    match batch_res {
                         Ok(lsn2) => {
                             *prev_lsn = lsn2;
                             new_lsn = Some(lsn2);
