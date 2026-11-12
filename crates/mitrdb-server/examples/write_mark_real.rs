@@ -56,6 +56,8 @@ fn main() -> Result<(), String> {
                 .collect();
             let val = [7u8; 16];
             barrier.wait();
+            let (c0, r0) = sched();
+            let t0 = Instant::now();
             for key in &keys {
                 if mark {
                     black_box(mgr.write_mark(tid).map_err(|e| format!("mark: {e:?}"))?);
@@ -63,6 +65,16 @@ fn main() -> Result<(), String> {
                 mgr.put(tid, &tree, key, &val)
                     .map_err(|e| format!("put: {e:?}"))?;
             }
+            let (c1, r1) = sched();
+            let wall_ns = t0.elapsed().as_nanos() as u64;
+            let cpu = c1.saturating_sub(c0);
+            let runq = r1.saturating_sub(r0);
+            let blocked = wall_ns.saturating_sub(cpu + runq);
+            let kk = k as u64;
+            eprintln!(
+                "THR{ti} per-op ns: wall={} cpu={} runq={} blocked={}",
+                wall_ns / kk, cpu / kk, runq / kk, blocked / kk
+            );
             Ok(())
         }));
     }
@@ -119,4 +131,11 @@ fn main() -> Result<(), String> {
     drop(tree);
     let _ = std::fs::remove_dir_all(dir);
     Ok(())
+}
+
+
+fn sched() -> (u64, u64) {
+    let s = std::fs::read_to_string("/proc/thread-self/schedstat").unwrap_or_default();
+    let mut it = s.split_whitespace().filter_map(|x| x.parse::<u64>().ok());
+    (it.next().unwrap_or(0), it.next().unwrap_or(0))
 }

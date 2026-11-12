@@ -985,13 +985,54 @@ pub struct TransactionContext {
     abort_lsn_logged: Option<Lsn>,
 }
 
+struct TxnTableView<'a> {
+    guards: Vec<parking_lot::MutexGuard<'a, HashMap<TxnId, TransactionContext>>>,
+}
+
+impl<'a> TxnTableView<'a> {
+    #[inline]
+    fn get(&self, txn_id: &TxnId) -> Option<&TransactionContext> {
+        self.guards[(*txn_id as usize) & (LOCK_SHARDS - 1)].get(txn_id)
+    }
+
+    #[inline]
+    fn get_mut(&mut self, txn_id: &TxnId) -> Option<&mut TransactionContext> {
+        self.guards[(*txn_id as usize) & (LOCK_SHARDS - 1)].get_mut(txn_id)
+    }
+
+    fn values(&self) -> impl Iterator<Item = &TransactionContext> {
+        self.guards.iter().flat_map(|g| g.values())
+    }
+
+    fn values_mut(&mut self) -> impl Iterator<Item = &mut TransactionContext> {
+        self.guards.iter_mut().flat_map(|g| g.values_mut())
+    }
+
+    fn len(&self) -> usize {
+        self.guards.iter().map(|g| g.len()).sum()
+    }
+
+    fn iter(&self) -> impl Iterator<Item = (&TxnId, &TransactionContext)> {
+        self.guards.iter().flat_map(|g| g.iter())
+    }
+
+    fn retain<F>(&mut self, mut f: F)
+    where
+        F: FnMut(&TxnId, &mut TransactionContext) -> bool,
+    {
+        for g in self.guards.iter_mut() {
+            g.retain(|k, v| f(k, v));
+        }
+    }
+}
+
 pub struct TxnManager {
     next_txn_id: AtomicU64,
     oracle_ts: AtomicU64,
     wal: Option<Arc<WalManager>>,
     bpm: Option<Arc<BufferPoolManager>>,
     lock_manager: Arc<LockManager>,
-    txns: Mutex<HashMap<TxnId, TransactionContext>>,
+    txn_shards: Box<[Mutex<HashMap<TxnId, TransactionContext>>; LOCK_SHARDS]>,
     poisoned_commits: std::sync::atomic::AtomicUsize,
     mvcc_shards: Box<[Mutex<MvccVersionStore>; LOCK_SHARDS]>,
     chain_epoch: AtomicU64,
@@ -1005,7 +1046,7 @@ impl TxnManager {
             wal: None,
             bpm: None,
             lock_manager: Arc::new(LockManager::new()),
-            txns: Mutex::new(HashMap::new()),
+            txn_shards: Box::new(std::array::from_fn(|_| Mutex::new(HashMap::new()))),
             poisoned_commits: std::sync::atomic::AtomicUsize::new(0),
             mvcc_shards: Box::new(std::array::from_fn(|_| Mutex::new(MvccVersionStore::default()))),
             chain_epoch: AtomicU64::new(0),
@@ -1032,7 +1073,7 @@ impl TxnManager {
             wal: Some(wal),
             bpm: Some(bpm),
             lock_manager: Arc::new(LockManager::new()),
-            txns: Mutex::new(HashMap::new()),
+            txn_shards: Box::new(std::array::from_fn(|_| Mutex::new(HashMap::new()))),
             poisoned_commits: std::sync::atomic::AtomicUsize::new(0),
             mvcc_shards: Box::new(std::array::from_fn(|_| Mutex::new(MvccVersionStore::default()))),
             chain_epoch: AtomicU64::new(0),
@@ -1041,6 +1082,19 @@ impl TxnManager {
 
     fn tree_scope_prefix(tree: &Arc<BPlusTree>) -> [u8; 8] {
         tree.tree_id().to_le_bytes()
+    }
+
+    #[inline]
+    fn txn_shard(&self, txn_id: TxnId) -> &Mutex<HashMap<TxnId, TransactionContext>> {
+        &self.txn_shards[(txn_id as usize) & (LOCK_SHARDS - 1)]
+    }
+
+    fn lock_all_txn_shards(&self) -> TxnTableView<'_> {
+        let mut guards = Vec::with_capacity(LOCK_SHARDS);
+        for s in self.txn_shards.iter() {
+            guards.push(s.lock());
+        }
+        TxnTableView { guards }
     }
 
     #[inline]
@@ -1068,7 +1122,7 @@ impl TxnManager {
         prefix: &[u8; 8],
         tid: u64,
         versions: &HashMap<Vec<u8>, Vec<VersionedValue>>,
-        txns: &HashMap<TxnId, TransactionContext>,
+        txns: &TxnTableView<'_>,
     ) -> bool {
         for ctx in txns.values() {
             if ctx.state != TxnState::Active
@@ -1126,7 +1180,7 @@ impl TxnManager {
             return true;
         }
         let shards = self.lock_all_mvcc_shards();
-        let txns = self.txns.lock();
+        let txns = self.lock_all_txn_shards();
         if self.lock_manager.has_active_prefix_locks(&prefix) {
             return true;
         }
@@ -1153,7 +1207,7 @@ impl TxnManager {
             }
         }
         let mut shards = self.lock_all_mvcc_shards();
-        let mut txns = self.txns.lock();
+        let mut txns = self.lock_all_txn_shards();
         for (prefix, tid) in &scoped {
             if self.lock_manager.has_active_prefix_locks(prefix)
                 || shards.iter().any(|v| Self::has_active_tree_references_locked(prefix, *tid, v, &txns))
@@ -1195,7 +1249,7 @@ impl TxnManager {
             INVALID_LSN
         };
 
-        let mut txns = self.txns.lock();
+        let mut txns = self.txn_shard(txn_id).lock();
         let read_ts = self.oracle_ts.load(Ordering::SeqCst);
         let ctx = TransactionContext {
             txn_id,
@@ -1219,36 +1273,36 @@ impl TxnManager {
     }
 
     pub fn isolation_level(&self, txn_id: TxnId) -> Option<IsolationLevel> {
-        self.txns.lock().get(&txn_id).map(|t| t.isolation)
+        self.txn_shard(txn_id).lock().get(&txn_id).map(|t| t.isolation)
     }
 
     pub fn txn_state(&self, txn_id: TxnId) -> Option<TxnState> {
-        self.txns.lock().get(&txn_id).map(|t| t.state)
+        self.txn_shard(txn_id).lock().get(&txn_id).map(|t| t.state)
     }
 
     pub fn is_in_rollback(&self, txn_id: TxnId) -> bool {
-        self.txns
+        self.txn_shard(txn_id)
             .lock()
             .get(&txn_id)
             .is_some_and(|t| t.in_rollback)
     }
 
     pub fn is_rollback_poisoned(&self, txn_id: TxnId) -> bool {
-        self.txns
+        self.txn_shard(txn_id)
             .lock()
             .get(&txn_id)
             .is_some_and(|t| t.rollback_poisoned)
     }
 
     pub fn is_commit_poisoned(&self, txn_id: TxnId) -> bool {
-        self.txns
+        self.txn_shard(txn_id)
             .lock()
             .get(&txn_id)
             .is_some_and(|t| t.commit_poisoned)
     }
 
     pub fn oldest_active_snapshot_ts(&self) -> u64 {
-        let txns = self.txns.lock();
+        let txns = self.lock_all_txn_shards();
         let current_oracle_ts = self.oracle_ts.load(Ordering::SeqCst);
         txns.values()
             .filter(|ctx| {
@@ -1262,12 +1316,11 @@ impl TxnManager {
     }
 
     pub fn tracked_txn_count(&self) -> usize {
-        self.txns.lock().len()
+        self.lock_all_txn_shards().len()
     }
 
     pub fn active_txn_count(&self) -> usize {
-        self.txns
-            .lock()
+        self.lock_all_txn_shards()
             .values()
             .filter(|ctx| ctx.state == TxnState::Active)
             .count()
@@ -1286,7 +1339,7 @@ impl TxnManager {
 
     pub fn vacuum(&self) -> VacuumReport {
         let mut shards = self.lock_all_mvcc_shards();
-        let mut txns = self.txns.lock();
+        let mut txns = self.lock_all_txn_shards();
 
         let current_oracle_ts = self.oracle_ts.load(Ordering::SeqCst);
         let horizon_ts = txns
@@ -1463,7 +1516,7 @@ impl TxnManager {
         )?;
 
         let res = (|| -> Result<Lsn> {
-            let mut txns = self.txns.lock();
+            let mut txns = self.txn_shard(txn_id).lock();
             let ctx = txns.get_mut(&txn_id).ok_or_else(|| {
                 Error::TransactionError(format!("Unknown transaction ID {}", txn_id))
             })?;
@@ -1524,7 +1577,7 @@ impl TxnManager {
     }
 
     fn ensure_active_txn_info(&self, txn_id: TxnId) -> Result<(IsolationLevel, u64)> {
-        let txns = self.txns.lock();
+        let txns = self.txn_shard(txn_id).lock();
         let ctx = txns
             .get(&txn_id)
             .ok_or_else(|| Error::TransactionError(format!("Unknown transaction ID {}", txn_id)))?;
@@ -1562,7 +1615,7 @@ impl TxnManager {
         }
 
         let versions = self.mvcc_shard(skey).lock();
-        let txns = self.txns.lock();
+        let txns = self.lock_all_txn_shards();
 
         if let Some(chain) = versions.get(skey)
             && !chain.is_empty()
@@ -1599,7 +1652,7 @@ impl TxnManager {
         let val_res = self.read_key_visible_value(txn_id, isolation, read_ts, tree, key, &skey);
         match val_res {
             Ok(val) => {
-                let mut txns = self.txns.lock();
+                let mut txns = self.txn_shard(txn_id).lock();
                 if let Some(ctx) = txns.get_mut(&txn_id) {
                     ctx.read_keys.insert(skey);
                 }
@@ -1782,7 +1835,7 @@ impl TxnManager {
                 let mvcc_chunk_started = std::time::Instant::now();
                 {
                     let shards = self.lock_all_mvcc_shards();
-                    let txns = self.txns.lock();
+                    let txns = self.lock_all_txn_shards();
                     let chain_epoch_changed =
                         self.chain_epoch.load(Ordering::SeqCst) != chain_epoch0;
                     for key in key_batch {
@@ -1826,7 +1879,7 @@ impl TxnManager {
             }
 
             {
-                let mut txns = self.txns.lock();
+                let mut txns = self.txn_shard(txn_id).lock();
                 if let Some(ctx) = txns.get_mut(&txn_id) {
                     if isolation == IsolationLevel::Serializable {
                         ctx.read_ranges.push((prefix, range.clone()));
@@ -1908,7 +1961,7 @@ impl TxnManager {
                 Vec::with_capacity(key_batch.len());
             {
                 let shards = self.lock_all_mvcc_shards();
-                let txns = self.txns.lock();
+                let txns = self.lock_all_txn_shards();
                 let chain_epoch_changed = self.chain_epoch.load(Ordering::SeqCst) != chain_epoch0;
                 for key in key_batch {
                     let skey = Self::scoped_key(tree, key.as_slice());
@@ -1954,7 +2007,7 @@ impl TxnManager {
         isolation: IsolationLevel,
         read_ts: u64,
         ver: &VersionedValue,
-        txns: &HashMap<TxnId, TransactionContext>,
+        txns: &TxnTableView<'_>,
     ) -> bool {
         let created_visible = if ver.xmin == reader_txn || ver.xmin == 0 {
             true
@@ -1999,7 +2052,7 @@ impl TxnManager {
         chain: &[VersionedValue],
         txn_id: TxnId,
         read_ts: u64,
-        txns: &HashMap<TxnId, TransactionContext>,
+        txns: &TxnTableView<'_>,
     ) -> bool {
         for ver in chain {
             if ver.xmin != 0
@@ -2073,7 +2126,7 @@ impl TxnManager {
             };
 
         {
-            let mut txns = self.txns.lock();
+            let mut txns = self.txn_shard(txn_id).lock();
             if let Some(ctx) = txns.get_mut(&txn_id) {
                 ctx.read_keys.insert(skey);
             }
@@ -2118,7 +2171,7 @@ impl TxnManager {
                     }
                 };
             {
-                let mut txns = self.txns.lock();
+                let mut txns = self.txn_shard(txn_id).lock();
                 if let Some(ctx) = txns.get_mut(&txn_id) {
                     ctx.read_keys.insert(skey.clone());
                 }
@@ -2138,7 +2191,7 @@ impl TxnManager {
 
         // 3. Physical batch delete on BPlusTree
         let mut last_lsn = {
-            let txns = self.txns.lock();
+            let txns = self.lock_all_txn_shards();
             txns.get(&txn_id).map(|ctx| ctx.last_lsn).unwrap_or(0)
         };
 
@@ -2153,7 +2206,7 @@ impl TxnManager {
         // 4. Update MVCC version chains & transaction write-set
         {
             let mut shards = self.lock_all_mvcc_shards();
-            let mut txns = self.txns.lock();
+            let mut txns = self.lock_all_txn_shards();
             let ctx = txns.get_mut(&txn_id).ok_or_else(|| {
                 Error::TransactionError(format!("Transaction {} context missing", txn_id))
             })?;
@@ -2207,7 +2260,6 @@ impl TxnManager {
         new_value: Option<&[u8]>,
     ) -> Result<()> {
         let profiling = mitrdb_observe::profiling_enabled();
-        let _ = self.ensure_active_txn_info(txn_id)?;
         let skey = Self::scoped_key(tree, key);
 
         let lock_started = profiling.then(std::time::Instant::now);
@@ -2231,43 +2283,46 @@ impl TxnManager {
                 );
             }
             let mut last_lsn = {
+                let (isolation, read_ts, lsn) = {
+                    let txn_lock_started = profiling.then(std::time::Instant::now);
+                    let txns = self.txn_shard(txn_id).lock();
+                    if let Some(started) = txn_lock_started {
+                        mitrdb_observe::record_profile_duration(
+                            mitrdb_observe::ProfilePhase::TxnMutexWait,
+                            started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
+                        );
+                    }
+                    let ctx = txns.get(&txn_id).ok_or_else(|| {
+                        Error::TransactionError(format!("Unknown transaction ID {}", txn_id))
+                    })?;
+                    if ctx.state != TxnState::Active {
+                        return Err(Error::TransactionError(format!(
+                            "Transaction {} is not active",
+                            txn_id
+                        )));
+                    }
+                    (ctx.isolation, ctx.read_ts, ctx.last_lsn)
+                };
 
-                let txn_lock_started = profiling.then(std::time::Instant::now);
-                let txns = self.txns.lock();
-                if let Some(started) = txn_lock_started {
-                    mitrdb_observe::record_profile_duration(
-                        mitrdb_observe::ProfilePhase::TxnMutexWait,
-                        started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
-                    );
-                }
-
-                let ctx = txns.get(&txn_id).ok_or_else(|| {
-                    Error::TransactionError(format!("Unknown transaction ID {}", txn_id))
-                })?;
-                if ctx.state != TxnState::Active {
-                    return Err(Error::TransactionError(format!(
-                        "Transaction {} is not active",
-                        txn_id
-                    )));
-                }
-                let (isolation, read_ts, lsn) = (ctx.isolation, ctx.read_ts, ctx.last_lsn);
-
-                if let Some(chain) = versions.get(&skey)
-                    && let Some(latest) = chain.last()
-                    && latest.xmin != txn_id
-                    && let Some(writer) = txns.get(&latest.xmin)
+                let latest_xmin = versions
+                    .get(&skey)
+                    .and_then(|chain| chain.last())
+                    .map(|latest| latest.xmin)
+                    .filter(|&xmin| xmin != txn_id);
+                if let Some(xmin) = latest_xmin
+                    && let Some(writer) = self.txn_shard(xmin).lock().get(&xmin)
                 {
                     match writer.state {
                         TxnState::Active | TxnState::Committing => {
                             return Err(Error::WriteConflict(format!(
                                 "Key modified by active/committing transaction {}",
-                                latest.xmin
+                                xmin
                             )));
                         }
                         TxnState::Aborted if writer.in_rollback => {
                             return Err(Error::WriteConflict(format!(
                                 "Key modified by rolling-back transaction {}",
-                                latest.xmin
+                                xmin
                             )));
                         }
                         TxnState::Committed { commit_ts }
@@ -2275,7 +2330,7 @@ impl TxnManager {
                         {
                             return Err(Error::WriteConflict(format!(
                                 "First-committer-wins conflict with transaction {}",
-                                latest.xmin
+                                xmin
                             )));
                         }
                         _ => {}
@@ -2348,7 +2403,7 @@ impl TxnManager {
             }
 
             {
-                let mut txns = self.txns.lock();
+                let mut txns = self.txn_shard(txn_id).lock();
                 let ctx = txns.get_mut(&txn_id).unwrap();
                 ctx.last_lsn = last_lsn;
                 ctx.write_set.push(UndoAction::BTreeKey {
@@ -2372,7 +2427,7 @@ impl TxnManager {
         let commit_started = profiling.then(std::time::Instant::now);
         let shards = self.lock_all_mvcc_shards();
         let txn_lock_started = std::time::Instant::now();
-        let mut txns = self.txns.lock();
+        let mut txns = self.lock_all_txn_shards();
         GLOBAL_METRICS.record_txn_mutex_wait_ns(
             txn_lock_started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
         );
@@ -2444,7 +2499,7 @@ impl TxnManager {
                 Ok(lsn) => lsn,
                 Err(err) => {
                     #[allow(clippy::collapsible_if)]
-                    if let Some(ctx) = self.txns.lock().get_mut(&txn_id) {
+                    if let Some(ctx) = self.txn_shard(txn_id).lock().get_mut(&txn_id) {
                         if ctx.state == TxnState::Committing && !ctx.commit_poisoned {
                             ctx.state = TxnState::Active;
                         }
@@ -2471,7 +2526,7 @@ impl TxnManager {
             }
             if let Err(err) = flush_res {
                 if wal.flushed_lsn() < lsn {
-                    if let Some(ctx) = self.txns.lock().get_mut(&txn_id) {
+                    if let Some(ctx) = self.txn_shard(txn_id).lock().get_mut(&txn_id) {
                         ctx.commit_poisoned = true;
                         ctx.poisoned_commit_lsn = Some(lsn);
                         self.poisoned_commits.fetch_add(1, Ordering::SeqCst);
@@ -2496,7 +2551,7 @@ impl TxnManager {
     #[allow(clippy::collapsible_if)]
     pub fn resolve_poisoned_commit(&self, txn_id: TxnId) -> Result<u64> {
         let lsn = {
-            let txns = self.txns.lock();
+            let txns = self.txn_shard(txn_id).lock();
             let ctx = txns.get(&txn_id).ok_or_else(|| {
                 Error::TransactionError(format!("Unknown transaction ID {}", txn_id))
             })?;
@@ -2553,7 +2608,7 @@ impl TxnManager {
             return 0;
         }
         let ids: Vec<TxnId> = {
-            let txns = self.txns.lock();
+            let txns = self.lock_all_txn_shards();
             txns.iter()
                 .filter(|(_, c)| c.state == TxnState::Committing && c.commit_poisoned)
                 .map(|(id, _)| *id)
@@ -2575,7 +2630,7 @@ impl TxnManager {
         commit_started: Option<std::time::Instant>,
     ) -> Result<u64> {
         let txn_lock_started = std::time::Instant::now();
-        let mut txns = self.txns.lock();
+        let mut txns = self.txn_shard(txn_id).lock();
         GLOBAL_METRICS.record_txn_mutex_wait_ns(
             txn_lock_started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
         );
@@ -2622,7 +2677,7 @@ impl TxnManager {
 
     /// Number of undo entries so far; used as a statement-rollback mark.
     pub fn write_mark(&self, txn_id: TxnId) -> Result<usize> {
-        let txns = self.txns.lock();
+        let txns = self.lock_all_txn_shards();
         let ctx = txns
             .get(&txn_id)
             .ok_or_else(|| Error::TransactionError(format!("Unknown transaction ID {}", txn_id)))?;
@@ -2633,7 +2688,7 @@ impl TxnManager {
     /// Caller must abort the whole txn if this returns Err.
     pub fn rollback_to_mark(&self, txn_id: TxnId, mark: usize) -> Result<()> {
         let (mut last_lsn, earlier) = {
-            let txns = self.txns.lock();
+            let txns = self.lock_all_txn_shards();
             let ctx = txns.get(&txn_id).ok_or_else(|| {
                 Error::TransactionError(format!("Unknown transaction ID {}", txn_id))
             })?;
@@ -2658,7 +2713,7 @@ impl TxnManager {
         let mut undone = false;
         loop {
             let next_action = {
-                let txns = self.txns.lock();
+                let txns = self.lock_all_txn_shards();
                 txns.get(&txn_id).and_then(|ctx| {
                     if ctx.write_set.len() > mark {
                         ctx.write_set.last().cloned()
@@ -2689,7 +2744,7 @@ impl TxnManager {
                         None => tree.delete_logged(txn_id, &mut last_lsn, &key).map(|_| ()),
                     };
                     if let Err(e) = undo_res {
-                        let mut txns = self.txns.lock();
+                        let mut txns = self.txn_shard(txn_id).lock();
                         if let Some(ctx) = txns.get_mut(&txn_id) {
                             ctx.last_lsn = last_lsn;
                             if last_lsn != lsn_before || self.wal.is_none() {
@@ -2722,7 +2777,7 @@ impl TxnManager {
                 }
             }
             {
-                let mut txns = self.txns.lock();
+                let mut txns = self.lock_all_txn_shards();
                 if let Some(ctx) = txns.get_mut(&txn_id) {
                     ctx.last_lsn = last_lsn;
                     ctx.write_set.pop();
@@ -2743,7 +2798,7 @@ impl TxnManager {
 
     pub fn abort(&self, txn_id: TxnId) -> Result<()> {
         let mut last_lsn = {
-            let mut txns = self.txns.lock();
+            let mut txns = self.txn_shard(txn_id).lock();
             let ctx = txns.get_mut(&txn_id).ok_or_else(|| {
                 Error::TransactionError(format!("Unknown transaction ID {}", txn_id))
             })?;
@@ -2771,7 +2826,7 @@ impl TxnManager {
 
         loop {
             let next_action = {
-                let txns = self.txns.lock();
+                let txns = self.txn_shard(txn_id).lock();
                 txns.get(&txn_id)
                     .and_then(|ctx| ctx.write_set.last().cloned())
             };
@@ -2832,7 +2887,7 @@ impl TxnManager {
                         let _ = bpm.unpin_page(page_id, update_res.is_ok());
                         drop(_op_guard);
                         if let Err(e) = update_res {
-                            let mut txns = self.txns.lock();
+                            let mut txns = self.txn_shard(txn_id).lock();
                             if let Some(ctx) = txns.get_mut(&txn_id) {
                                 ctx.last_lsn = last_lsn;
                                 if clr_lsn != INVALID_LSN {
@@ -2858,7 +2913,7 @@ impl TxnManager {
                         None => tree.delete_logged(txn_id, &mut last_lsn, &key).map(|_| ()),
                     };
                     if let Err(e) = undo_res {
-                        let mut txns = self.txns.lock();
+                        let mut txns = self.txn_shard(txn_id).lock();
                         if let Some(ctx) = txns.get_mut(&txn_id) {
                             ctx.last_lsn = last_lsn;
                             if last_lsn != lsn_before || self.wal.is_none() {
@@ -2871,7 +2926,7 @@ impl TxnManager {
             }
 
             {
-                let mut txns = self.txns.lock();
+                let mut txns = self.txn_shard(txn_id).lock();
                 if let Some(ctx) = txns.get_mut(&txn_id) {
                     ctx.last_lsn = last_lsn;
                     ctx.write_set.pop();
@@ -2881,14 +2936,14 @@ impl TxnManager {
 
         if let Some(ref wal) = self.wal {
             let already_logged = {
-                let txns = self.txns.lock();
+                let txns = self.txn_shard(txn_id).lock();
                 txns.get(&txn_id).and_then(|ctx| ctx.abort_lsn_logged)
             };
             let abort_lsn = match already_logged {
                 Some(lsn) => lsn,
                 None => {
                     let lsn = wal.append_record(LogRecord::new_abort(0, txn_id, last_lsn))?;
-                    let mut txns = self.txns.lock();
+                    let mut txns = self.lock_all_txn_shards();
                     if let Some(ctx) = txns.get_mut(&txn_id) {
                         ctx.last_lsn = lsn;
                         ctx.abort_lsn_logged = Some(lsn);
@@ -2901,7 +2956,7 @@ impl TxnManager {
 
         {
             let mut shards = self.lock_all_mvcc_shards();
-            let mut txns = self.txns.lock();
+            let mut txns = self.lock_all_txn_shards();
             for versions in shards.iter_mut() {
                 for chain in versions.values_mut() {
                     chain.retain(|v| v.xmin != txn_id);

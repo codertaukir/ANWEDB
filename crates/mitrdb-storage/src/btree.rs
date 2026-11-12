@@ -3,7 +3,7 @@ thread_local! {
     static THREAD_LEAF_HINTS: std::cell::RefCell<std::collections::HashMap<u64, (PageId, PageId, Option<Vec<u8>>)>> = std::cell::RefCell::new(std::collections::HashMap::new());
 }
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 use mitrdb_common::{
     Error, INVALID_LSN, INVALID_PAGE_ID, Lsn, PAGE_HEADER_SIZE, PAGE_SIZE, PageId, Result, TxnId,
@@ -447,10 +447,11 @@ pub struct BPlusTree {
     tree_id: u64,
     bpm: Arc<BufferPoolManager>,
     wal: Option<Arc<WalManager>>,
-    root_page_id: RwLock<PageId>,
+    root_page_id: parking_lot::RwLock<PageId>,
+    split_mutex: parking_lot::Mutex<()>,
     max_keys: u16,
     last_leaf_hint: AtomicU32,
-    leaf_latches: Box<[std::sync::Mutex<()>; 64]>,
+    leaf_latches: Box<[parking_lot::Mutex<()>; 64]>,
 }
 
 impl BPlusTree {
@@ -481,10 +482,11 @@ impl BPlusTree {
             tree_id: NEXT_TREE_ID.fetch_add(1, Ordering::SeqCst),
             bpm: Arc::clone(&bpm),
             wal,
-            root_page_id: RwLock::new(root_id),
+            root_page_id: parking_lot::RwLock::new(root_id),
+            split_mutex: parking_lot::Mutex::new(()),
             max_keys,
             last_leaf_hint: AtomicU32::new(INVALID_PAGE_ID),
-            leaf_latches: Box::new(std::array::from_fn(|_| std::sync::Mutex::new(()))),
+            leaf_latches: Box::new(std::array::from_fn(|_| parking_lot::Mutex::new(()))),
         };
         let root_node = BTreeNode::new_leaf(root_id, max_keys);
         tree.write_node(&root_node, txn_id, prev_lsn)?;
@@ -509,10 +511,11 @@ impl BPlusTree {
             tree_id: NEXT_TREE_ID.fetch_add(1, Ordering::SeqCst),
             bpm,
             wal,
-            root_page_id: RwLock::new(root_page_id),
+            root_page_id: parking_lot::RwLock::new(root_page_id),
+            split_mutex: parking_lot::Mutex::new(()),
             max_keys,
             last_leaf_hint: AtomicU32::new(INVALID_PAGE_ID),
-            leaf_latches: Box::new(std::array::from_fn(|_| std::sync::Mutex::new(()))),
+            leaf_latches: Box::new(std::array::from_fn(|_| parking_lot::Mutex::new(()))),
         })
     }
 
@@ -521,11 +524,11 @@ impl BPlusTree {
     }
 
     pub fn root_page_id(&self) -> PageId {
-        *self.root_page_id.read().unwrap()
+        *self.root_page_id.read()
     }
 
     pub fn set_root_page_id(&self, root_page_id: PageId) {
-        *self.root_page_id.write().unwrap() = root_page_id;
+        *self.root_page_id.write() = root_page_id;
         // Root changed from outside: any cached leaf may no longer belong here.
         THREAD_LEAF_HINTS.with(|hints| {
             hints.borrow_mut().remove(&self.tree_id);
@@ -1148,11 +1151,8 @@ impl BPlusTree {
     fn find_leaf_page_id(&self, root_id: PageId, key: &[u8]) -> Result<PageId> {
         let mut curr_id = root_id;
         loop {
-            let page = self.bpm.fetch_page(curr_id)?;
-            let route_res = Self::route_internal_page(&page, key);
-            self.bpm.unpin_page(curr_id, false)?;
-
-            match route_res? {
+            let route_res = self.bpm.with_page(curr_id, |page| Self::route_internal_page(page, key))?;
+            match route_res {
                 Some(child_id) => {
                     curr_id = child_id;
                 }
@@ -1164,21 +1164,8 @@ impl BPlusTree {
     }
 
     fn find_leaf_page(&self, root_id: PageId, key: &[u8]) -> Result<BTreeNode> {
-        let mut curr_id = root_id;
-        loop {
-            let page = self.bpm.fetch_page(curr_id)?;
-            let route_res = Self::route_internal_page(&page, key);
-            self.bpm.unpin_page(curr_id, false)?;
-
-            match route_res? {
-                Some(child_id) => {
-                    curr_id = child_id;
-                }
-                None => {
-                    return self.read_node(curr_id);
-                }
-            }
-        }
+        let leaf_id = self.find_leaf_page_id(root_id, key)?;
+        self.read_node(leaf_id)
     }
 
     fn find_leftmost_leaf(&self, root_id: PageId) -> Result<BTreeNode> {
@@ -1205,7 +1192,7 @@ impl BPlusTree {
     /// The root read guard is held until the leaf has been searched so the leaf
     /// cannot be merged/freed by a writer in between.
     pub fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
-        let root_guard = self.root_page_id.read().unwrap();
+        let root_guard = self.root_page_id.read();
         let leaf_pid = self.find_leaf_page_id(*root_guard, key)?;
         let page = self.bpm.fetch_page(leaf_pid)?;
         let res = Self::search_leaf_page(&page, key);
@@ -1234,7 +1221,7 @@ impl BPlusTree {
             return Ok(Vec::new());
         }
         let root_wait_started = std::time::Instant::now();
-        let root_guard = self.root_page_id.read().unwrap();
+        let root_guard = self.root_page_id.read();
         GLOBAL_METRICS.record_btree_root_wait_ns(
             root_wait_started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
         );
@@ -1275,7 +1262,7 @@ impl BPlusTree {
             return Ok(Vec::new());
         }
         let root_wait_started = std::time::Instant::now();
-        let root_guard = self.root_page_id.read().unwrap();
+        let root_guard = self.root_page_id.read();
         GLOBAL_METRICS.record_btree_root_wait_ns(
             root_wait_started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
         );
@@ -1331,7 +1318,7 @@ impl BPlusTree {
 
         // FAST PATH: Zero-Allocation In-Place Leaf Mutation with Latched Range Hints
         {
-            let root_guard = self.root_page_id.read().unwrap();
+            let root_guard = self.root_page_id.read();
             let root_id = *root_guard;
             let hint = THREAD_LEAF_HINTS.with(|hints| {
                 hints.borrow().get(&self.tree_id).cloned()
@@ -1341,7 +1328,7 @@ impl BPlusTree {
             if let Some((hint_pid, exp_next, ref high_key)) = hint {
                 if high_key.is_none() || key < high_key.as_ref().unwrap().as_slice() {
                     tried_hint = true;
-                    let _leaf_latch = self.leaf_latches[(hint_pid as usize) & 63].lock().unwrap();
+                    let _leaf_latch = self.leaf_latches[(hint_pid as usize) & 63].lock();
                     if let Some((old_value, _next_pid)) = self.try_mutate_leaf_in_place(
                         hint_pid,
                         Some((exp_next, high_key)),
@@ -1357,7 +1344,7 @@ impl BPlusTree {
 
             if !tried_hint || hint.is_some() {
                 let real_pid = self.find_leaf_page_id(root_id, key)?;
-                let _leaf_latch = self.leaf_latches[(real_pid as usize) & 63].lock().unwrap();
+                let _leaf_latch = self.leaf_latches[(real_pid as usize) & 63].lock();
                 if let Some((old_value, next_pid)) = self.try_mutate_leaf_in_place(
                     real_pid,
                     None,
@@ -1381,10 +1368,63 @@ impl BPlusTree {
             }
         }
 
-        // SLOW PATH: Structural Modification (Split requires exclusive root write lock)
-        let mut root_guard = self.root_page_id.write().unwrap();
+        // SLOW PATH A: Non-root leaf split under root read lock + split_mutex
+        // (avoids blocking fast-path readers/writers when root_page_id does not change).
+        {
+            let _split_guard = self.split_mutex.lock();
+            let root_read = self.root_page_id.read();
+            let mut root_copy = *root_read;
+            let mut leaf = self.find_leaf_page(root_copy, key)?;
+            let _leaf_latch = self.leaf_latches[(leaf.page_id as usize) & 63].lock();
+            let old_value = match leaf.keys.binary_search_by(|k| k.as_slice().cmp(key)) {
+                Ok(idx) => Some(std::mem::replace(&mut leaf.values[idx], value.to_vec())),
+                Err(idx) => {
+                    leaf.keys.insert(idx, key.to_vec());
+                    leaf.values.insert(idx, value.to_vec());
+                    None
+                }
+            };
+
+            if leaf.keys.len() <= (self.max_keys as usize) && leaf.fits_in_page() {
+                let pid = leaf.page_id;
+                let next_pid = leaf.next_leaf_page_id;
+                self.write_node(&leaf, txn_id, prev_lsn)?;
+                let high_key = if next_pid == INVALID_PAGE_ID {
+                    None
+                } else {
+                    self.read_node(next_pid).ok().and_then(|n| n.keys.first().cloned())
+                };
+                if next_pid == INVALID_PAGE_ID || high_key.is_some() {
+                    THREAD_LEAF_HINTS.with(|hints| {
+                        hints.borrow_mut().insert(self.tree_id, (pid, next_pid, high_key));
+                    });
+                }
+                return Ok(old_value);
+            }
+
+            let plan = self.plan_split(&leaf)?;
+            if plan.pages_needed == 1 {
+                let mut pages = self.alloc_split_pages(1)?;
+                let res = self.split_leaf(
+                    &mut root_copy,
+                    leaf,
+                    plan.mid,
+                    plan.old_next,
+                    &mut pages,
+                    txn_id,
+                    prev_lsn,
+                );
+                debug_assert_eq!(root_copy, *root_read);
+                self.release_split_pages(&mut pages);
+                res?;
+                return Ok(old_value);
+            }
+        }
+
+        // SLOW PATH B: Ancestor/root split (pages_needed > 1) requires exclusive root write lock
+        let mut root_guard = self.root_page_id.write();
         let mut leaf = self.find_leaf_page(*root_guard, key)?;
-        let _leaf_latch = self.leaf_latches[(leaf.page_id as usize) & 63].lock().unwrap();
+        let _leaf_latch = self.leaf_latches[(leaf.page_id as usize) & 63].lock();
         let old_value = match leaf.keys.binary_search_by(|k| k.as_slice().cmp(key)) {
             Ok(idx) => Some(std::mem::replace(&mut leaf.values[idx], value.to_vec())),
             Err(idx) => {
@@ -1822,7 +1862,7 @@ impl BPlusTree {
 
     pub fn delete_logged(&self, txn_id: TxnId, prev_lsn: &mut Lsn, key: &[u8]) -> Result<bool> {
         let _op_guard = self.bpm.acquire_op_shared();
-        let mut root_guard = self.root_page_id.write().unwrap();
+        let mut root_guard = self.root_page_id.write();
         THREAD_LEAF_HINTS.with(|hints| {
             hints.borrow_mut().remove(&self.tree_id);
         });
@@ -1850,7 +1890,7 @@ impl BPlusTree {
             return Ok(0);
         }
         let _op_guard = self.bpm.acquire_op_shared();
-        let mut root_guard = self.root_page_id.write().unwrap();
+        let mut root_guard = self.root_page_id.write();
         THREAD_LEAF_HINTS.with(|hints| {
             hints.borrow_mut().remove(&self.tree_id);
         });
