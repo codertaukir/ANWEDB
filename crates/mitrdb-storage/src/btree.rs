@@ -1,6 +1,6 @@
 
 thread_local! {
-    static THREAD_LEAF_HINTS: std::cell::RefCell<std::collections::HashMap<u64, (PageId, PageId, Option<Vec<u8>>)>> = std::cell::RefCell::new(std::collections::HashMap::new());
+    static THREAD_LEAF_HINTS: std::cell::RefCell<std::collections::HashMap<u64, (u64, PageId, PageId, Option<Vec<u8>>)>> = std::cell::RefCell::new(std::collections::HashMap::new());
 }
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::cell::RefCell;
@@ -464,6 +464,7 @@ pub struct BPlusTree {
     split_mutex: parking_lot::Mutex<()>,
     max_keys: u16,
     last_leaf_hint: AtomicU32,
+    hint_epoch: std::sync::atomic::AtomicU64,
     leaf_latches: Box<[parking_lot::Mutex<()>; 64]>,
 }
 
@@ -499,6 +500,7 @@ impl BPlusTree {
             split_mutex: parking_lot::Mutex::new(()),
             max_keys,
             last_leaf_hint: AtomicU32::new(INVALID_PAGE_ID),
+            hint_epoch: std::sync::atomic::AtomicU64::new(0),
             leaf_latches: Box::new(std::array::from_fn(|_| parking_lot::Mutex::new(()))),
         };
         let root_node = BTreeNode::new_leaf(root_id, max_keys);
@@ -528,6 +530,7 @@ impl BPlusTree {
             split_mutex: parking_lot::Mutex::new(()),
             max_keys,
             last_leaf_hint: AtomicU32::new(INVALID_PAGE_ID),
+            hint_epoch: std::sync::atomic::AtomicU64::new(0),
             leaf_latches: Box::new(std::array::from_fn(|_| parking_lot::Mutex::new(()))),
         })
     }
@@ -586,7 +589,7 @@ impl BPlusTree {
     fn try_mutate_leaf_in_place(
         &self,
         pid: PageId,
-        hint_check: Option<(PageId, &Option<Vec<u8>>)>,
+        hint_check: Option<(u64, PageId, &Option<Vec<u8>>)>,
         txn_id: TxnId,
         prev_lsn: &mut Lsn,
         key: &[u8],
@@ -608,7 +611,10 @@ impl BPlusTree {
             let next_pid = u32::from_le_bytes([buf[12], buf[13], buf[14], buf[15]]);
             let key_cnt = u16::from_le_bytes([buf[16], buf[17]]) as usize;
 
-            if let Some((exp_next, high_key)) = hint_check {
+            if let Some((exp_epoch, exp_next, high_key)) = hint_check {
+                if self.hint_epoch.load(std::sync::atomic::Ordering::Acquire) != exp_epoch {
+                    return Ok(());
+                }
                 if next_pid != exp_next {
                     return Ok(());
                 }
@@ -617,11 +623,12 @@ impl BPlusTree {
                         return Ok(());
                     }
                 }
-                if key_cnt > 0 {
-                    let first_klen = u16::from_le_bytes([buf[18], buf[19]]) as usize;
-                    if 22 + first_klen > buf.len() || key < &buf[22..22 + first_klen] {
-                        return Ok(());
-                    }
+                if key_cnt == 0 {
+                    return Ok(());
+                }
+                let first_klen = u16::from_le_bytes([buf[18], buf[19]]) as usize;
+                if 22 + first_klen > buf.len() || key < &buf[22..22 + first_klen] {
+                    return Ok(());
                 }
             }
 
@@ -1370,8 +1377,13 @@ impl BPlusTree {
         {
             let root_guard = self.root_page_id.read();
             let root_id = *root_guard;
+            let cur_epoch = self.hint_epoch.load(std::sync::atomic::Ordering::Acquire);
             let hint = THREAD_LEAF_HINTS.with(|hints| {
-                hints.borrow().get(&self.tree_id).cloned()
+                hints
+                    .borrow()
+                    .get(&self.tree_id)
+                    .filter(|(ep, _, _, _)| *ep == cur_epoch)
+                    .map(|(_, pid, next, hk)| (*pid, *next, hk.clone()))
             });
 
             let mut known_full = false;
@@ -1380,7 +1392,7 @@ impl BPlusTree {
                     let _leaf_latch = self.leaf_latches[(hint_pid as usize) & 63].lock();
                     let (mutated, full) = self.try_mutate_leaf_in_place(
                         hint_pid,
-                        Some((exp_next, high_key)),
+                        Some((cur_epoch, exp_next, high_key)),
                         txn_id,
                         prev_lsn,
                         key,
@@ -1412,7 +1424,7 @@ impl BPlusTree {
                     };
                     if next_pid == INVALID_PAGE_ID || high_key.is_some() {
                         THREAD_LEAF_HINTS.with(|hints| {
-                            hints.borrow_mut().insert(self.tree_id, (real_pid, next_pid, high_key));
+                            hints.borrow_mut().insert(self.tree_id, (cur_epoch, real_pid, next_pid, high_key));
                         });
                     }
                     return Ok(old_value);
@@ -1420,11 +1432,11 @@ impl BPlusTree {
             }
         }
 
-        // SLOW PATH A: Non-root leaf split under root read lock + split_mutex
-        // (avoids blocking fast-path readers/writers when root_page_id does not change).
+        // SLOW PATH A: Non-root leaf split under exclusive root write lock so no concurrent
+        // fast-path traversal or leaf mutation can observe a half-split parent/leaf.
         {
             let _split_guard = self.split_mutex.lock();
-            let root_read = self.root_page_id.read();
+            let root_read = self.root_page_id.write();
             let mut root_copy = *root_read;
             let mut leaf = self.find_leaf_page(root_copy, key)?;
             let _leaf_latch = self.leaf_latches[(leaf.page_id as usize) & 63].lock();
@@ -1448,7 +1460,8 @@ impl BPlusTree {
                 };
                 if next_pid == INVALID_PAGE_ID || high_key.is_some() {
                     THREAD_LEAF_HINTS.with(|hints| {
-                        hints.borrow_mut().insert(self.tree_id, (pid, next_pid, high_key));
+                        let ep = self.hint_epoch.load(std::sync::atomic::Ordering::Acquire);
+                    hints.borrow_mut().insert(self.tree_id, (ep, pid, next_pid, high_key));
                     });
                 }
                 return Ok(old_value);
@@ -1497,7 +1510,8 @@ impl BPlusTree {
             };
             if next_pid == INVALID_PAGE_ID || high_key.is_some() {
                 THREAD_LEAF_HINTS.with(|hints| {
-                    hints.borrow_mut().insert(self.tree_id, (pid, next_pid, high_key));
+                    let ep = self.hint_epoch.load(std::sync::atomic::Ordering::Acquire);
+                    hints.borrow_mut().insert(self.tree_id, (ep, pid, next_pid, high_key));
                 });
             }
             return Ok(old_value);
@@ -1763,9 +1777,12 @@ impl BPlusTree {
             } else {
                 self.read_first_key_zero_copy(next_after_right)
             };
-            THREAD_LEAF_HINTS.with(|hints| {
-                hints.borrow_mut().insert(self.tree_id, (right_pid, next_after_right, right_high));
-            });
+            if next_after_right == INVALID_PAGE_ID || right_high.is_some() {
+                let ep = self.hint_epoch.load(std::sync::atomic::Ordering::Acquire);
+                THREAD_LEAF_HINTS.with(|hints| {
+                    hints.borrow_mut().insert(self.tree_id, (ep, right_pid, next_after_right, right_high));
+                });
+            }
         }
         if let Some(started) = parent_started {
             mitrdb_observe::record_profile_duration(
@@ -1915,6 +1932,7 @@ impl BPlusTree {
     pub fn delete_logged(&self, txn_id: TxnId, prev_lsn: &mut Lsn, key: &[u8]) -> Result<bool> {
         let _op_guard = self.bpm.acquire_op_shared();
         let mut root_guard = self.root_page_id.write();
+        self.hint_epoch.fetch_add(1, std::sync::atomic::Ordering::Release);
         THREAD_LEAF_HINTS.with(|hints| {
             hints.borrow_mut().remove(&self.tree_id);
         });
@@ -1943,6 +1961,7 @@ impl BPlusTree {
         }
         let _op_guard = self.bpm.acquire_op_shared();
         let mut root_guard = self.root_page_id.write();
+        self.hint_epoch.fetch_add(1, std::sync::atomic::Ordering::Release);
         THREAD_LEAF_HINTS.with(|hints| {
             hints.borrow_mut().remove(&self.tree_id);
         });
