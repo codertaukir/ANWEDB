@@ -330,9 +330,12 @@ impl BufferPoolManager {
         let result = (|| {
             if self.disk_manager.free_page_count() == 0 {
                 let has_deferred = !self.deferred_free_txns.lock().unwrap().is_empty();
-                if !has_deferred
-                    && let Some(victim_idx) = self.free_frames.lock().unwrap().pop()
-                {
+                let popped_free = if !has_deferred {
+                    self.free_frames.lock().unwrap().pop()
+                } else {
+                    None
+                };
+                if let Some(victim_idx) = popped_free {
                     let (new_page_id, new_page) = self.disk_manager.allocate_page(page_type)?;
                     let mut target_shard = self.page_tables[shard_of(new_page_id)].write().unwrap();
                     if !target_shard.contains_key(&new_page_id) {
@@ -1312,6 +1315,51 @@ mod tests {
 
         bpm.unpin_page(p_reused_1, false).unwrap();
         bpm.unpin_page(p_reused_2, false).unwrap();
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_new_page_fast_path_shard_conflict_reclaims_allocated_page() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "mitrdb_bp_fastpath_conflict_{}",
+            std::process::id()
+        ));
+        let db_path = temp_dir.join("test.db");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+
+        let disk = Arc::new(DiskManager::open_or_create(db_path.as_path()).unwrap());
+        let bpm = BufferPoolManager::new(disk.clone(), 4);
+
+        let (p0, _) = bpm.new_page(PAGE_TYPE_SLOTTED).unwrap();
+        assert_eq!(p0, 0);
+        bpm.unpin_page(p0, false).unwrap();
+
+        // Simulate a concurrent pinned resident mapping for pid 1 while free_page_count() == 0
+        // and free_frames is non-empty, forcing the fast-path conflict branch in new_page.
+        assert_eq!(disk.free_page_count(), 0);
+        {
+            let mut frame = bpm.frames[3].write().unwrap();
+            frame.page = Page::new_empty(1, crate::PAGE_TYPE_RAW);
+            frame.page.set_flags(PAGE_FLAG_FREE);
+            frame.page_id = Some(1);
+            frame.pin_count.store(1, Ordering::Release);
+            frame.is_dirty.store(true, Ordering::Release);
+        }
+        bpm.page_tables[shard_of(1)].write().unwrap().insert(1, 3);
+
+        let (allocated_pid, _) = bpm.new_page(PAGE_TYPE_SLOTTED).unwrap();
+        assert_ne!(allocated_pid, 1, "must not return conflicting pid 1");
+        // Unpin pid 1; because new_page reclaimed it via free_page(1) and then saw it pinned,
+        // pid 1 was staged for deferred free and becomes reusable instead of leaking on disk.
+        bpm.unpin_page(1, false).unwrap();
+        bpm.unpin_page(allocated_pid, false).unwrap();
+        let (reclaimed_pid, _) = bpm.new_page(PAGE_TYPE_SLOTTED).unwrap();
+        assert_eq!(
+            reclaimed_pid, 1,
+            "conflicting fast-path pid 1 must be reclaimed instead of leaked"
+        );
+        bpm.unpin_page(reclaimed_pid, false).unwrap();
+
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
 }
