@@ -1335,13 +1335,22 @@ impl WalManager {
         let append_started = profiling.then(std::time::Instant::now);
         #[cfg(feature = "fault-injection")]
         self.inject_append_fail()?;
+        let rec_len = record.serialized_size() as u64;
+        thread_local! {
+            static WAL_SCRATCH: std::cell::RefCell<Vec<u8>> = std::cell::RefCell::new(Vec::with_capacity(512));
+        }
+        WAL_SCRATCH.with(|cell| {
+            let mut scratch = cell.borrow_mut();
+            scratch.clear();
+            record.serialize_append(&mut scratch);
+        });
+
         let mut inner = self.inner.lock();
         let assigned_lsn = inner.next_lsn;
         let next_lsn = assigned_lsn
             .checked_add(1)
             .ok_or_else(|| Error::WalCorrupted("LSN overflow".to_string()))?;
         record.lsn = assigned_lsn;
-        let rec_len = record.serialized_size() as u64;
 
         if inner.segments.is_empty() {
             let seg0_path = Self::segment_path(&self.path, 0);
@@ -1395,10 +1404,16 @@ impl WalManager {
             active.segment_id
         };
 
-        // All fallible checks are done. Serialize straight into the shared arena:
-        // no per-record heap allocation, no intermediate copy.
+        // Patch assigned LSN + CRC into pre-serialized thread-local buffer and copy into arena.
         let start = inner.pending_base + inner.pending_bytes.len() as u64;
-        record.serialize_append(&mut inner.pending_bytes);
+        WAL_SCRATCH.with(|cell| {
+            let mut scratch = cell.borrow_mut();
+            let total_len = scratch.len();
+            scratch[4..12].copy_from_slice(&assigned_lsn.to_le_bytes());
+            let crc = crc32c::checksum(&scratch[..total_len - 4]);
+            scratch[total_len - 4..total_len].copy_from_slice(&crc.to_le_bytes());
+            inner.pending_bytes.extend_from_slice(&scratch);
+        });
 
         inner.track_record(record);
         inner.next_lsn = next_lsn;

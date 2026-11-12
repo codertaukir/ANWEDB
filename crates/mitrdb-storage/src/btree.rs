@@ -728,7 +728,6 @@ impl BPlusTree {
                 if let Some(lsn) = new_lsn { page.set_page_lsn(lsn); }
                 page.set_page_type(PAGE_TYPE_BTREE_LEAF);
                 page.set_flags(0);
-                page.update_checksum();
                 outcome = Some((Some(old_val), next_pid));
                 return Ok(());
             }
@@ -875,7 +874,6 @@ impl BPlusTree {
             if let Some(lsn) = new_lsn { page.set_page_lsn(lsn); }
                 page.set_page_type(PAGE_TYPE_BTREE_LEAF);
             page.set_flags(0);
-            page.update_checksum();
             outcome = Some((None, next_pid));
             Ok(())
         })?;
@@ -1068,7 +1066,6 @@ impl BPlusTree {
                     .copy_from_slice(&new_payload[..new_len]);
                 page.data[PAGE_HEADER_SIZE + new_len..PAGE_SIZE].fill(0);
                 page.set_page_lsn(lsn);
-                page.update_checksum();
                 Ok(())
             });
 
@@ -1085,7 +1082,6 @@ impl BPlusTree {
                 page.set_page_type(target_ptype);
                 page.set_flags(0);
                 node.encode_payload_into(&mut page.data[PAGE_HEADER_SIZE..PAGE_SIZE])?;
-                page.update_checksum();
                 Ok(())
             });
 
