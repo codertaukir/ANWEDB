@@ -580,8 +580,9 @@ impl BPlusTree {
 
     /// Zero-allocation in-place leaf insert/replace directly inside the buffer pool frame.
     /// Returns:
-    /// - `Ok(Some((old_val, next_pid)))` if mutated in-place (or `Err` on validation/WAL failure)
-    /// - `Ok(None)` if hint check failed or leaf is full and needs a split.
+    /// - `Ok((Some((old_val, next_pid)), false))` if mutated in-place
+    /// - `Ok((None, true))` if leaf is genuinely full and needs a split
+    /// - `Ok((None, false))` if hint check missed and caller should traverse from root.
     fn try_mutate_leaf_in_place(
         &self,
         pid: PageId,
@@ -590,9 +591,10 @@ impl BPlusTree {
         prev_lsn: &mut Lsn,
         key: &[u8],
         value: &[u8],
-    ) -> Result<Option<(Option<Vec<u8>>, PageId)>> {
+    ) -> Result<(Option<(Option<Vec<u8>>, PageId)>, bool)> {
         let max_body = PAGE_SIZE - PAGE_HEADER_SIZE;
         let mut outcome: Option<(Option<Vec<u8>>, PageId)> = None;
+        let mut is_full = false;
         let mut wal_err: Option<Error> = None;
 
         self.bpm.mutate_page(pid, |page| {
@@ -728,6 +730,7 @@ impl BPlusTree {
             let new_key_cnt = key_cnt + 1;
             let new_payload_len = old_payload_len + new_entry_len;
             if new_key_cnt > (self.max_keys as usize) || new_payload_len > max_body {
+                is_full = true;
                 return Ok(()); // needs split
             }
             let ipos = insert_pos.unwrap_or(old_payload_len);
@@ -873,7 +876,7 @@ impl BPlusTree {
         if let Some(e) = wal_err {
             return Err(e);
         }
-        Ok(outcome)
+        Ok((outcome, is_full))
     }
 
     pub fn read_node(&self, page_id: PageId) -> Result<BTreeNode> {
@@ -1371,35 +1374,37 @@ impl BPlusTree {
                 hints.borrow().get(&self.tree_id).cloned()
             });
 
-            let mut tried_hint = false;
+            let mut known_full = false;
             if let Some((hint_pid, exp_next, ref high_key)) = hint {
                 if high_key.is_none() || key < high_key.as_ref().unwrap().as_slice() {
-                    tried_hint = true;
                     let _leaf_latch = self.leaf_latches[(hint_pid as usize) & 63].lock();
-                    if let Some((old_value, _next_pid)) = self.try_mutate_leaf_in_place(
+                    let (mutated, full) = self.try_mutate_leaf_in_place(
                         hint_pid,
                         Some((exp_next, high_key)),
                         txn_id,
                         prev_lsn,
                         key,
                         value,
-                    )? {
+                    )?;
+                    if let Some((old_value, _next_pid)) = mutated {
                         return Ok(old_value);
                     }
+                    known_full = full;
                 }
             }
 
-            if !tried_hint || hint.is_some() {
+            if !known_full {
                 let real_pid = self.find_leaf_page_id(root_id, key)?;
                 let _leaf_latch = self.leaf_latches[(real_pid as usize) & 63].lock();
-                if let Some((old_value, next_pid)) = self.try_mutate_leaf_in_place(
+                let (mutated, _) = self.try_mutate_leaf_in_place(
                     real_pid,
                     None,
                     txn_id,
                     prev_lsn,
                     key,
                     value,
-                )? {
+                )?;
+                if let Some((old_value, next_pid)) = mutated {
                     let high_key = if next_pid == INVALID_PAGE_ID {
                         None
                     } else {
@@ -1544,7 +1549,7 @@ impl BPlusTree {
         let first_try = if leaf.next_leaf_page_id == INVALID_PAGE_ID {
             total_len.saturating_sub(1)
         } else {
-            total_len / 2
+            (total_len * 3) / 4
         };
         for cand_mid in std::iter::once(first_try).chain(1..total_len) {
             if cand_mid == 0 || cand_mid >= total_len {
