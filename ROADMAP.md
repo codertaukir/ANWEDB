@@ -51,7 +51,7 @@ Status tracker. `[x]` = done and measured/tested, `[ ]` = pending.
 
 ## P1: Architecture & Concurrency
 - [x] Query Planner & Join Execution Optimization (5fa0485, cea2550): Planner predicate pushdown & zero-allocation hash join probe completed and tested.
-- [ ] (measured, low priority: WAL lock wait+hold = ~21% of TxnPut time, ~2.4% CPU in perf; sirf next_lsn atomic karna unsafe, arena ordering invariant) WalManager mutex contention removal & Atomic LSN reservation (`AtomicU64`) for multi-core scalability (`4T` `148k ops/s` optimization).
+- [x] WalManager lock: measured, no actionable gain. Lock wait ~12% + hold ~8% of TxnPut (write_mark_real 4T), but WAL is only ~2.4% CPU in perf. txn_trackers cheap-hasher A/B (12 runs): median 355.9k vs 359.4k ops/s, noise. Atomic next_lsn alone is unsafe (arena must stay in LSN order); lock-free reservation not attempted (recovery risk, gain bounded by ~20% of put time)
 
 ## P2 & Housekeeping
 - [x] `free_pages_batch` crash-injection test (dedb3e2): blank pages write ke baad stale/missing freelist crash scenario par disk rebuild recovery verified; page leaks eliminated aur allocator reuse validated.
