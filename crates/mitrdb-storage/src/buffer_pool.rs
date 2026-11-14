@@ -270,34 +270,51 @@ impl BufferPoolManager {
         self.inject_page_op_fail()?;
         let frame_idx = self.pin_or_load_frame(page_id)?;
 
-        let mut working_page = {
-            let frame = self.frames[frame_idx].read().unwrap();
-            frame.page.clone()
-        };
-        let result = f(&mut working_page);
         let mut frame = self.frames[frame_idx].write().unwrap();
+        let mut working_page = frame.page.clone();
+        let result = f(&mut working_page).and_then(|val| {
+            if working_page.page_id() != page_id {
+                return Err(Error::PageCorrupted(
+                    "Page ID modified during update_page_data".to_string(),
+                ));
+            }
+            working_page.validate_structure()?;
+            Ok(val)
+        });
+        frame.pin_count.fetch_sub(1, Ordering::AcqRel);
         match result {
             Ok(val) => {
-                if working_page.page_id() != page_id {
-                    frame.pin_count.fetch_sub(1, Ordering::AcqRel);
-                    return Err(Error::PageCorrupted(
-                        "Page ID modified during update_page_data".to_string(),
-                    ));
-                }
-                if let Err(e) = working_page.validate_structure() {
-                    frame.pin_count.fetch_sub(1, Ordering::AcqRel);
-                    return Err(e);
-                }
                 frame.page = working_page;
                 frame.is_dirty.store(true, Ordering::Release);
-                frame.pin_count.fetch_sub(1, Ordering::AcqRel);
                 Ok(val)
             }
-            Err(e) => {
-                frame.pin_count.fetch_sub(1, Ordering::AcqRel);
-                Err(e)
+            Err(e) => Err(e),
+        }
+    }
+
+    #[doc(hidden)]
+    pub fn debug_verify_frames_match_disk(&self) -> Vec<String> {
+        let mut bad = Vec::new();
+        for (i, lock) in self.frames.iter().enumerate() {
+            let f = lock.read().unwrap();
+            let Some(pid) = f.page_id else {
+                continue;
+            };
+            let mut mem = f.page.clone();
+            mem.update_checksum();
+            match self.disk_manager.read_page(pid) {
+                Ok(d) if d.as_bytes() == mem.as_bytes() => {}
+                Ok(d) => bad.push(format!(
+                    "frame {i} page {pid}: mem_lsn={} disk_lsn={} dirty={} pins={}",
+                    mem.page_lsn(),
+                    d.page_lsn(),
+                    f.is_dirty.load(Ordering::Acquire),
+                    f.pin_count.load(Ordering::Acquire)
+                )),
+                Err(e) => bad.push(format!("frame {i} page {pid}: disk read err {e:?}")),
             }
         }
+        bad
     }
 
     pub fn mutate_page<F, R>(&self, page_id: PageId, f: F) -> Result<R>
@@ -716,23 +733,24 @@ impl BufferPoolManager {
         let shards = self.lock_all_shards_read();
 
         let mut dirty_batch = Vec::new();
+        let mut flushed_meta = Vec::new();
         for s in shards.iter() {
             for (&page_id, &frame_idx) in s.iter() {
                 let frame = self.frames[frame_idx].read().unwrap();
                 if frame.is_dirty.load(Ordering::Acquire) {
-                    self.enforce_wal_rule(frame.page.page_lsn())?;
+                    let page_lsn = frame.page.page_lsn();
+                    self.enforce_wal_rule(page_lsn)?;
                     dirty_batch.push((page_id, frame.page.clone()));
+                    flushed_meta.push((frame_idx, page_id, page_lsn));
                 }
             }
         }
         self.disk_manager.write_pages_batch(&dirty_batch)?;
         self.disk_manager.sync()?;
-        for s in shards.iter() {
-            for (&_page_id, &frame_idx) in s.iter() {
-                let frame = self.frames[frame_idx].read().unwrap();
-                if frame.is_dirty.load(Ordering::Acquire) {
-                    frame.is_dirty.store(false, Ordering::Release);
-                }
+        for (frame_idx, _page_id, flushed_lsn) in flushed_meta {
+            let frame = self.frames[frame_idx].write().unwrap();
+            if frame.page.page_lsn() == flushed_lsn {
+                frame.is_dirty.store(false, Ordering::Release);
             }
         }
         Ok(())
@@ -759,23 +777,24 @@ impl BufferPoolManager {
         let shards = self.lock_all_shards_read();
 
         let mut dirty_batch = Vec::new();
+        let mut flushed_meta = Vec::new();
         for s in shards.iter() {
             for (&page_id, &frame_idx) in s.iter() {
                 let frame = self.frames[frame_idx].read().unwrap();
                 if frame.is_dirty.load(Ordering::Acquire) {
-                    self.enforce_wal_rule(frame.page.page_lsn())?;
+                    let page_lsn = frame.page.page_lsn();
+                    self.enforce_wal_rule(page_lsn)?;
                     dirty_batch.push((page_id, frame.page.clone()));
+                    flushed_meta.push((frame_idx, page_id, page_lsn));
                 }
             }
         }
         self.disk_manager.write_pages_batch(&dirty_batch)?;
         self.disk_manager.sync()?;
-        for s in shards.iter() {
-            for (&_page_id, &frame_idx) in s.iter() {
-                let frame = self.frames[frame_idx].read().unwrap();
-                if frame.is_dirty.load(Ordering::Acquire) {
-                    frame.is_dirty.store(false, Ordering::Release);
-                }
+        for (frame_idx, _page_id, flushed_lsn) in flushed_meta {
+            let frame = self.frames[frame_idx].write().unwrap();
+            if frame.page.page_lsn() == flushed_lsn {
+                frame.is_dirty.store(false, Ordering::Release);
             }
         }
 

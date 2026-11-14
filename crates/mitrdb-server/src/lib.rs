@@ -516,6 +516,33 @@ impl Default for Server {
     }
 }
 
+impl Server {
+    #[doc(hidden)]
+    pub fn debug_verify_frames_match_disk(&self) -> Vec<String> {
+        self.bpm
+            .as_ref()
+            .map(|b| b.debug_verify_frames_match_disk())
+            .unwrap_or_default()
+    }
+}
+
+impl Drop for Server {
+    fn drop(&mut self) {
+        if self.txn_mgr.active_txn_count() == 0 {
+            let _ = self.catalog.sync_roots();
+        }
+        if let Some(ref wal) = self.wal_mgr {
+            let _ = wal.flush_all();
+        }
+        if let Some(ref bpm) = self.bpm {
+            let _ = bpm.flush_all();
+        }
+        if let Some(ref wal) = self.wal_mgr {
+            let _ = wal.flush_all();
+        }
+    }
+}
+
 mod files;
 mod perms;
 pub use files::{FileStore, StoredFile};

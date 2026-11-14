@@ -159,9 +159,26 @@ fn auto_checkpoint_bounds_wal_growth() {
     assert_eq!(count(&srv), 4000);
     drop(srv);
 
-    let (srv, _) =
+    let (srv, rep) =
         Server::open_with_segment_size(dir.join("t.db"), dir.join("t.wal"), 256, SEG).unwrap();
-    assert_eq!(count(&srv), 4000);
+    let got = count(&srv);
+    if got != 4000 {
+        eprintln!("MISMATCH got={got} report={rep:?}");
+        if let Ok(mitrdb_exec::ExecutionResult::Rows { rows, .. }) = srv.execute_sql("SELECT id FROM t") {
+            let mut ids: Vec<i64> = rows.into_iter().filter_map(|r| match r.first() { Some(mitrdb_query::Value::Int64(v)) => Some(*v), _ => None }).collect();
+            ids.sort();
+            let set: std::collections::HashSet<i64> = ids.into_iter().collect();
+            for t in 0..4i64 {
+                for k in 0..1000i64 {
+                    let id = t * 100_000 + k;
+                    if !set.contains(&id) {
+                        eprintln!("MISSING ID: {id} (thread={t}, k={k}) point_lookup={:?}", srv.execute_sql(&format!("SELECT * FROM t WHERE id = {id}")));
+                    }
+                }
+            }
+        }
+    }
+    assert_eq!(got, 4000);
     drop(srv);
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -248,11 +265,73 @@ fn auto_checkpoint_under_concurrent_sessions() {
     }
     eprintln!("CONC segments at end = {}", seg(&srv));
     assert_eq!(count(&srv), 4000);
+    let _ = srv.checkpoint_with_meta();
+    let bad = srv.debug_verify_frames_match_disk();
+    eprintln!("FRAME/DISK MISMATCHES: {}", bad.len());
+    for b in &bad {
+        eprintln!("  {b}");
+    }
     drop(srv);
+    std::fs::copy(dir.join("t.db"), dir.join("t.db.prereopen")).unwrap();
 
-    let (srv, _) =
+    let (srv, rep) =
         Server::open_with_segment_size(dir.join("t.db"), dir.join("t.wal"), 256, SEG).unwrap();
-    assert_eq!(count(&srv), 4000);
+    let got = count(&srv);
+    if got != 4000 {
+        eprintln!("MISMATCH got={got} report={rep:?}");
+        if let Ok(mitrdb_exec::ExecutionResult::Rows { rows, .. }) = srv.execute_sql("SELECT id FROM t") {
+            let set: std::collections::HashSet<i64> = rows
+                .into_iter()
+                .filter_map(|r| match r.first() {
+                    Some(mitrdb_query::Value::Int64(v)) => Some(*v),
+                    _ => None,
+                })
+                .collect();
+            for t in 0..4i64 {
+                for k in 0..1000i64 {
+                    let id = t * 100_000 + k;
+                    if !set.contains(&id) {
+                        {
+                        eprintln!("MISSING ID: {id} (thread={t}, k={k})");
+                        let pre = std::fs::read(dir.join("t.db.prereopen")).unwrap();
+                        let post = std::fs::read(dir.join("t.db")).unwrap();
+                        let control = (id / 100_000) * 100_000 + 500;
+                        for (label, key) in [("MISSING", id), ("CONTROL", control)] {
+                            let a = raw_hits(&pre, key as i64);
+                            let b = raw_hits(&post, key as i64);
+                            eprintln!("  {label} {key}: prereopen hits={:?} postreopen hits={:?}", a, b);
+                        }
+                    }
+                    }
+                }
+            }
+        }
+    }
+    assert_eq!(got, 4000);
     drop(srv);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+
+#[allow(dead_code)]
+fn raw_hits(raw: &[u8], id: i64) -> Vec<(&'static str, usize)> {
+    let u = id as u64;
+    let u32v = id as i32 as u32;
+    let encs: [(&'static str, Vec<u8>); 6] = [
+        ("i64_be", u.to_be_bytes().to_vec()),
+        ("i64_le", u.to_le_bytes().to_vec()),
+        ("i64_be_flip", (u ^ (1u64 << 63)).to_be_bytes().to_vec()),
+        ("i32_be", u32v.to_be_bytes().to_vec()),
+        ("i32_le", u32v.to_le_bytes().to_vec()),
+        ("i32_be_flip", (u32v ^ (1u32 << 31)).to_be_bytes().to_vec()),
+    ];
+    let mut out = Vec::new();
+    for (name, pat) in encs.iter() {
+        for (off, w) in raw.windows(pat.len()).enumerate() {
+            if w == pat.as_slice() {
+                out.push((*name, off));
+            }
+        }
+    }
+    out
 }
