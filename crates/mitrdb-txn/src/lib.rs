@@ -931,7 +931,9 @@ impl MvccVersionStore {
 
         let mut inspected = 0;
         for key in keys.range((start, end)) {
-            target.insert(key.clone());
+            if !target.contains(key.as_slice()) {
+                target.insert(key.clone());
+            }
             inspected += 1;
         }
         inspected
@@ -1717,8 +1719,7 @@ impl TxnManager {
         let scan_res = (|| -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
             let bounds_started = std::time::Instant::now();
             let chain_epoch0 = self.chain_epoch.load(Ordering::SeqCst);
-            let mut candidate_keys: BTreeSet<Vec<u8>> = BTreeSet::new();
-            let mut raw_values: BTreeMap<Vec<u8>, Vec<u8>> = BTreeMap::new();
+            let mut raw_values: HashMap<Vec<u8>, Vec<u8>> = HashMap::new();
             let tree_metrics_before = profile_scan.then(|| GLOBAL_METRICS.snapshot());
             let tree_range_started = std::time::Instant::now();
             let raw_entries = if descending {
@@ -1743,10 +1744,11 @@ impl TxnManager {
                 };
 
             let candidate_collect_started = std::time::Instant::now();
-            let mut raw_entry_count = 0usize;
+            let raw_entry_count = raw_entries.len();
+            let mut candidate_keys: BTreeSet<Vec<u8>> =
+                raw_entries.iter().map(|(k, _)| k.clone()).collect();
+            raw_values.reserve(raw_entry_count);
             for (key, value) in raw_entries {
-                raw_entry_count += 1;
-                candidate_keys.insert(key.clone());
                 raw_values.insert(key, value);
             }
             let candidate_collect_elapsed = candidate_collect_started.elapsed();
