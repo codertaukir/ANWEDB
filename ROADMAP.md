@@ -49,7 +49,7 @@ Status tracker. `[x]` = done and measured/tested, `[ ]` = pending.
 
 ## P1: Architecture & Concurrency
 - [x] Query Planner & Join Execution Optimization (5fa0485, cea2550): Planner predicate pushdown & zero-allocation hash join probe completed and tested.
-- [ ] WalManager mutex contention removal & Atomic LSN reservation (`AtomicU64`) for multi-core scalability (`4T` `148k ops/s` optimization).
+- [ ] (measured, low priority: WAL lock wait+hold = ~21% of TxnPut time, ~2.4% CPU in perf; sirf next_lsn atomic karna unsafe, arena ordering invariant) WalManager mutex contention removal & Atomic LSN reservation (`AtomicU64`) for multi-core scalability (`4T` `148k ops/s` optimization).
 
 ## P2 & Housekeeping
 - [x] `free_pages_batch` crash-injection test (dedb3e2): blank pages write ke baad stale/missing freelist crash scenario par disk rebuild recovery verified; page leaks eliminated aur allocator reuse validated.
