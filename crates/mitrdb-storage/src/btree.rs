@@ -633,6 +633,12 @@ impl BPlusTree {
                 if 22 + first_klen > buf.len() || key < &buf[22..22 + first_klen] {
                     return Ok(());
                 }
+            } else if next_pid != INVALID_PAGE_ID {
+                if let Some(hk) = self.read_first_key_zero_copy(next_pid) {
+                    if key >= hk.as_slice() {
+                        return Ok(());
+                    }
+                }
             }
 
             // Scan packed entries directly on page slice without heap allocations
@@ -1249,11 +1255,29 @@ impl BPlusTree {
     /// cannot be merged/freed by a writer in between.
     pub fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
         let root_guard = self.root_page_id.read();
-        let leaf_pid = self.find_leaf_page_id(*root_guard, key)?;
-        let page = self.bpm.fetch_page(leaf_pid)?;
-        let res = Self::search_leaf_page(&page, key);
-        self.bpm.unpin_page(leaf_pid, false)?;
-        res
+        let mut leaf_pid = self.find_leaf_page_id(*root_guard, key)?;
+        loop {
+            let page = self.bpm.fetch_page(leaf_pid)?;
+            let next_pid = {
+                let buf = &page.data[BTREE_NODE_HEADER_OFFSET..PAGE_SIZE];
+                u32::from_le_bytes([buf[12], buf[13], buf[14], buf[15]])
+            };
+            let res = Self::search_leaf_page(&page, key);
+            self.bpm.unpin_page(leaf_pid, false)?;
+            match res? {
+                Some(val) => return Ok(Some(val)),
+                None if next_pid != INVALID_PAGE_ID => {
+                    if let Some(hk) = self.read_first_key_zero_copy(next_pid)
+                        && key >= hk.as_slice()
+                    {
+                        leaf_pid = next_pid;
+                        continue;
+                    }
+                    return Ok(None);
+                }
+                None => return Ok(None),
+            }
+        }
     }
 
     pub fn range_scan(
@@ -1431,11 +1455,11 @@ impl BPlusTree {
             }
         }
 
-        // SLOW PATH A: Non-root leaf split under exclusive root write lock so no concurrent
-        // fast-path traversal or leaf mutation can observe a half-split parent/leaf.
+        // SLOW PATH A: Non-root leaf split under shared root read lock + Blink right-link fence check
+        // so concurrent fast-path readers/writers are not blocked while parent pointers update.
         {
             let _split_guard = self.split_mutex.lock();
-            let root_read = self.root_page_id.write();
+            let root_read = self.root_page_id.read();
             let mut root_copy = *root_read;
             let mut leaf = self.find_leaf_page(root_copy, key)?;
             let _leaf_latch = self.leaf_latches[(leaf.page_id as usize) & 63].lock();
