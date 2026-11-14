@@ -40,6 +40,8 @@ Status tracker. `[x]` = done and measured/tested, `[ ]` = pending.
 
 - [x] Concurrent insert vs scan: leaf split ab leaf latch ke andar fresh read karta hai aur right leaf pehle likhta hai (a686985): load mein ckpt_reclaim concurrent test 94-97/100 -> 100/100 (lost update + `kind byte: 0` zero-page read). buffer_pool update_page_data single write guard, page_lsn monotonic (1869337). Insert A/B batch tmpfs 6 round x 2: median OLD 49.5k vs NEW 49.5k rows/s, noise
 
+- [x] range_scan_directed: candidate key set bulk build, raw_values HashMap, extend_keys_in_range redundant clone skip: full-scan p50 (N=20000, 10 rounds A/B interleaved) 72.1ms -> 58.2ms, insert noise (53.4k vs 53.4k rows/s). txn/exec/server tests + ckpt_reclaim 100/100
+
 ## P0: Production Readiness & Memory Safety
 - [x] B+Tree free_btree_page pin safety (caf1b77): Page ko WAL append tak pinned rakha taaki WAL append ke dauran eviction race na bane; WAL failure par safe unpin aur clean error return. `ckpt_reclaim` aur recovery suites pass.
 - [x] `insert_many` par WAL pressure hook: `PhysicalPlan::InsertMany` mein har 64 rows par 16MB pressure check (`relieve_wal_pressure`); `wal_pressure_insert_flush` crash recovery test + `insert_many_wal_pressure_test` rollback test verified (bf0fc73)
