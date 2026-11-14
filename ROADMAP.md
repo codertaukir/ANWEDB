@@ -38,6 +38,8 @@ Status tracker. `[x]` = done and measured/tested, `[ ]` = pending.
 - [x] High-concurrency B+Tree insert scaling, WAL zero-copy batching & hint_epoch safety (`e95efea`..`87daf71`): 64-shard `txn_table`, `mimalloc` global allocator (`b299f41`), 47-byte packed WAL header + batch txn tracking (`57bb563`), and thread-local WAL scratch buffers (`06c56c5`, `ce051b2`).
 - [x] Concurrent DDL locking & isolation (4875019): DDL statements par `DdlTableLockGuard` exclusive table lock acquire karta hai; DML execution par `acquire_table_shared` integrate kiya. `schema_persist` test suite + poora workspace tests green (100% passed).
 
+- [x] Concurrent insert vs scan: leaf split ab leaf latch ke andar fresh read karta hai aur right leaf pehle likhta hai (a686985): load mein ckpt_reclaim concurrent test 94-97/100 -> 100/100 (lost update + `kind byte: 0` zero-page read). buffer_pool update_page_data single write guard, page_lsn monotonic (1869337). Insert A/B batch tmpfs 6 round x 2: median OLD 49.5k vs NEW 49.5k rows/s, noise
+
 ## P0: Production Readiness & Memory Safety
 - [x] B+Tree free_btree_page pin safety (caf1b77): Page ko WAL append tak pinned rakha taaki WAL append ke dauran eviction race na bane; WAL failure par safe unpin aur clean error return. `ckpt_reclaim` aur recovery suites pass.
 - [x] `insert_many` par WAL pressure hook: `PhysicalPlan::InsertMany` mein har 64 rows par 16MB pressure check (`relieve_wal_pressure`); `wal_pressure_insert_flush` crash recovery test + `insert_many_wal_pressure_test` rollback test verified (bf0fc73)
