@@ -1551,7 +1551,7 @@ impl TxnManager {
 
             bpm.update_page_data(page_id, |page| {
                 page.data[off..off + len].copy_from_slice(new_data);
-                if assigned_lsn != INVALID_LSN {
+                if assigned_lsn != INVALID_LSN && assigned_lsn > page.page_lsn() {
                     page.set_page_lsn(assigned_lsn);
                 } else {
                     page.update_checksum();
@@ -2877,7 +2877,7 @@ impl TxnManager {
                         let len = old_data.len();
                         let update_res = bpm.update_page_data(page_id, |page| {
                             page.data[off..off + len].copy_from_slice(&old_data);
-                            if clr_lsn != INVALID_LSN {
+                            if clr_lsn != INVALID_LSN && clr_lsn > page.page_lsn() {
                                 page.set_page_lsn(clr_lsn);
                             } else {
                                 page.update_checksum();

@@ -1461,8 +1461,11 @@ impl BPlusTree {
             let _split_guard = self.split_mutex.lock();
             let root_read = self.root_page_id.read();
             let mut root_copy = *root_read;
-            let mut leaf = self.find_leaf_page(root_copy, key)?;
-            let _leaf_latch = self.leaf_latches[(leaf.page_id as usize) & 63].lock();
+            // FIX: pehle leaf latch, PHIR read. Pehle read hota tha to fast-path ki
+            // in-place insert stale copy se overwrite ho jaati thi.
+            let leaf_pid = self.find_leaf_page_id(root_copy, key)?;
+            let _leaf_latch = self.leaf_latches[(leaf_pid as usize) & 63].lock();
+            let mut leaf = self.read_node(leaf_pid)?;
             let old_value = match leaf.keys.binary_search_by(|k| k.as_slice().cmp(key)) {
                 Ok(idx) => Some(std::mem::replace(&mut leaf.values[idx], value.to_vec())),
                 Err(idx) => {
@@ -1492,12 +1495,28 @@ impl BPlusTree {
 
             let plan = self.plan_split(&leaf)?;
             if plan.pages_needed == 1 {
+                // FIX: split next leaf ka prev pointer poora node rewrite karke badalta hai.
+                // Uska latch lo (same stripe ho to dobara nahi, warna self-deadlock) aur
+                // latch ke andar FRESH read karo, plan_split wali stale copy nahi.
+                let next_pid = leaf.next_leaf_page_id;
+                let my_stripe = (leaf.page_id as usize) & 63;
+                let next_stripe = (next_pid as usize) & 63;
+                let _next_latch = if next_pid != INVALID_PAGE_ID && next_stripe != my_stripe {
+                    Some(self.leaf_latches[next_stripe].lock())
+                } else {
+                    None
+                };
+                let fresh_old_next = if next_pid != INVALID_PAGE_ID {
+                    Some(self.read_node(next_pid)?)
+                } else {
+                    None
+                };
                 let mut pages = self.alloc_split_pages(1)?;
                 let res = self.split_leaf(
                     &mut root_copy,
                     leaf,
                     plan.mid,
-                    plan.old_next,
+                    fresh_old_next,
                     &mut pages,
                     txn_id,
                     prev_lsn,
@@ -1769,8 +1788,8 @@ impl BPlusTree {
         }
 
         let parent_started = mitrdb_observe::profiling_enabled().then(std::time::Instant::now);
-        self.write_node(&left_leaf, txn_id, prev_lsn)?;
         self.write_node(&right_leaf, txn_id, prev_lsn)?;
+        self.write_node(&left_leaf, txn_id, prev_lsn)?;
 
         if old_next_id == INVALID_PAGE_ID {
             self.last_leaf_hint.store(right_id, Ordering::Relaxed);
