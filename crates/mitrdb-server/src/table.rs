@@ -512,17 +512,59 @@ impl Table<'_> {
         if row.iter().any(|(n, _)| *n == pk) {
             return Err(bad(format!("column '{}' is auto, do not pass it", pk)));
         }
-        for _ in 0..16 {
+        const SEQ: &str = "mitrdb_seq";
+        if self.server.get_table_schema(SEQ)?.is_none() {
+            self.server
+                .table(SEQ)
+                .sync("tbl text primary key, last_id int not null")?;
+        }
+        let seq = self.server.table(SEQ);
+        let key = Value::Text(self.name.clone());
+        for _ in 0..32 {
+            let cur = seq
+                .find()
+                .columns(&["last_id"])
+                .filter("tbl", "=", key.clone())
+                .run()?;
+            let prev = match cur.rows.first().and_then(|r| r.first()) {
+                Some(Value::Int64(n)) => Some(*n),
+                _ => None,
+            };
             let top = self
                 .find()
                 .columns(&[pk])
                 .order_by_desc(pk)
                 .limit(1)
                 .run()?;
-            let next = match top.rows.first().and_then(|r| r.first()) {
-                Some(Value::Int64(n)) => n.checked_add(1).ok_or_else(|| bad("auto id overflow"))?,
-                _ => 1,
+            let max_pk = match top.rows.first().and_then(|r| r.first()) {
+                Some(Value::Int64(n)) => *n,
+                _ => 0,
             };
+            let next = prev
+                .unwrap_or(0)
+                .max(max_pk)
+                .checked_add(1)
+                .ok_or_else(|| bad("auto id overflow"))?;
+            let claimed = match prev {
+                None => {
+                    match seq.insert(&[("tbl", key.clone()), ("last_id", Value::Int64(next))]) {
+                        Ok(_) => true,
+                        Err(e) if e.to_string().contains("Duplicate") => false,
+                        Err(e) => return Err(e),
+                    }
+                }
+                Some(p) => {
+                    seq.update()
+                        .set("last_id", Value::Int64(next))
+                        .filter("tbl", "=", key.clone())
+                        .filter("last_id", "=", Value::Int64(p))
+                        .run()?
+                        == 1
+                }
+            };
+            if !claimed {
+                continue;
+            }
             let mut full: Vec<(&str, Value)> = Vec::with_capacity(row.len() + 1);
             full.push((pk, Value::Int64(next)));
             full.extend(row.iter().cloned());
