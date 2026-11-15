@@ -1,13 +1,12 @@
-
 type LeafHintEntry = (u64, PageId, PageId, Option<Vec<u8>>);
 type LeafInsertOutcome = (Option<(Option<Vec<u8>>, PageId)>, bool);
 
 thread_local! {
     static THREAD_LEAF_HINTS: std::cell::RefCell<std::collections::HashMap<u64, LeafHintEntry>> = std::cell::RefCell::new(std::collections::HashMap::new());
 }
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::cell::RefCell;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 #[derive(Default)]
 struct LeafWalScratch {
@@ -611,7 +610,9 @@ impl BPlusTree {
                 if buf.len() < 18 || buf[0] != NODE_KIND_LEAF {
                     return Ok(None);
                 }
-                Ok(Some(u32::from_le_bytes([buf[12], buf[13], buf[14], buf[15]])))
+                Ok(Some(u32::from_le_bytes([
+                    buf[12], buf[13], buf[14], buf[15],
+                ])))
             })?;
             np.map(|np| {
                 let hk = if np != INVALID_PAGE_ID {
@@ -675,13 +676,17 @@ impl BPlusTree {
 
             for _ in 0..key_cnt {
                 if pos + 4 > buf.len() {
-                    return Err(Error::PageCorrupted("Truncated B+Tree leaf entry".to_string()));
+                    return Err(Error::PageCorrupted(
+                        "Truncated B+Tree leaf entry".to_string(),
+                    ));
                 }
                 let klen = u16::from_le_bytes([buf[pos], buf[pos + 1]]) as usize;
                 let vlen = u16::from_le_bytes([buf[pos + 2], buf[pos + 3]]) as usize;
                 let entry_end = pos + 4 + klen + vlen;
                 if entry_end > buf.len() {
-                    return Err(Error::PageCorrupted("Truncated B+Tree leaf key/value".to_string()));
+                    return Err(Error::PageCorrupted(
+                        "Truncated B+Tree leaf key/value".to_string(),
+                    ));
                 }
                 if insert_pos.is_none() && replace_info.is_none() {
                     let cur_key = &buf[pos + 4..pos + 4 + klen];
@@ -711,8 +716,8 @@ impl BPlusTree {
                 if let Some(ref wal) = self.wal
                     && txn_id != 0
                 {
-                    let needs_fpi = cur_ptype != PAGE_TYPE_BTREE_LEAF
-                        || wal.needs_full_page_image(cur_lsn);
+                    let needs_fpi =
+                        cur_ptype != PAGE_TYPE_BTREE_LEAF || wal.needs_full_page_image(cur_lsn);
                     let (wal_start, wal_end) = if needs_fpi {
                         (0usize, max_body)
                     } else {
@@ -724,23 +729,20 @@ impl BPlusTree {
                     let rel_eend = eend - wal_start;
                     let rel_old_end = old_payload_len - wal_start;
                     redo.copy_within(rel_eend..rel_old_end, rel_estart + new_entry_len);
-                    redo[rel_estart..rel_estart + 2].copy_from_slice(&(key.len() as u16).to_le_bytes());
-                    redo[rel_estart + 2..rel_estart + 4].copy_from_slice(&(value.len() as u16).to_le_bytes());
+                    redo[rel_estart..rel_estart + 2]
+                        .copy_from_slice(&(key.len() as u16).to_le_bytes());
+                    redo[rel_estart + 2..rel_estart + 4]
+                        .copy_from_slice(&(value.len() as u16).to_le_bytes());
                     redo[rel_estart + 4..rel_estart + 4 + key.len()].copy_from_slice(key);
-                    redo[rel_estart + 4 + key.len()..rel_estart + new_entry_len].copy_from_slice(value);
+                    redo[rel_estart + 4 + key.len()..rel_estart + new_entry_len]
+                        .copy_from_slice(value);
                     if new_payload_len < old_payload_len {
                         redo[(new_payload_len - wal_start)..rel_old_end].fill(0);
                     }
 
                     let offset = (PAGE_HEADER_SIZE + wal_start) as u16;
                     match wal.append_record(LogRecord::new_update(
-                        0,
-                        txn_id,
-                        *prev_lsn,
-                        pid,
-                        offset,
-                        redo,
-                        undo,
+                        0, txn_id, *prev_lsn, pid, offset, redo, undo,
                     )) {
                         Ok(lsn) => {
                             *prev_lsn = lsn;
@@ -761,7 +763,9 @@ impl BPlusTree {
                 if new_payload_len < old_payload_len {
                     buf[new_payload_len..old_payload_len].fill(0);
                 }
-                if let Some(lsn) = new_lsn { page.set_page_lsn(lsn); }
+                if let Some(lsn) = new_lsn {
+                    page.set_page_lsn(lsn);
+                }
                 page.set_page_type(PAGE_TYPE_BTREE_LEAF);
                 page.set_flags(0);
                 outcome = Some((Some(old_val), next_pid));
@@ -780,8 +784,8 @@ impl BPlusTree {
             if let Some(ref wal) = self.wal
                 && txn_id != 0
             {
-                let needs_fpi = cur_ptype != PAGE_TYPE_BTREE_LEAF
-                    || wal.needs_full_page_image(cur_lsn);
+                let needs_fpi =
+                    cur_ptype != PAGE_TYPE_BTREE_LEAF || wal.needs_full_page_image(cur_lsn);
                 if needs_fpi || new_payload_len <= 1024 {
                     let (wal_start, wal_end) = if needs_fpi {
                         (0usize, max_body)
@@ -802,20 +806,14 @@ impl BPlusTree {
                     let rel_old_end = old_payload_len - wal_start;
                     redo.copy_within(rel_ipos..rel_old_end, rel_ipos + new_entry_len);
                     redo[rel_ipos..rel_ipos + 2].copy_from_slice(&(key.len() as u16).to_le_bytes());
-                    redo[rel_ipos + 2..rel_ipos + 4].copy_from_slice(&(value.len() as u16).to_le_bytes());
+                    redo[rel_ipos + 2..rel_ipos + 4]
+                        .copy_from_slice(&(value.len() as u16).to_le_bytes());
                     redo[rel_ipos + 4..rel_ipos + 4 + key.len()].copy_from_slice(key);
                     redo[rel_ipos + 4 + key.len()..rel_ipos + new_entry_len].copy_from_slice(value);
 
                     let offset = (PAGE_HEADER_SIZE + wal_start) as u16;
-                    let mut rec = LogRecord::new_update(
-                        0,
-                        txn_id,
-                        *prev_lsn,
-                        pid,
-                        offset,
-                        redo,
-                        undo,
-                    );
+                    let mut rec =
+                        LogRecord::new_update(0, txn_id, *prev_lsn, pid, offset, redo, undo);
                     let app_res = wal.append_record_ref(&mut rec);
                     LEAF_WAL_SCRATCH.with(|s| {
                         let mut s = s.borrow_mut();
@@ -834,15 +832,16 @@ impl BPlusTree {
                     }
                 } else {
                     // Log only the 2-byte key_cnt (16..18) and the newly shifted/inserted tail (ipos..new_payload_len)
-                    let (mut undo_cnt, mut redo_cnt, mut undo_tail, mut redo_tail) = LEAF_WAL_SCRATCH.with(|s| {
-                        let mut s = s.borrow_mut();
-                        (
-                            std::mem::take(&mut s.b0),
-                            std::mem::take(&mut s.b1),
-                            std::mem::take(&mut s.b2),
-                            std::mem::take(&mut s.b3),
-                        )
-                    });
+                    let (mut undo_cnt, mut redo_cnt, mut undo_tail, mut redo_tail) =
+                        LEAF_WAL_SCRATCH.with(|s| {
+                            let mut s = s.borrow_mut();
+                            (
+                                std::mem::take(&mut s.b0),
+                                std::mem::take(&mut s.b1),
+                                std::mem::take(&mut s.b2),
+                                std::mem::take(&mut s.b3),
+                            )
+                        });
                     undo_cnt.clear();
                     undo_cnt.extend_from_slice(&buf[16..18]);
                     redo_cnt.clear();
@@ -907,8 +906,10 @@ impl BPlusTree {
             buf[ipos + 2..ipos + 4].copy_from_slice(&(value.len() as u16).to_le_bytes());
             buf[ipos + 4..ipos + 4 + key.len()].copy_from_slice(key);
             buf[ipos + 4 + key.len()..ipos + new_entry_len].copy_from_slice(value);
-            if let Some(lsn) = new_lsn { page.set_page_lsn(lsn); }
-                page.set_page_type(PAGE_TYPE_BTREE_LEAF);
+            if let Some(lsn) = new_lsn {
+                page.set_page_lsn(lsn);
+            }
+            page.set_page_type(PAGE_TYPE_BTREE_LEAF);
             page.set_flags(0);
             outcome = Some((None, next_pid));
             Ok(())
@@ -1240,7 +1241,9 @@ impl BPlusTree {
     fn find_leaf_page_id(&self, root_id: PageId, key: &[u8]) -> Result<PageId> {
         let mut curr_id = root_id;
         loop {
-            let route_res = self.bpm.with_page(curr_id, |page| Self::route_internal_page(page, key))?;
+            let route_res = self
+                .bpm
+                .with_page(curr_id, |page| Self::route_internal_page(page, key))?;
             match route_res {
                 Some(child_id) => {
                     curr_id = child_id;
@@ -1458,14 +1461,8 @@ impl BPlusTree {
             if !known_full {
                 let real_pid = self.find_leaf_page_id(root_id, key)?;
                 let _leaf_latch = self.leaf_latches[(real_pid as usize) & 63].lock();
-                let (mutated, _) = self.try_mutate_leaf_in_place(
-                    real_pid,
-                    None,
-                    txn_id,
-                    prev_lsn,
-                    key,
-                    value,
-                )?;
+                let (mutated, _) =
+                    self.try_mutate_leaf_in_place(real_pid, None, txn_id, prev_lsn, key, value)?;
                 if let Some((old_value, next_pid)) = mutated {
                     let high_key = if next_pid == INVALID_PAGE_ID {
                         None
@@ -1474,7 +1471,9 @@ impl BPlusTree {
                     };
                     if next_pid == INVALID_PAGE_ID || high_key.is_some() {
                         THREAD_LEAF_HINTS.with(|hints| {
-                            hints.borrow_mut().insert(self.tree_id, (cur_epoch, real_pid, next_pid, high_key));
+                            hints
+                                .borrow_mut()
+                                .insert(self.tree_id, (cur_epoch, real_pid, next_pid, high_key));
                         });
                     }
                     return Ok(old_value);
@@ -1509,12 +1508,16 @@ impl BPlusTree {
                 let high_key = if next_pid == INVALID_PAGE_ID {
                     None
                 } else {
-                    self.read_node(next_pid).ok().and_then(|n| n.keys.first().cloned())
+                    self.read_node(next_pid)
+                        .ok()
+                        .and_then(|n| n.keys.first().cloned())
                 };
                 if next_pid == INVALID_PAGE_ID || high_key.is_some() {
                     THREAD_LEAF_HINTS.with(|hints| {
                         let ep = self.hint_epoch.load(std::sync::atomic::Ordering::Acquire);
-                    hints.borrow_mut().insert(self.tree_id, (ep, pid, next_pid, high_key));
+                        hints
+                            .borrow_mut()
+                            .insert(self.tree_id, (ep, pid, next_pid, high_key));
                     });
                 }
                 return Ok(old_value);
@@ -1575,12 +1578,16 @@ impl BPlusTree {
             let high_key = if next_pid == INVALID_PAGE_ID {
                 None
             } else {
-                self.read_node(next_pid).ok().and_then(|n| n.keys.first().cloned())
+                self.read_node(next_pid)
+                    .ok()
+                    .and_then(|n| n.keys.first().cloned())
             };
             if next_pid == INVALID_PAGE_ID || high_key.is_some() {
                 THREAD_LEAF_HINTS.with(|hints| {
                     let ep = self.hint_epoch.load(std::sync::atomic::Ordering::Acquire);
-                    hints.borrow_mut().insert(self.tree_id, (ep, pid, next_pid, high_key));
+                    hints
+                        .borrow_mut()
+                        .insert(self.tree_id, (ep, pid, next_pid, high_key));
                 });
             }
             return Ok(old_value);
@@ -1849,7 +1856,9 @@ impl BPlusTree {
             if next_after_right == INVALID_PAGE_ID || right_high.is_some() {
                 let ep = self.hint_epoch.load(std::sync::atomic::Ordering::Acquire);
                 THREAD_LEAF_HINTS.with(|hints| {
-                    hints.borrow_mut().insert(self.tree_id, (ep, right_pid, next_after_right, right_high));
+                    hints
+                        .borrow_mut()
+                        .insert(self.tree_id, (ep, right_pid, next_after_right, right_high));
                 });
             }
         }
@@ -2001,7 +2010,8 @@ impl BPlusTree {
     pub fn delete_logged(&self, txn_id: TxnId, prev_lsn: &mut Lsn, key: &[u8]) -> Result<bool> {
         let _op_guard = self.bpm.acquire_op_shared();
         let mut root_guard = self.root_page_id.write();
-        self.hint_epoch.fetch_add(1, std::sync::atomic::Ordering::Release);
+        self.hint_epoch
+            .fetch_add(1, std::sync::atomic::Ordering::Release);
         THREAD_LEAF_HINTS.with(|hints| {
             hints.borrow_mut().remove(&self.tree_id);
         });
@@ -2030,7 +2040,8 @@ impl BPlusTree {
         }
         let _op_guard = self.bpm.acquire_op_shared();
         let mut root_guard = self.root_page_id.write();
-        self.hint_epoch.fetch_add(1, std::sync::atomic::Ordering::Release);
+        self.hint_epoch
+            .fetch_add(1, std::sync::atomic::Ordering::Release);
         THREAD_LEAF_HINTS.with(|hints| {
             hints.borrow_mut().remove(&self.tree_id);
         });
@@ -2571,9 +2582,9 @@ impl BPlusTree {
         if let Some(ref wal) = self.wal
             && txn_id != 0
         {
-            let old_payload = self
-                .bpm
-                .with_page(page_id, |page| Ok(page.data[PAGE_HEADER_SIZE..PAGE_SIZE].to_vec()))?;
+            let old_payload = self.bpm.with_page(page_id, |page| {
+                Ok(page.data[PAGE_HEADER_SIZE..PAGE_SIZE].to_vec())
+            })?;
 
             let mut empty_payload = vec![0u8; PAGE_SIZE - PAGE_HEADER_SIZE];
             empty_payload[0] = NODE_KIND_FREE;

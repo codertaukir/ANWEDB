@@ -28,9 +28,12 @@ fn rebalance_internal_child_read_failure_leaves_children_and_wal_untouched() {
     let tree =
         BPlusTree::create_logged(bpm.clone(), Some(wal.clone()), max_keys, 1, &mut prev).unwrap();
     for i in 0..80u64 {
-        tree.insert_logged(1, &mut prev, &k8(i), &[5u8; 16]).unwrap();
+        tree.insert_logged(1, &mut prev, &k8(i), &[5u8; 16])
+            .unwrap();
     }
-    let c = wal.append_record(LogRecord::new_commit(0, 1, prev)).unwrap();
+    let c = wal
+        .append_record(LogRecord::new_commit(0, 1, prev))
+        .unwrap();
     wal.flush_up_to(c).unwrap();
     bpm.flush_all().unwrap();
 
@@ -97,14 +100,19 @@ fn free_btree_page_wal_failure_leaves_zero_pin_leaks_and_page_unfreed() {
     let tree =
         BPlusTree::create_logged(bpm.clone(), Some(wal.clone()), max_keys, 1, &mut prev).unwrap();
     for i in 0..10u64 {
-        tree.insert_logged(1, &mut prev, &k8(i), &[3u8; 16]).unwrap();
+        tree.insert_logged(1, &mut prev, &k8(i), &[3u8; 16])
+            .unwrap();
     }
-    let c = wal.append_record(LogRecord::new_commit(0, 1, prev)).unwrap();
+    let c = wal
+        .append_record(LogRecord::new_commit(0, 1, prev))
+        .unwrap();
     wal.flush_up_to(c).unwrap();
 
     // Sweep fail_append_after across deletes that trigger leaf merges (free_btree_page).
     for fail_after in 0..8 {
-        let mut prev_t = wal.append_record(LogRecord::new_begin(0, 10 + fail_after as u64)).unwrap();
+        let mut prev_t = wal
+            .append_record(LogRecord::new_begin(0, 10 + fail_after as u64))
+            .unwrap();
         wal.set_fail_append_after(fail_after);
         let res = tree.delete_logged(10 + fail_after as u64, &mut prev_t, &k8(9));
         wal.set_fail_append_after(-1);

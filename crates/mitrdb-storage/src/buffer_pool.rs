@@ -330,7 +330,9 @@ impl BufferPoolManager {
                 if let Some(victim_idx) = popped_free {
                     let (new_page_id, new_page) = self.disk_manager.allocate_page(page_type)?;
                     let mut target_shard = self.page_tables[shard_of(new_page_id)].write().unwrap();
-                    if let std::collections::hash_map::Entry::Vacant(entry) = target_shard.entry(new_page_id) {
+                    if let std::collections::hash_map::Entry::Vacant(entry) =
+                        target_shard.entry(new_page_id)
+                    {
                         let mut frame = self.frames[victim_idx].write().unwrap();
                         frame.page = new_page.clone();
                         frame.page_id = Some(new_page_id);
@@ -348,11 +350,7 @@ impl BufferPoolManager {
             let mut deferred_txns = self.deferred_free_txns.lock().unwrap();
             let mut shards = self.lock_all_shards_write();
 
-            self.process_deferred_free_txns_locked(
-                &mut deferred_txns,
-                &mut shards,
-                None,
-            )?;
+            self.process_deferred_free_txns_locked(&mut deferred_txns, &mut shards, None)?;
 
             let mut resident_pids: Vec<(PageId, usize)> = Vec::new();
             for s in shards.iter() {
@@ -373,7 +371,9 @@ impl BufferPoolManager {
                             deferred_txns.push(0);
                         }
                     }
-                } else if frame.is_dirty.load(Ordering::Acquire) && (frame.page.flags() & PAGE_FLAG_FREE) == 0 {
+                } else if frame.is_dirty.load(Ordering::Acquire)
+                    && (frame.page.flags() & PAGE_FLAG_FREE) == 0
+                {
                     self.disk_manager.unmark_page_free(pid);
                 } else {
                     frame.page_id = None;
@@ -506,11 +506,7 @@ impl BufferPoolManager {
         let _op_guard = self.acquire_op_shared();
         let mut deferred_txns = self.deferred_free_txns.lock().unwrap();
         let mut shards = self.lock_all_shards_write();
-        self.process_deferred_free_txns_locked(
-            &mut deferred_txns,
-            &mut shards,
-            Some(txn_id),
-        )
+        self.process_deferred_free_txns_locked(&mut deferred_txns, &mut shards, Some(txn_id))
     }
 
     fn process_deferred_free_txns_locked(

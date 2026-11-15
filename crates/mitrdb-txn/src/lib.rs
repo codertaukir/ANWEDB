@@ -343,7 +343,9 @@ pub struct LockManager {
 impl LockManager {
     pub fn new() -> Self {
         LockManager {
-            point_shards: Box::new(std::array::from_fn(|_| Mutex::new(PointLockShard::default()))),
+            point_shards: Box::new(std::array::from_fn(|_| {
+                Mutex::new(PointLockShard::default())
+            })),
             active_slow_locks: AtomicUsize::new(0),
             state: Mutex::new(LockManagerState::new()),
             cv: Condvar::new(),
@@ -359,7 +361,10 @@ impl LockManager {
             for (skey, owner) in shard.locks.drain() {
                 let lkey = LockKey::Key(skey);
                 state.index_lock_key(&lkey);
-                let entry = state.locks.entry(lkey.clone()).or_insert_with(LockEntry::new);
+                let entry = state
+                    .locks
+                    .entry(lkey.clone())
+                    .or_insert_with(LockEntry::new);
                 entry.shared_holders.remove(&owner);
                 entry.exclusive_holder = Some(owner);
                 state.by_txn.entry(owner).or_default().insert(lkey);
@@ -826,7 +831,11 @@ impl LockManager {
     pub fn has_active_prefix_locks(&self, prefix: &[u8; 8]) -> bool {
         for shard_mutex in self.point_shards.iter() {
             let shard = shard_mutex.lock();
-            if shard.locks.keys().any(|k| k.len() >= 8 && &k[..8] == prefix) {
+            if shard
+                .locks
+                .keys()
+                .any(|k| k.len() >= 8 && &k[..8] == prefix)
+            {
                 return true;
             }
         }
@@ -1050,7 +1059,9 @@ impl TxnManager {
             lock_manager: Arc::new(LockManager::new()),
             txn_shards: Box::new(std::array::from_fn(|_| Mutex::new(HashMap::new()))),
             poisoned_commits: std::sync::atomic::AtomicUsize::new(0),
-            mvcc_shards: Box::new(std::array::from_fn(|_| Mutex::new(MvccVersionStore::default()))),
+            mvcc_shards: Box::new(std::array::from_fn(|_| {
+                Mutex::new(MvccVersionStore::default())
+            })),
             chain_epoch: AtomicU64::new(0),
         }
     }
@@ -1077,7 +1088,9 @@ impl TxnManager {
             lock_manager: Arc::new(LockManager::new()),
             txn_shards: Box::new(std::array::from_fn(|_| Mutex::new(HashMap::new()))),
             poisoned_commits: std::sync::atomic::AtomicUsize::new(0),
-            mvcc_shards: Box::new(std::array::from_fn(|_| Mutex::new(MvccVersionStore::default()))),
+            mvcc_shards: Box::new(std::array::from_fn(|_| {
+                Mutex::new(MvccVersionStore::default())
+            })),
             chain_epoch: AtomicU64::new(0),
         }
     }
@@ -1186,7 +1199,9 @@ impl TxnManager {
         if self.lock_manager.has_active_prefix_locks(&prefix) {
             return true;
         }
-        shards.iter().any(|v| Self::has_active_tree_references_locked(&prefix, tid, v, &txns))
+        shards
+            .iter()
+            .any(|v| Self::has_active_tree_references_locked(&prefix, tid, v, &txns))
     }
 
     pub fn purge_tree_state(&self, tree: &Arc<BPlusTree>) -> Result<()> {
@@ -1212,7 +1227,9 @@ impl TxnManager {
         let mut txns = self.lock_all_txn_shards();
         for (prefix, tid) in &scoped {
             if self.lock_manager.has_active_prefix_locks(prefix)
-                || shards.iter().any(|v| Self::has_active_tree_references_locked(prefix, *tid, v, &txns))
+                || shards
+                    .iter()
+                    .any(|v| Self::has_active_tree_references_locked(prefix, *tid, v, &txns))
             {
                 return Err(Error::WriteConflict(
                     "Cannot purge tree state while referenced by an active transaction".to_string(),
@@ -1275,7 +1292,10 @@ impl TxnManager {
     }
 
     pub fn isolation_level(&self, txn_id: TxnId) -> Option<IsolationLevel> {
-        self.txn_shard(txn_id).lock().get(&txn_id).map(|t| t.isolation)
+        self.txn_shard(txn_id)
+            .lock()
+            .get(&txn_id)
+            .map(|t| t.isolation)
     }
 
     pub fn txn_state(&self, txn_id: TxnId) -> Option<TxnState> {
@@ -1359,84 +1379,84 @@ impl TxnManager {
         let mut keys_cleared = 0usize;
 
         for versions in shards.iter_mut() {
-        for chain in versions.values_mut() {
-            if chain.is_empty() {
-                continue;
-            }
+            for chain in versions.values_mut() {
+                if chain.is_empty() {
+                    continue;
+                }
 
-            let has_in_flight_abort = chain.iter().any(|v| {
-                let xmin_rb = v.xmin != 0
-                    && txns
-                        .get(&v.xmin)
-                        .is_some_and(|c| c.in_rollback || c.state == TxnState::Committing);
-                let xmax_rb = v.xmax.is_some_and(|xmax| {
-                    txns.get(&xmax)
-                        .is_some_and(|c| c.in_rollback || c.state == TxnState::Committing)
+                let has_in_flight_abort = chain.iter().any(|v| {
+                    let xmin_rb = v.xmin != 0
+                        && txns
+                            .get(&v.xmin)
+                            .is_some_and(|c| c.in_rollback || c.state == TxnState::Committing);
+                    let xmax_rb = v.xmax.is_some_and(|xmax| {
+                        txns.get(&xmax)
+                            .is_some_and(|c| c.in_rollback || c.state == TxnState::Committing)
+                    });
+                    xmin_rb || xmax_rb
                 });
-                xmin_rb || xmax_rb
-            });
-            if has_in_flight_abort {
-                continue;
-            }
-
-            let before_abort_clean = chain.len();
-            chain.retain(|v| {
-                if v.xmin == 0 {
-                    return true;
+                if has_in_flight_abort {
+                    continue;
                 }
-                !txns
-                    .get(&v.xmin)
-                    .is_some_and(|c| c.state == TxnState::Aborted && !c.in_rollback)
-            });
-            versions_pruned += before_abort_clean - chain.len();
 
-            for v in chain.iter_mut() {
-                if let Some(xmax) = v.xmax
-                    && txns
-                        .get(&xmax)
+                let before_abort_clean = chain.len();
+                chain.retain(|v| {
+                    if v.xmin == 0 {
+                        return true;
+                    }
+                    !txns
+                        .get(&v.xmin)
                         .is_some_and(|c| c.state == TxnState::Aborted && !c.in_rollback)
-                {
-                    v.xmax = None;
+                });
+                versions_pruned += before_abort_clean - chain.len();
+
+                for v in chain.iter_mut() {
+                    if let Some(xmax) = v.xmax
+                        && txns
+                            .get(&xmax)
+                            .is_some_and(|c| c.state == TxnState::Aborted && !c.in_rollback)
+                    {
+                        v.xmax = None;
+                    }
+                }
+
+                let before_prune = chain.len();
+                chain.retain(|v| {
+                    let Some(xmax) = v.xmax else {
+                        return true;
+                    };
+                    if let Some(deleter) = txns.get(&xmax)
+                        && let TxnState::Committed { commit_ts } = deleter.state
+                    {
+                        commit_ts > horizon_ts
+                    } else {
+                        true
+                    }
+                });
+                versions_pruned += before_prune - chain.len();
+
+                if chain.len() == 1 && chain[0].xmax.is_none() {
+                    let can_collapse = if chain[0].xmin == 0 {
+                        chain[0].value.is_some()
+                    } else if let Some(creator) = txns.get(&chain[0].xmin)
+                        && let TxnState::Committed { commit_ts } = creator.state
+                    {
+                        commit_ts <= horizon_ts
+                    } else {
+                        false
+                    };
+
+                    if can_collapse {
+                        chain.clear();
+                        versions_pruned += 1;
+                    }
                 }
             }
 
-            let before_prune = chain.len();
-            chain.retain(|v| {
-                let Some(xmax) = v.xmax else {
-                    return true;
-                };
-                if let Some(deleter) = txns.get(&xmax)
-                    && let TxnState::Committed { commit_ts } = deleter.state
-                {
-                    commit_ts > horizon_ts
-                } else {
-                    true
-                }
-            });
-            versions_pruned += before_prune - chain.len();
-
-            if chain.len() == 1 && chain[0].xmax.is_none() {
-                let can_collapse = if chain[0].xmin == 0 {
-                    chain[0].value.is_some()
-                } else if let Some(creator) = txns.get(&chain[0].xmin)
-                    && let TxnState::Committed { commit_ts } = creator.state
-                {
-                    commit_ts <= horizon_ts
-                } else {
-                    false
-                };
-
-                if can_collapse {
-                    chain.clear();
-                    versions_pruned += 1;
-                }
-            }
-        }
-
-        let before_keys = versions.len();
-        versions.retain(|_, chain| !chain.is_empty());
-        keys_cleared += before_keys - versions.len();
-        versions.rebuild_tree_index();
+            let before_keys = versions.len();
+            versions.retain(|_, chain| !chain.is_empty());
+            keys_cleared += before_keys - versions.len();
+            versions.rebuild_tree_index();
         }
 
         if versions_pruned > 0 || keys_cleared > 0 {
@@ -1757,7 +1777,9 @@ impl TxnManager {
             let mvcc_index_keys_inspected = {
                 let mut inspected = 0usize;
                 for s in self.mvcc_shards.iter() {
-                    inspected += s.lock().extend_keys_in_range(prefix, range, &mut candidate_keys);
+                    inspected += s
+                        .lock()
+                        .extend_keys_in_range(prefix, range, &mut candidate_keys);
                 }
                 GLOBAL_METRICS.record_mvcc_entries_inspected(inspected as u64);
                 inspected
@@ -1949,7 +1971,9 @@ impl TxnManager {
         {
             let mut inspected = 0usize;
             for s in self.mvcc_shards.iter() {
-                inspected += s.lock().extend_keys_in_range(prefix, &KeyRange::full(), &mut candidate_keys);
+                inspected +=
+                    s.lock()
+                        .extend_keys_in_range(prefix, &KeyRange::full(), &mut candidate_keys);
             }
             GLOBAL_METRICS.record_mvcc_entries_inspected(inspected as u64);
         }
@@ -2265,7 +2289,9 @@ impl TxnManager {
         let skey = Self::scoped_key(tree, key);
 
         let lock_started = profiling.then(std::time::Instant::now);
-        let lock_delta_opt = self.lock_manager.acquire_point_exclusive_sharded(txn_id, &skey)?;
+        let lock_delta_opt = self
+            .lock_manager
+            .acquire_point_exclusive_sharded(txn_id, &skey)?;
         if let Some(started) = lock_started {
             mitrdb_observe::record_profile_duration(
                 mitrdb_observe::ProfilePhase::LockAcquire,
@@ -2328,7 +2354,8 @@ impl TxnManager {
                             )));
                         }
                         TxnState::Committed { commit_ts }
-                            if isolation != IsolationLevel::ReadCommitted && commit_ts > read_ts =>
+                            if isolation != IsolationLevel::ReadCommitted
+                                && commit_ts > read_ts =>
                         {
                             return Err(Error::WriteConflict(format!(
                                 "First-committer-wins conflict with transaction {}",
@@ -2342,7 +2369,9 @@ impl TxnManager {
                 // Register uncommitted version in MVCC chain BEFORE mutating B-Tree
                 // so concurrent scans never interpret this in-flight key as an old committed baseline.
                 let chain = versions.entry(skey.clone()).or_default();
-                if let Some(prev) = chain.last_mut() && prev.xmax.is_none() {
+                if let Some(prev) = chain.last_mut()
+                    && prev.xmax.is_none()
+                {
                     if prev.xmin == txn_id {
                         prev.value = new_value.map(|v| v.to_vec());
                     } else {
@@ -2390,11 +2419,14 @@ impl TxnManager {
                 && chain.len() == 1
                 && chain[0].xmin == txn_id
             {
-                chain.insert(0, VersionedValue {
-                    xmin: 0,
-                    xmax: Some(txn_id),
-                    value: Some(baseline.clone()),
-                });
+                chain.insert(
+                    0,
+                    VersionedValue {
+                        xmin: 0,
+                        xmax: Some(txn_id),
+                        value: Some(baseline.clone()),
+                    },
+                );
             }
             drop(versions);
             if let Some(started) = version_chain_started {
@@ -2419,7 +2451,15 @@ impl TxnManager {
         })();
 
         if res.is_err() {
-            if let Some(d) = lock_delta_opt { self.lock_manager.rollback_delta(txn_id, d); } else { let idx = lock_shard_idx(&skey); let mut sh = self.lock_manager.point_shards[idx].lock(); if sh.locks.get(&skey) == Some(&txn_id) { sh.locks.remove(&skey); } }
+            if let Some(d) = lock_delta_opt {
+                self.lock_manager.rollback_delta(txn_id, d);
+            } else {
+                let idx = lock_shard_idx(&skey);
+                let mut sh = self.lock_manager.point_shards[idx].lock();
+                if sh.locks.get(&skey) == Some(&txn_id) {
+                    sh.locks.remove(&skey);
+                }
+            }
         }
         res
     }

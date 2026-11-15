@@ -4,7 +4,6 @@ use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
-
 use std::os::unix::io::AsRawFd;
 
 use mitrdb_common::{Error, INVALID_LSN, Lsn, MAGIC_BYTES, PageId, Result, TxnId};
@@ -1221,7 +1220,9 @@ impl WalManager {
             let next_lsn = assigned_lsn
                 .checked_add(1)
                 .ok_or_else(|| Error::WalCorrupted("LSN overflow".to_string()))?;
-            if record.prev_lsn == INVALID_LSN && last_lsn != INVALID_LSN { record.prev_lsn = last_lsn; }
+            if record.prev_lsn == INVALID_LSN && last_lsn != INVALID_LSN {
+                record.prev_lsn = last_lsn;
+            }
             record.lsn = assigned_lsn;
             let rec_len = record.serialized_size() as u64;
 
@@ -1240,10 +1241,9 @@ impl WalManager {
             let max_seg_bytes = inner.max_segment_bytes;
             let should_rotate = {
                 let active = inner.segments.last().unwrap();
-                let projected = active
-                    .planned_bytes
-                    .checked_add(rec_len)
-                    .ok_or_else(|| Error::WalCorrupted("Segment byte count overflow".to_string()))?;
+                let projected = active.planned_bytes.checked_add(rec_len).ok_or_else(|| {
+                    Error::WalCorrupted("Segment byte count overflow".to_string())
+                })?;
                 active.planned_bytes > 0 && projected > max_seg_bytes
             };
 
@@ -1266,10 +1266,10 @@ impl WalManager {
 
             let seg_id = {
                 let active = inner.segments.last_mut().unwrap();
-                active.planned_bytes = active
-                    .planned_bytes
-                    .checked_add(rec_len)
-                    .ok_or_else(|| Error::WalCorrupted("Segment byte count overflow".to_string()))?;
+                active.planned_bytes =
+                    active.planned_bytes.checked_add(rec_len).ok_or_else(|| {
+                        Error::WalCorrupted("Segment byte count overflow".to_string())
+                    })?;
                 if active.first_lsn.is_none() {
                     active.first_lsn = Some(assigned_lsn);
                 }

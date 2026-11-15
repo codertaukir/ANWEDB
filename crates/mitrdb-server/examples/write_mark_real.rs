@@ -77,7 +77,10 @@ fn main() -> Result<(), String> {
             let kk = k as u64;
             eprintln!(
                 "THR{ti} per-op ns: wall={} cpu={} runq={} blocked={}",
-                wall_ns / kk, cpu / kk, runq / kk, blocked / kk
+                wall_ns / kk,
+                cpu / kk,
+                runq / kk,
+                blocked / kk
             );
             Ok(())
         }));
@@ -107,13 +110,36 @@ fn main() -> Result<(), String> {
 
     let snap = mitrdb_observe::profile_snapshot();
     let phase_names = [
-        "ParsePlan", "PlanExecution", "InsertExecution", "TxnPut", "TxnCommit",
-        "WalAppend", "WalFlush", "LockAcquire", "MvccMutexWait", "TxnMutexWait",
-        "BtreeMutation", "VersionChainMutation", "BtreeTraversal", "BtreePageWrite",
-        "BtreeLeafSplit", "BtreeInternalSplit", "BufferPoolFetch", "BufferPoolDiskRead",
-        "SplitMidSelection", "SplitPageAllocation", "SplitRedistribution", "SplitParentUpdate",
-        "LockMutexWait", "LockTableScan", "LockBookkeeping", "LockConditionWait",
-        "BufferPoolNewPage", "BufferPoolVictimSelect", "BufferPoolDiskAllocate", "BufferPoolUnpin"
+        "ParsePlan",
+        "PlanExecution",
+        "InsertExecution",
+        "TxnPut",
+        "TxnCommit",
+        "WalAppend",
+        "WalFlush",
+        "LockAcquire",
+        "MvccMutexWait",
+        "TxnMutexWait",
+        "BtreeMutation",
+        "VersionChainMutation",
+        "BtreeTraversal",
+        "BtreePageWrite",
+        "BtreeLeafSplit",
+        "BtreeInternalSplit",
+        "BufferPoolFetch",
+        "BufferPoolDiskRead",
+        "SplitMidSelection",
+        "SplitPageAllocation",
+        "SplitRedistribution",
+        "SplitParentUpdate",
+        "LockMutexWait",
+        "LockTableScan",
+        "LockBookkeeping",
+        "LockConditionWait",
+        "BufferPoolNewPage",
+        "BufferPoolVictimSelect",
+        "BufferPoolDiskAllocate",
+        "BufferPoolUnpin",
     ];
     println!("--- PROFILE BREAKDOWN ---");
     let mut recorded: Vec<(u64, &str, u64)> = Vec::new();
@@ -125,8 +151,15 @@ fn main() -> Result<(), String> {
     recorded.sort_by_key(|a| std::cmp::Reverse(a.0));
     for (total_ns, name, count) in recorded {
         let ms = total_ns as f64 / 1_000_000.0;
-        let avg_us = if count > 0 { (total_ns as f64 / count as f64) / 1_000.0 } else { 0.0 };
-        println!("{:<24} | Total: {:>8.2} ms | Count: {:>8} | Avg: {:>6.2} µs", name, ms, count, avg_us);
+        let avg_us = if count > 0 {
+            (total_ns as f64 / count as f64) / 1_000.0
+        } else {
+            0.0
+        };
+        println!(
+            "{:<24} | Total: {:>8.2} ms | Count: {:>8} | Avg: {:>6.2} µs",
+            name, ms, count, avg_us
+        );
     }
     println!("-------------------------");
     for tid in tids {
@@ -136,7 +169,6 @@ fn main() -> Result<(), String> {
     let _ = std::fs::remove_dir_all(dir);
     Ok(())
 }
-
 
 fn sched() -> (u64, u64) {
     let s = std::fs::read_to_string("/proc/thread-self/schedstat").unwrap_or_default();
