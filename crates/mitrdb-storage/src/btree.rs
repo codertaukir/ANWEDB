@@ -603,6 +603,28 @@ impl BPlusTree {
         let mut is_full = false;
         let mut wal_err: Option<Error> = None;
 
+        // Read the next leaf's first key BEFORE taking this leaf's frame write lock:
+        // pinning another page while holding a frame lock can self-deadlock in eviction.
+        let pre_next: Option<(PageId, Option<Vec<u8>>)> = if hint_check.is_none() {
+            let np = self.bpm.with_page(pid, |page| {
+                let buf = &page.data[PAGE_HEADER_SIZE..PAGE_SIZE];
+                if buf.len() < 18 || buf[0] != NODE_KIND_LEAF {
+                    return Ok(None);
+                }
+                Ok(Some(u32::from_le_bytes([buf[12], buf[13], buf[14], buf[15]])))
+            })?;
+            np.map(|np| {
+                let hk = if np != INVALID_PAGE_ID {
+                    self.read_first_key_zero_copy(np)
+                } else {
+                    None
+                };
+                (np, hk)
+            })
+        } else {
+            None
+        };
+
         self.bpm.mutate_page(pid, |page| {
             let cur_ptype = page.page_type();
             let cur_lsn = page.page_lsn();
@@ -634,10 +656,15 @@ impl BPlusTree {
                     return Ok(());
                 }
             } else if next_pid != INVALID_PAGE_ID {
-                if let Some(hk) = self.read_first_key_zero_copy(next_pid) {
-                    if key >= hk.as_slice() {
-                        return Ok(());
+                match &pre_next {
+                    Some((pn, hk)) if *pn == next_pid => {
+                        if let Some(hk) = hk {
+                            if key >= hk.as_slice() {
+                                return Ok(());
+                            }
+                        }
                     }
+                    _ => return Ok(()),
                 }
             }
 
