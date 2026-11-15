@@ -498,6 +498,7 @@ impl Table<'_> {
         }
 
         let names: Vec<&str> = schema.columns.iter().map(|c| c.name.as_str()).collect();
+        let _fk_guard = self.fk_guard(false)?;
         self.check_fks(&names, &values)?;
         self.check_checks(&names, &values)?;
 
@@ -596,6 +597,9 @@ fn ensure_internal(server: &Server, name: &str, spec: &str) -> Result<()> {
 
 const FK_TABLE: &str = "mitrdb_fk";
 
+/// Serializes FK check + write (child insert/update, parent delete) within this process.
+static FK_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn txt(v: &Value) -> String {
     match v {
         Value::Text(s) => s.clone(),
@@ -676,6 +680,19 @@ impl Table<'_> {
             ],
         )?;
         Ok(())
+    }
+
+    /// Lock held across FK check + write. None when this table has no FK role (no cost).
+    fn fk_guard(&self, as_parent: bool) -> Result<Option<std::sync::MutexGuard<'static, ()>>> {
+        let involved = if as_parent {
+            !self.fks_of_parent()?.is_empty()
+        } else {
+            !self.fks_of_child()?.is_empty()
+        };
+        if !involved {
+            return Ok(None);
+        }
+        Ok(Some(FK_LOCK.lock().unwrap_or_else(|e| e.into_inner())))
     }
 
     fn fk_rows(&self, by: &str, outs: &[&str]) -> Result<Vec<(String, String, String)>> {
@@ -1105,6 +1122,7 @@ impl Update<'_> {
         }
 
         let known = |c: &str| schema.columns.iter().any(|x| x.name == c);
+        let _fk_guard = self.server.table(&self.table).fk_guard(false)?;
         {
             let names: Vec<&str> = self.sets.iter().map(|(n, _)| n.as_str()).collect();
             let vals: Vec<Value> = self.sets.iter().map(|(_, v)| v.clone()).collect();
@@ -1147,6 +1165,7 @@ impl Delete<'_> {
         let known = |c: &str| schema.columns.iter().any(|x| x.name == c);
         let mut params: Vec<Value> = Vec::new();
         let wh = where_sql(&known, &self.conds, &mut params)?;
+        let _fk_guard = self.server.table(&self.table).fk_guard(true)?;
         {
             let t = self.server.table(&self.table);
             for (ctbl, ccol, pcol) in t.fks_of_parent()? {
