@@ -65,3 +65,7 @@ Status tracker. `[x]` = done and measured/tested, `[ ]` = pending.
 - [x] Auto id kabhi reuse nahi hoti: `mitrdb_seq` counter table, CAS update (52d3cab)
 - [x] Perf A/B (write_mark_real 4T, 10 round): OLD 2cf6b66 248.5k vs NEW 245.0k ops/s (-1.4%, noise). Purana 73k vs 368k fark = noisy machine, engine regression nahi
 - [ ] Baaki: default values (Rust `Default` se kaam chalta hai), foreign key, CHECK, savepoints, native Timestamp/Float DataType, non-hint path A/B
+- [x] SAVEPOINT / ROLLBACK TO / RELEASE: `TransactionContext.savepoints`, `write_mark` + `rollback_to_mark` par based, COMMIT/ROLLBACK par khud saaf (c36e383)
+- [x] Foreign key (RESTRICT): `#[col(references = "table.col")]`, `Table::add_foreign_key`, defs `mitrdb_fk` mein, catalog format untouched. Limit: sirf Table/ORM API enforce karta hai, raw SQL bypass, check+write atomic nahi (353fbac)
+- [x] CHECK: `#[col(check = ">= 0")]`, `Table::add_check`, defs `mitrdb_check` mein, insert/update par, NULL pass, purani rows verify nahi. f64 column par mat lagao (55b1a5f)
+- [x] Perf A/B #2 (write_mark_real 4T, 12 round): OLD 2cf6b66 82.1k vs NEW 83.9k ops/s (+2.2%, noise). Absolute numbers machine load se badalte hain, sirf relative dekho
