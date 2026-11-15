@@ -152,12 +152,39 @@ files.delete(&saved.name)?;
 
 Files get random 32-character names, are written to a temp file and renamed, and use owner-only permissions. `FileStore` does not limit file size, does not encrypt, and does not delete a file when a row is deleted: that is the caller's job.
 
+### ORM (struct = schema)
+
+The `mitrdb-orm` crate turns a Rust struct into the table schema. No migration files.
+
+```rust
+use mitrdb_orm::*;
+
+#[derive(Model, Debug)]
+struct User {
+    #[col(primary_key, auto)] id: i64,
+    #[col(unique)] email: String,
+    age: Option<i32>,
+    #[col(check = ">= 0")] score: i64,
+    #[col(created_at)] created_at: Timestamp,
+    #[col(updated_at)] updated_at: Timestamp,
+}
+
+db.sync::<User>()?;
+let id = db.insert_get_id(&user)?;
+let adults = db.find(User::age.gt(18)).order_by(User::id).run()?;
+db.update::<User>().set(User::age, 31).filter(User::id.eq(id)).run()?;
+```
+
+Supports auto-increment ids, `created_at`/`updated_at`, `like`, foreign keys (`references = "table.col"`), CHECK, and savepoints.
+See [docs/ORM.md](docs/ORM.md), [docs/LIMITATIONS.md](docs/LIMITATIONS.md) and
+`cargo run --release -p mitrdb-orm --example quickstart`.
+
 ## Limits
 
 Know these before you use MITRDB.
 
 **Data**
-- Types: `INT`, `TEXT`, `BOOL`, `BYTES`.
+- Engine types: `INT`, `TEXT`, `BOOL`, `BYTES`. The ORM maps `Timestamp` and `f64` onto `INT` (see [docs/LIMITATIONS.md](docs/LIMITATIONS.md)).
 - A value can be about 3900 bytes. Bigger values give a clean `OUT_OF_SPACE` error. Store big files outside the database and keep only the path or name in a text column.
 - A `UNIQUE` column allows many `NULL` values; real duplicate values are rejected. All `NULL` rows share one index entry, so concurrent writes of `NULL` into the same unique column run one after another (from code reading, not measured).
 
@@ -169,6 +196,9 @@ Know these before you use MITRDB.
 - Indexes on columns with few distinct values (many rows per value) slow inserts: inserting 100k rows with 1000 distinct indexed values ran about 3x slower and wrote about 9x more WAL than the same insert without the index (measured, one machine).
 - A write that fills the WAL's disk fails with an error and the transaction is marked for recovery; nothing is silently lost. Keep enough free disk space for the WAL.
 - Not supported yet: `DEFAULT`, composite indexes, `LIMIT $n` / `OFFSET $n`.
+- `LIKE` (`%`, `_`) works on text columns: case-sensitive, no escape, always a full scan plus filter.
+- `SAVEPOINT x`, `ROLLBACK TO x`, `RELEASE x` work inside `BEGIN ... COMMIT`.
+- Foreign keys (RESTRICT) and CHECK are enforced by the Table/ORM API only; raw SQL bypasses them. Details in [docs/LIMITATIONS.md](docs/LIMITATIONS.md).
 - One index value can match many rows (tested with thousands): the row list is stored in chunks. Updating or deleting one row of a very large group rewrites part of that group's list, so it gets slower as the group grows (not measured).
 - `ALTER TABLE t DROP [COLUMN] c` (and `table.drop_column("c")`) is a **logical drop**: the column is renamed internally to `__dropped_<pos>` and hidden from `SELECT *`, rows are not rewritten, so the data stays on disk and no space is reclaimed. You cannot drop a primary key column, an indexed column, or the last live column. Column names that start with `__dropped_` are reserved and rejected.
 - `INSERT` can write many rows: `INSERT INTO t VALUES (1,'a'), (2,'b')` (up to 1000 rows). With auto-commit it is all or nothing. Inside an explicit transaction, rows before a failing row stay in that transaction. `INSERT INTO t (b, a) VALUES (...)` also works; columns you leave out become NULL.
