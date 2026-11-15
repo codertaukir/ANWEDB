@@ -324,6 +324,24 @@ impl<M, T: Field> Col<M, T> {
     }
 }
 
+/// Marker: text columns (`String`, `Option<String>`), the only ones that support `like`.
+pub trait TextField: Field {}
+impl TextField for String {}
+impl TextField for Option<String> {}
+
+impl<M, T: TextField> Col<M, T> {
+    /// SQL LIKE: `%` = any run of chars, `_` = any one char. Case-sensitive.
+    /// `User::name.like("a%")`
+    pub fn like(&self, pattern: &str) -> Cond<M> {
+        Cond {
+            col: self.name,
+            op: "like",
+            value: Value::Text(pattern.to_string()),
+            _p: PhantomData,
+        }
+    }
+}
+
 /// Typed query. Conditions are combined with AND.
 pub struct ModelQuery<'a, M> {
     q: Query<'a>,
