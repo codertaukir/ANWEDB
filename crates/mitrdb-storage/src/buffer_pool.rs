@@ -292,31 +292,6 @@ impl BufferPoolManager {
         }
     }
 
-    #[doc(hidden)]
-    pub fn debug_verify_frames_match_disk(&self) -> Vec<String> {
-        let mut bad = Vec::new();
-        for (i, lock) in self.frames.iter().enumerate() {
-            let f = lock.read().unwrap();
-            let Some(pid) = f.page_id else {
-                continue;
-            };
-            let mut mem = f.page.clone();
-            mem.update_checksum();
-            match self.disk_manager.read_page(pid) {
-                Ok(d) if d.as_bytes() == mem.as_bytes() => {}
-                Ok(d) => bad.push(format!(
-                    "frame {i} page {pid}: mem_lsn={} disk_lsn={} dirty={} pins={}",
-                    mem.page_lsn(),
-                    d.page_lsn(),
-                    f.is_dirty.load(Ordering::Acquire),
-                    f.pin_count.load(Ordering::Acquire)
-                )),
-                Err(e) => bad.push(format!("frame {i} page {pid}: disk read err {e:?}")),
-            }
-        }
-        bad
-    }
-
     pub fn mutate_page<F, R>(&self, page_id: PageId, f: F) -> Result<R>
     where
         F: FnOnce(&mut Page) -> Result<R>,
@@ -748,7 +723,7 @@ impl BufferPoolManager {
         self.disk_manager.write_pages_batch(&dirty_batch)?;
         self.disk_manager.sync()?;
         for (frame_idx, _page_id, flushed_lsn) in flushed_meta {
-            let frame = self.frames[frame_idx].write().unwrap();
+            let frame = self.frames[frame_idx].read().unwrap();
             if frame.page.page_lsn() == flushed_lsn {
                 frame.is_dirty.store(false, Ordering::Release);
             }
@@ -792,7 +767,7 @@ impl BufferPoolManager {
         self.disk_manager.write_pages_batch(&dirty_batch)?;
         self.disk_manager.sync()?;
         for (frame_idx, _page_id, flushed_lsn) in flushed_meta {
-            let frame = self.frames[frame_idx].write().unwrap();
+            let frame = self.frames[frame_idx].read().unwrap();
             if frame.page.page_lsn() == flushed_lsn {
                 frame.is_dirty.store(false, Ordering::Release);
             }
