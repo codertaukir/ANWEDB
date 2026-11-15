@@ -310,3 +310,123 @@ impl Orm for Server {
         }
     }
 }
+
+use mitrdb_server::{Delete, Update};
+
+/// Typed update: `db.update::<User>().set(User::age, 26).filter(User::id.eq(1)).run()`.
+pub struct ModelUpdate<'a, M> {
+    u: Update<'a>,
+    _p: PhantomData<fn() -> M>,
+}
+
+impl<M: Model> ModelUpdate<'_, M> {
+    pub fn set<T: Field>(mut self, c: Col<M, T>, v: impl Into<T>) -> Self {
+        self.u = self.u.set(c.name, v.into().to_value());
+        self
+    }
+    pub fn filter(mut self, c: Cond<M>) -> Self {
+        self.u = self.u.filter(c.col, c.op, c.value);
+        self
+    }
+    /// Explicitly update every row (needed when there is no filter).
+    pub fn all(mut self) -> Self {
+        self.u = self.u.all();
+        self
+    }
+    /// Returns how many rows were changed.
+    pub fn run(self) -> Result<usize> {
+        self.u.run()
+    }
+}
+
+/// Typed delete: `db.delete::<User>().filter(User::id.eq(1)).run()`.
+pub struct ModelDelete<'a, M> {
+    d: Delete<'a>,
+    _p: PhantomData<fn() -> M>,
+}
+
+impl<M: Model> ModelDelete<'_, M> {
+    pub fn filter(mut self, c: Cond<M>) -> Self {
+        self.d = self.d.filter(c.col, c.op, c.value);
+        self
+    }
+    /// Explicitly delete every row (needed when there is no filter).
+    pub fn all(mut self) -> Self {
+        self.d = self.d.all();
+        self
+    }
+    /// Returns how many rows were deleted.
+    pub fn run(self) -> Result<usize> {
+        self.d.run()
+    }
+}
+
+/// Write-side and single-row helpers on `Server`.
+pub trait OrmWrite {
+    fn update<M: Model>(&self) -> ModelUpdate<'_, M>;
+    fn delete<M: Model>(&self) -> ModelDelete<'_, M>;
+    /// First matching row, if any.
+    fn find_one<M: Model>(&self, cond: Cond<M>) -> Result<Option<M>>;
+    /// Row with this primary key, if any.
+    fn find_by_id<M: Model, K: Field>(&self, id: K) -> Result<Option<M>>;
+}
+
+impl OrmWrite for Server {
+    fn update<M: Model>(&self) -> ModelUpdate<'_, M> {
+        ModelUpdate {
+            u: self.table(M::TABLE).update(),
+            _p: PhantomData,
+        }
+    }
+    fn delete<M: Model>(&self) -> ModelDelete<'_, M> {
+        ModelDelete {
+            d: self.table(M::TABLE).delete(),
+            _p: PhantomData,
+        }
+    }
+    fn find_one<M: Model>(&self, cond: Cond<M>) -> Result<Option<M>> {
+        Ok(self.find(cond).limit(1).run()?.into_iter().next())
+    }
+    fn find_by_id<M: Model, K: Field>(&self, id: K) -> Result<Option<M>> {
+        let pk = M::COLUMNS
+            .iter()
+            .find(|c| c.primary_key)
+            .ok_or_else(|| err(format!("table '{}' has no primary_key column", M::TABLE)))?;
+        let rows = self
+            .table(M::TABLE)
+            .find()
+            .filter(pk.name, "=", id.to_value())
+            .limit(1)
+            .run()?;
+        match rows.rows.first() {
+            None => Ok(None),
+            Some(r) => M::from_row(&RowRef {
+                columns: &rows.columns,
+                values: r,
+            })
+            .map(Some),
+        }
+    }
+}
+
+impl<M: Model> ModelQuery<'_, M> {
+    /// Number of matching rows. Not allowed together with limit() or offset().
+    pub fn count(self) -> Result<usize> {
+        self.q.count()
+    }
+}
+
+/// `db.count::<User>()` and `db.count_where(User::age.gt(18))`.
+pub trait OrmCount {
+    fn count<M: Model>(&self) -> Result<usize>;
+    fn count_where<M: Model>(&self, cond: Cond<M>) -> Result<usize>;
+}
+
+impl OrmCount for Server {
+    fn count<M: Model>(&self) -> Result<usize> {
+        self.all::<M>().count()
+    }
+    fn count_where<M: Model>(&self, cond: Cond<M>) -> Result<usize> {
+        self.find(cond).count()
+    }
+}
