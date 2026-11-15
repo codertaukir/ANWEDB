@@ -497,6 +497,9 @@ impl Table<'_> {
             values.push(v);
         }
 
+        let names: Vec<&str> = schema.columns.iter().map(|c| c.name.as_str()).collect();
+        self.check_fks(&names, &values)?;
+
         match self
             .server
             .execute_plan(PhysicalPlan::Insert { schema, values })?
@@ -575,6 +578,145 @@ impl Table<'_> {
             }
         }
         Err(bad("auto id: too many conflicts"))
+    }
+}
+
+const FK_TABLE: &str = "mitrdb_fk";
+
+fn txt(v: &Value) -> String {
+    match v {
+        Value::Text(s) => s.clone(),
+        _ => String::new(),
+    }
+}
+
+impl Table<'_> {
+    /// Declare `child_col` -> `parent_tbl.parent_col` (parent col must be the primary key).
+    /// Enforced by Table/ORM insert, update, delete (not by raw SQL). Safe to call again.
+    pub fn add_foreign_key(
+        &self,
+        child_col: &str,
+        parent_tbl: &str,
+        parent_col: &str,
+    ) -> Result<()> {
+        self.check_name()?;
+        if !valid_ident(child_col) || !valid_ident(parent_tbl) || !valid_ident(parent_col) {
+            return Err(bad("bad name in foreign key"));
+        }
+        let cs = self
+            .server
+            .get_table_schema(&self.name)?
+            .ok_or_else(|| bad(format!("table '{}' not found", self.name)))?;
+        let ps = self.server.get_table_schema(parent_tbl)?.ok_or_else(|| {
+            bad(format!(
+                "parent table '{}' not found (sync it first)",
+                parent_tbl
+            ))
+        })?;
+        let cc = cs
+            .columns
+            .iter()
+            .find(|c| c.name == child_col && !c.is_dropped())
+            .ok_or_else(|| bad(format!("unknown column '{}'", child_col)))?;
+        let pc = ps
+            .columns
+            .iter()
+            .find(|c| c.name == parent_col && !c.is_dropped())
+            .ok_or_else(|| bad(format!("unknown parent column '{}'", parent_col)))?;
+        if !pc.is_primary_key {
+            return Err(bad("foreign key must point to the parent's primary key"));
+        }
+        if cc.data_type != pc.data_type {
+            return Err(bad(
+                "foreign key column type differs from parent column type",
+            ));
+        }
+        if cc.data_type == DataType::Bytes {
+            return Err(bad("foreign key on bytes column is not supported"));
+        }
+        self.server.table(FK_TABLE).sync(
+            "id int primary key, child_tbl text not null, child_col text not null, parent_tbl text not null, parent_col text not null",
+        )?;
+        let fk = self.server.table(FK_TABLE);
+        let t = |x: &str| Value::Text(x.to_string());
+        let exists = fk
+            .find()
+            .columns(&["id"])
+            .filter("child_tbl", "=", t(&self.name))
+            .filter("child_col", "=", t(child_col))
+            .filter("parent_tbl", "=", t(parent_tbl))
+            .filter("parent_col", "=", t(parent_col))
+            .limit(1)
+            .run()?;
+        if !exists.rows.is_empty() {
+            return Ok(());
+        }
+        fk.insert_auto(
+            "id",
+            &[
+                ("child_tbl", t(&self.name)),
+                ("child_col", t(child_col)),
+                ("parent_tbl", t(parent_tbl)),
+                ("parent_col", t(parent_col)),
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn fk_rows(&self, by: &str, outs: &[&str]) -> Result<Vec<(String, String, String)>> {
+        if self.name.starts_with("mitrdb_") || self.server.get_table_schema(FK_TABLE)?.is_none() {
+            return Ok(Vec::new());
+        }
+        let r = self
+            .server
+            .table(FK_TABLE)
+            .find()
+            .columns(outs)
+            .filter(by, "=", Value::Text(self.name.clone()))
+            .run()?;
+        Ok(r.rows
+            .iter()
+            .map(|row| (txt(&row[0]), txt(&row[1]), txt(&row[2])))
+            .collect())
+    }
+
+    /// (child_col, parent_tbl, parent_col)
+    fn fks_of_child(&self) -> Result<Vec<(String, String, String)>> {
+        self.fk_rows("child_tbl", &["child_col", "parent_tbl", "parent_col"])
+    }
+
+    /// (child_tbl, child_col, parent_col)
+    fn fks_of_parent(&self) -> Result<Vec<(String, String, String)>> {
+        self.fk_rows("parent_tbl", &["child_tbl", "child_col", "parent_col"])
+    }
+
+    fn check_fks(&self, names: &[&str], values: &[Value]) -> Result<()> {
+        for (ccol, ptbl, pcol) in self.fks_of_child()? {
+            let Some(i) = names.iter().position(|n| *n == ccol) else {
+                continue;
+            };
+            let v = &values[i];
+            if matches!(v, Value::Null) {
+                continue;
+            }
+            let n = self
+                .server
+                .table(&ptbl)
+                .find()
+                .columns(&[pcol.as_str()])
+                .filter(&pcol, "=", v.clone())
+                .limit(1)
+                .run()?
+                .rows
+                .len();
+            if n == 0 {
+                return Err(bad(format!(
+                    "foreign key: {}.{} = {:?} has no row in {}.{}",
+                    self.name, ccol, v, ptbl, pcol
+                )));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -838,6 +980,11 @@ impl Update<'_> {
         }
 
         let known = |c: &str| schema.columns.iter().any(|x| x.name == c);
+        {
+            let names: Vec<&str> = self.sets.iter().map(|(n, _)| n.as_str()).collect();
+            let vals: Vec<Value> = self.sets.iter().map(|(_, v)| v.clone()).collect();
+            self.server.table(&self.table).check_fks(&names, &vals)?;
+        }
         let wh = where_sql(&known, &self.conds, &mut params)?;
         let sql = format!("UPDATE {} SET {}{}", self.table, assigns.join(", "), wh);
         match self.server.execute_sql_params(&sql, &params)? {
@@ -874,6 +1021,37 @@ impl Delete<'_> {
         let known = |c: &str| schema.columns.iter().any(|x| x.name == c);
         let mut params: Vec<Value> = Vec::new();
         let wh = where_sql(&known, &self.conds, &mut params)?;
+        {
+            let t = self.server.table(&self.table);
+            for (ctbl, ccol, pcol) in t.fks_of_parent()? {
+                let mut q = t.find().columns(&[pcol.as_str()]);
+                for (c, o, v) in &self.conds {
+                    q = q.filter(c, o, v.clone());
+                }
+                for row in q.run()?.rows {
+                    let v = row[0].clone();
+                    if matches!(v, Value::Null) {
+                        continue;
+                    }
+                    let used = self
+                        .server
+                        .table(&ctbl)
+                        .find()
+                        .columns(&[ccol.as_str()])
+                        .filter(&ccol, "=", v.clone())
+                        .limit(1)
+                        .run()?
+                        .rows
+                        .len();
+                    if used > 0 {
+                        return Err(bad(format!(
+                            "foreign key: {}.{} = {:?} is still used by {}.{}",
+                            self.table, pcol, v, ctbl, ccol
+                        )));
+                    }
+                }
+            }
+        }
         let sql = format!("DELETE FROM {}{}", self.table, wh);
         match self.server.execute_sql_params(&sql, &params)? {
             ExecutionResult::Affected(n) => Ok(n),

@@ -183,6 +183,7 @@ pub struct ColumnMeta {
     pub unique: bool,
     pub index: bool,
     pub auto: bool,
+    pub references: Option<&'static str>,
 }
 
 impl ColumnMeta {
@@ -195,6 +196,7 @@ impl ColumnMeta {
             unique: false,
             index: false,
             auto: false,
+            references: None,
         }
     }
     pub const fn primary_key(mut self) -> Self {
@@ -207,6 +209,11 @@ impl ColumnMeta {
     }
     pub const fn index(mut self) -> Self {
         self.index = true;
+        self
+    }
+    /// Foreign key: `"table.column"` (parent column must be its primary key).
+    pub const fn references(mut self, r: &'static str) -> Self {
+        self.references = Some(r);
         self
     }
     pub const fn auto(mut self) -> Self {
@@ -396,7 +403,16 @@ pub trait Orm {
 
 impl Orm for Server {
     fn sync<M: Model>(&self) -> Result<Vec<String>> {
-        self.table(M::TABLE).sync(&spec_of(M::COLUMNS))
+        let plan = self.table(M::TABLE).sync(&spec_of(M::COLUMNS))?;
+        for c in M::COLUMNS {
+            if let Some(r) = c.references {
+                let (pt, pc) = r
+                    .split_once('.')
+                    .ok_or_else(|| err("references must look like \"table.column\""))?;
+                self.table(M::TABLE).add_foreign_key(c.name, pt, pc)?;
+            }
+        }
+        Ok(plan)
     }
     fn insert<M: Model>(&self, m: &M) -> Result<usize> {
         match M::AUTO_PK {

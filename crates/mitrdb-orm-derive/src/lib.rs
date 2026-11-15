@@ -69,6 +69,7 @@ fn expand(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
         let ty = &f.ty;
         let (mut pk, mut uq, mut ix, mut au, mut cr, mut up) =
             (false, false, false, false, false, false);
+        let mut rf: Option<String> = None;
         for attr in &f.attrs {
             if attr.path().is_ident("col") {
                 attr.parse_nested_meta(|m| {
@@ -80,6 +81,9 @@ fn expand(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
                         ix = true;
                     } else if m.path.is_ident("auto") {
                         au = true;
+                    } else if m.path.is_ident("references") {
+                        let v: LitStr = m.value()?.parse()?;
+                        rf = Some(v.value());
                     } else if m.path.is_ident("created_at") {
                         cr = true;
                     } else if m.path.is_ident("updated_at") {
@@ -126,6 +130,9 @@ fn expand(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
         }
         if au {
             meta = quote!(#meta.auto());
+        }
+        if let Some(r) = &rf {
+            meta = quote!(#meta.references(#r));
         }
         metas.push(meta);
         to_row.push(quote!((#fname, ::mitrdb_orm::Field::to_value(&self.#ident))));
