@@ -102,6 +102,77 @@ impl<T: Field> Field for Option<T> {
     }
 }
 
+/// f64 is stored as an order-preserving i64 (so `int` column, range filters and order_by work).
+/// -0.0 is stored as 0.0. NaN is rejected by `from_value` only if it cannot round-trip; avoid NaN.
+fn f64_enc(f: f64) -> i64 {
+    let f = if f == 0.0 { 0.0 } else { f };
+    let b = f.to_bits() as i64;
+    if b < 0 { b ^ i64::MAX } else { b }
+}
+fn f64_dec(v: i64) -> f64 {
+    f64::from_bits((if v < 0 { v ^ i64::MAX } else { v }) as u64)
+}
+
+impl Field for f64 {
+    const SQL_TYPE: &'static str = "int";
+    fn to_value(&self) -> Value {
+        Value::Int64(f64_enc(*self))
+    }
+    fn from_value(v: Value) -> Result<Self> {
+        match v {
+            Value::Int64(x) => Ok(f64_dec(x)),
+            _ => Err(err("expected float value")),
+        }
+    }
+}
+
+/// Microseconds since UNIX epoch. Stored as a plain `int` column.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Timestamp(pub i64);
+
+impl Timestamp {
+    pub fn now() -> Self {
+        let d = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+        Timestamp(d.as_micros() as i64)
+    }
+}
+
+impl From<i64> for Timestamp {
+    fn from(x: i64) -> Self {
+        Timestamp(x)
+    }
+}
+
+impl Field for Timestamp {
+    const SQL_TYPE: &'static str = "int";
+    fn to_value(&self) -> Value {
+        Value::Int64(self.0)
+    }
+    fn from_value(v: Value) -> Result<Self> {
+        match v {
+            Value::Int64(x) => Ok(Timestamp(x)),
+            _ => Err(err("expected int value")),
+        }
+    }
+}
+
+/// Row with `created_at` / `updated_at` columns filled with now().
+fn stamped<M: Model>(m: &M) -> Vec<(&'static str, Value)> {
+    let now = Value::Int64(Timestamp::now().0);
+    m.to_row()
+        .into_iter()
+        .map(|(n, v)| {
+            if Some(n) == M::CREATED_AT || Some(n) == M::UPDATED_AT {
+                (n, now.clone())
+            } else {
+                (n, v)
+            }
+        })
+        .collect()
+}
+
 /// Static description of one column (macro will generate these).
 #[derive(Debug, Clone, Copy)]
 pub struct ColumnMeta {
@@ -188,6 +259,8 @@ pub trait Model: Sized {
     const COLUMNS: &'static [ColumnMeta];
     /// Name of the `#[col(auto)]` column, if any.
     const AUTO_PK: Option<&'static str> = None;
+    const CREATED_AT: Option<&'static str> = None;
+    const UPDATED_AT: Option<&'static str> = None;
     fn to_row(&self) -> Vec<(&'static str, Value)>;
     fn from_row(row: &RowRef) -> Result<Self>;
 }
@@ -309,16 +382,16 @@ impl Orm for Server {
     }
     fn insert<M: Model>(&self, m: &M) -> Result<usize> {
         match M::AUTO_PK {
-            None => self.table(M::TABLE).insert(&m.to_row()),
+            None => self.table(M::TABLE).insert(&stamped(m)),
             Some(pk) => {
-                let row: Vec<_> = m.to_row().into_iter().filter(|(n, _)| *n != pk).collect();
+                let row: Vec<_> = stamped(m).into_iter().filter(|(n, _)| *n != pk).collect();
                 self.table(M::TABLE).insert_auto(pk, &row).map(|(_, n)| n)
             }
         }
     }
     fn insert_get_id<M: Model>(&self, m: &M) -> Result<i64> {
         let pk = M::AUTO_PK.ok_or_else(|| err("model has no #[col(auto)] column"))?;
-        let row: Vec<_> = m.to_row().into_iter().filter(|(n, _)| *n != pk).collect();
+        let row: Vec<_> = stamped(m).into_iter().filter(|(n, _)| *n != pk).collect();
         self.table(M::TABLE).insert_auto(pk, &row).map(|(id, _)| id)
     }
     fn find<M: Model>(&self, cond: Cond<M>) -> ModelQuery<'_, M> {
@@ -337,11 +410,15 @@ use mitrdb_server::{Delete, Update};
 /// Typed update: `db.update::<User>().set(User::age, 26).filter(User::id.eq(1)).run()`.
 pub struct ModelUpdate<'a, M> {
     u: Update<'a>,
+    touched: bool,
     _p: PhantomData<fn() -> M>,
 }
 
 impl<M: Model> ModelUpdate<'_, M> {
     pub fn set<T: Field>(mut self, c: Col<M, T>, v: impl Into<T>) -> Self {
+        if Some(c.name) == M::UPDATED_AT {
+            self.touched = true;
+        }
         self.u = self.u.set(c.name, v.into().to_value());
         self
     }
@@ -355,7 +432,10 @@ impl<M: Model> ModelUpdate<'_, M> {
         self
     }
     /// Returns how many rows were changed.
-    pub fn run(self) -> Result<usize> {
+    pub fn run(mut self) -> Result<usize> {
+        if let (Some(n), false) = (M::UPDATED_AT, self.touched) {
+            self.u = self.u.set(n, Value::Int64(Timestamp::now().0));
+        }
         self.u.run()
     }
 }
@@ -396,6 +476,7 @@ impl OrmWrite for Server {
     fn update<M: Model>(&self) -> ModelUpdate<'_, M> {
         ModelUpdate {
             u: self.table(M::TABLE).update(),
+            touched: false,
             _p: PhantomData,
         }
     }
