@@ -184,6 +184,7 @@ pub struct ColumnMeta {
     pub index: bool,
     pub auto: bool,
     pub references: Option<&'static str>,
+    pub check: Option<&'static str>,
 }
 
 impl ColumnMeta {
@@ -197,6 +198,7 @@ impl ColumnMeta {
             index: false,
             auto: false,
             references: None,
+            check: None,
         }
     }
     pub const fn primary_key(mut self) -> Self {
@@ -214,6 +216,11 @@ impl ColumnMeta {
     /// Foreign key: `"table.column"` (parent column must be its primary key).
     pub const fn references(mut self, r: &'static str) -> Self {
         self.references = Some(r);
+        self
+    }
+    /// CHECK conditions joined by `;`, e.g. `">= 0"` or `"like 'A%'"`.
+    pub const fn check(mut self, c: &'static str) -> Self {
+        self.check = Some(c);
         self
     }
     pub const fn auto(mut self) -> Self {
@@ -411,6 +418,12 @@ impl Orm for Server {
                     .ok_or_else(|| err("references must look like \"table.column\""))?;
                 self.table(M::TABLE).add_foreign_key(c.name, pt, pc)?;
             }
+            if let Some(ck) = c.check {
+                for part in ck.split(';') {
+                    let (op, v) = parse_check(part)?;
+                    self.table(M::TABLE).add_check(c.name, op, v)?;
+                }
+            }
         }
         Ok(plan)
     }
@@ -565,4 +578,31 @@ impl OrmCount for Server {
     fn count_where<M: Model>(&self, cond: Cond<M>) -> Result<usize> {
         self.find(cond).count()
     }
+}
+
+/// "<op> <literal>": `>= 0`, `!= 'x'`, `like 'A%'`. Literal = int or 'text'.
+fn parse_check(part: &str) -> Result<(&'static str, Value)> {
+    let t = part.trim();
+    let low = t.to_lowercase();
+    let (op, rest): (&'static str, &str) = if low.starts_with("like ") {
+        ("like", t[5..].trim())
+    } else {
+        let mut found = None;
+        for o in [">=", "<=", "!=", ">", "<", "="] {
+            if let Some(r) = t.strip_prefix(o) {
+                found = Some((o, r.trim()));
+                break;
+            }
+        }
+        found.ok_or_else(|| err(format!("bad check '{t}', expected: <op> <literal>")))?
+    };
+    let v = if let Some(inner) = rest.strip_prefix("'").and_then(|r| r.strip_suffix("'")) {
+        Value::Text(inner.replace("''", "'"))
+    } else {
+        Value::Int64(
+            rest.parse::<i64>()
+                .map_err(|_| err(format!("bad check literal '{rest}'")))?,
+        )
+    };
+    Ok((op, v))
 }

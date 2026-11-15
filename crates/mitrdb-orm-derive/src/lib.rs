@@ -70,6 +70,7 @@ fn expand(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
         let (mut pk, mut uq, mut ix, mut au, mut cr, mut up) =
             (false, false, false, false, false, false);
         let mut rf: Option<String> = None;
+        let mut ck: Vec<String> = Vec::new();
         for attr in &f.attrs {
             if attr.path().is_ident("col") {
                 attr.parse_nested_meta(|m| {
@@ -84,13 +85,16 @@ fn expand(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
                     } else if m.path.is_ident("references") {
                         let v: LitStr = m.value()?.parse()?;
                         rf = Some(v.value());
+                    } else if m.path.is_ident("check") {
+                        let v: LitStr = m.value()?.parse()?;
+                        ck.push(v.value());
                     } else if m.path.is_ident("created_at") {
                         cr = true;
                     } else if m.path.is_ident("updated_at") {
                         up = true;
                     } else {
                         return Err(m.error(
-                            "unknown #[col(..)] option, expected: primary_key, unique, index, auto, created_at, updated_at",
+                            "unknown #[col(..)] option, expected: primary_key, unique, index, auto, created_at, updated_at, references, check",
                         ));
                     }
                     Ok(())
@@ -133,6 +137,10 @@ fn expand(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
         }
         if let Some(r) = &rf {
             meta = quote!(#meta.references(#r));
+        }
+        if !ck.is_empty() {
+            let j = ck.join(";");
+            meta = quote!(#meta.check(#j));
         }
         metas.push(meta);
         to_row.push(quote!((#fname, ::mitrdb_orm::Field::to_value(&self.#ident))));

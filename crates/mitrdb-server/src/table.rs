@@ -499,6 +499,7 @@ impl Table<'_> {
 
         let names: Vec<&str> = schema.columns.iter().map(|c| c.name.as_str()).collect();
         self.check_fks(&names, &values)?;
+        self.check_checks(&names, &values)?;
 
         match self
             .server
@@ -713,6 +714,114 @@ impl Table<'_> {
                 return Err(bad(format!(
                     "foreign key: {}.{} = {:?} has no row in {}.{}",
                     self.name, ccol, v, ptbl, pcol
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
+const CHECK_TABLE: &str = "mitrdb_check";
+
+impl Table<'_> {
+    /// CHECK: `column op literal`, op = `=` `!=` `>` `<` `>=` `<=` `like`. Literal Int64 or Text.
+    /// Enforced on Table/ORM insert and update (NULL passes). Old rows are not verified.
+    pub fn add_check(&self, col: &str, op: &str, value: Value) -> Result<()> {
+        self.check_name()?;
+        let op = op.to_lowercase();
+        if !["=", "!=", ">", "<", ">=", "<=", "like"].contains(&op.as_str()) {
+            return Err(bad(format!("unknown check operator '{}'", op)));
+        }
+        let schema = self
+            .server
+            .get_table_schema(&self.name)?
+            .ok_or_else(|| bad(format!("table '{}' not found", self.name)))?;
+        let c = schema
+            .columns
+            .iter()
+            .find(|c| c.name == col && !c.is_dropped())
+            .ok_or_else(|| bad(format!("unknown column '{}'", col)))?;
+        let (iv, tv) = match (&value, c.data_type) {
+            (Value::Int64(n), DataType::Int64) if op != "like" => (Value::Int64(*n), Value::Null),
+            (Value::Text(x), DataType::Text) => (Value::Null, Value::Text(x.clone())),
+            _ => {
+                return Err(bad(
+                    "check value must match the column type (int or text; like = text)",
+                ));
+            }
+        };
+        self.server.table(CHECK_TABLE).sync(
+            "id int primary key, tbl text not null, col text not null, op text not null, int_val int, text_val text",
+        )?;
+        let ck = self.server.table(CHECK_TABLE);
+        let t = |x: &str| Value::Text(x.to_string());
+        let exists = ck
+            .find()
+            .columns(&["id"])
+            .filter("tbl", "=", t(&self.name))
+            .filter("col", "=", t(col))
+            .filter("op", "=", t(&op))
+            .filter("int_val", "=", iv.clone())
+            .filter("text_val", "=", tv.clone())
+            .limit(1)
+            .run()?;
+        if !exists.rows.is_empty() {
+            return Ok(());
+        }
+        ck.insert_auto(
+            "id",
+            &[
+                ("tbl", t(&self.name)),
+                ("col", t(col)),
+                ("op", t(&op)),
+                ("int_val", iv),
+                ("text_val", tv),
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn check_checks(&self, names: &[&str], values: &[Value]) -> Result<()> {
+        if self.name.starts_with("mitrdb_") || self.server.get_table_schema(CHECK_TABLE)?.is_none()
+        {
+            return Ok(());
+        }
+        let r = self
+            .server
+            .table(CHECK_TABLE)
+            .find()
+            .columns(&["col", "op", "int_val", "text_val"])
+            .filter("tbl", "=", Value::Text(self.name.clone()))
+            .run()?;
+        for row in r.rows {
+            let col = txt(&row[0]);
+            let op = txt(&row[1]);
+            let rhs = match (&row[2], &row[3]) {
+                (Value::Int64(n), _) => Value::Int64(*n),
+                (_, Value::Text(x)) => Value::Text(x.clone()),
+                _ => continue,
+            };
+            let Some(i) = names.iter().position(|n| *n == col) else {
+                continue;
+            };
+            let v = &values[i];
+            if matches!(v, Value::Null) {
+                continue;
+            }
+            use mitrdb_query::CompareOp as C;
+            let cop = match op.as_str() {
+                "=" => C::Eq,
+                "!=" => C::Ne,
+                ">" => C::Gt,
+                "<" => C::Lt,
+                ">=" => C::Ge,
+                "<=" => C::Le,
+                _ => C::Like,
+            };
+            if !cop.evaluate(v, &rhs) {
+                return Err(bad(format!(
+                    "CHECK failed: {}.{} {} {:?} (got {:?})",
+                    self.name, col, op, rhs, v
                 )));
             }
         }
@@ -984,6 +1093,7 @@ impl Update<'_> {
             let names: Vec<&str> = self.sets.iter().map(|(n, _)| n.as_str()).collect();
             let vals: Vec<Value> = self.sets.iter().map(|(_, v)| v.clone()).collect();
             self.server.table(&self.table).check_fks(&names, &vals)?;
+            self.server.table(&self.table).check_checks(&names, &vals)?;
         }
         let wh = where_sql(&known, &self.conds, &mut params)?;
         let sql = format!("UPDATE {} SET {}{}", self.table, assigns.join(", "), wh);
