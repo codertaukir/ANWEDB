@@ -2373,6 +2373,8 @@ impl Executor {
             CompareOp::Eq => vec![KeyRange::point(key_bytes)],
             CompareOp::Gt => vec![KeyRange::from_exclusive(key_bytes)],
             CompareOp::Ge => vec![KeyRange::from_inclusive(key_bytes)],
+            // LIKE: no narrowing, scan every non-null text key (tag 2+).
+            CompareOp::Like => vec![KeyRange::from_inclusive(vec![2])],
             CompareOp::Lt => vec![KeyRange::to_exclusive(key_bytes)],
             CompareOp::Le => vec![KeyRange::to_inclusive(key_bytes)],
             CompareOp::Ne => vec![

@@ -681,6 +681,11 @@ fn where_sql(
             ("=", Value::Null) => format!("{} IS NULL", col),
             ("!=", Value::Null) => format!("{} IS NOT NULL", col),
             (_, Value::Null) => return Err(bad("NULL can only be used with = or !=")),
+            ("like" | "LIKE", Value::Text(_)) => {
+                params.push(v.clone());
+                format!("{} LIKE ${}", col, params.len())
+            }
+            ("like" | "LIKE", _) => return Err(bad("LIKE needs a text pattern")),
             ("=" | "!=" | ">" | "<" | ">=" | "<=", _) => {
                 lit(v)?;
                 params.push(v.clone());

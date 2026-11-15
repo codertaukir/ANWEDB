@@ -81,6 +81,35 @@ pub enum CompareOp {
     Le,
     Gt,
     Ge,
+    Like,
+}
+
+/// SQL LIKE: `%` = any run of chars, `_` = any one char. Case-sensitive, no escape.
+fn like_match(text: &str, pat: &str) -> bool {
+    let t: Vec<char> = text.chars().collect();
+    let p: Vec<char> = pat.chars().collect();
+    let (mut i, mut j) = (0usize, 0usize);
+    let (mut star, mut mark) = (None::<usize>, 0usize);
+    while i < t.len() {
+        if j < p.len() && p[j] == '%' {
+            star = Some(j);
+            mark = i;
+            j += 1;
+        } else if j < p.len() && (p[j] == '_' || p[j] == t[i]) {
+            i += 1;
+            j += 1;
+        } else if let Some(s) = star {
+            mark += 1;
+            i = mark;
+            j = s + 1;
+        } else {
+            return false;
+        }
+    }
+    while j < p.len() && p[j] == '%' {
+        j += 1;
+    }
+    j == p.len()
 }
 
 impl CompareOp {
@@ -95,6 +124,10 @@ impl CompareOp {
             CompareOp::Le => left <= right,
             CompareOp::Gt => left > right,
             CompareOp::Ge => left >= right,
+            CompareOp::Like => match (left, right) {
+                (Value::Text(t), Value::Text(p)) => like_match(t, p),
+                _ => false,
+            },
         }
     }
 }
@@ -1443,6 +1476,11 @@ impl QueryEngine {
                                     CompareOp::Le => CompareOp::Ge,
                                     CompareOp::Gt => CompareOp::Lt,
                                     CompareOp::Ge => CompareOp::Le,
+                                    CompareOp::Like => {
+                                        return Err(Error::TransactionError(
+                                            "LIKE cannot be used in this position".to_string(),
+                                        ));
+                                    }
                                 };
                                 join_conditions.push((l, r, inv_op));
                             }
@@ -1975,6 +2013,7 @@ impl QueryEngine {
                     CompareOp::Lt => Some(vec![KeyRange::to_exclusive(key)]),
                     CompareOp::Le => Some(vec![KeyRange::to_inclusive(key)]),
                     CompareOp::Ne => None,
+                    CompareOp::Like => None,
                 }
             }
             BoundPredicate::IsNull(column_idx) => {
@@ -2401,6 +2440,11 @@ impl QueryEngine {
                     CompareOp::Le => CompareOp::Ge,
                     CompareOp::Gt => CompareOp::Lt,
                     CompareOp::Ge => CompareOp::Le,
+                    CompareOp::Like => {
+                        return Err(Error::TransactionError(
+                            "LIKE cannot be used in this position".to_string(),
+                        ));
+                    }
                 };
                 match src {
                     JoinProjSource::Left(idx) => Ok(JoinFilter::Left {
@@ -3912,6 +3956,26 @@ impl QueryEngine {
                 )));
             }
             return Ok(Expr::IsNull(Box::new(Expr::Column(col.to_string()))));
+        }
+
+        // 4b. LIKE
+        for kw in [" LIKE ", " like "] {
+            if let Some(pos) = Self::find_top_level_keyword(trimmed, kw) {
+                let col = trimmed[..pos].trim();
+                let rhs = trimmed[pos + kw.len()..].trim();
+                if !Self::is_valid_identifier(col) {
+                    return Err(Error::TransactionError(format!(
+                        "LIKE needs <column> LIKE <text>, invalid column '{}'",
+                        col
+                    )));
+                }
+                let lit = Self::parse_literal(rhs)?;
+                return Ok(Expr::Compare {
+                    op: CompareOp::Like,
+                    left: Box::new(Expr::Column(col.to_string())),
+                    right: Box::new(Expr::Literal(lit)),
+                });
+            }
         }
 
         // 5. Atomic comparison
