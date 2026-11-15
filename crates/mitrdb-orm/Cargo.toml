@@ -1,0 +1,9 @@
+[package]
+name = "mitrdb-orm"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+mitrdb-server = { path = "../mitrdb-server" }
+mitrdb-orm-derive = { path = "../mitrdb-orm-derive" }

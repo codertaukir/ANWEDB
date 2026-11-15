@@ -8,6 +8,8 @@ members = [
     "crates/mitrdb-query",
     "crates/mitrdb-exec",
     "crates/mitrdb-server",
+    "crates/mitrdb-orm",
+    "crates/mitrdb-orm-derive",
     "crates/mitrdb-cli",
 ]
 resolver = "2"
