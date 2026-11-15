@@ -505,6 +505,35 @@ impl Table<'_> {
             _ => Ok(1),
         }
     }
+
+    /// Insert with auto-increment int primary key (max(pk)+1). Returns (id, affected).
+    /// Retries if a concurrent insert grabbed the same id.
+    pub fn insert_auto(&self, pk: &str, row: &[(&str, Value)]) -> Result<(i64, usize)> {
+        if row.iter().any(|(n, _)| *n == pk) {
+            return Err(bad(format!("column '{}' is auto, do not pass it", pk)));
+        }
+        for _ in 0..16 {
+            let top = self
+                .find()
+                .columns(&[pk])
+                .order_by_desc(pk)
+                .limit(1)
+                .run()?;
+            let next = match top.rows.first().and_then(|r| r.first()) {
+                Some(Value::Int64(n)) => n.checked_add(1).ok_or_else(|| bad("auto id overflow"))?,
+                _ => 1,
+            };
+            let mut full: Vec<(&str, Value)> = Vec::with_capacity(row.len() + 1);
+            full.push((pk, Value::Int64(next)));
+            full.extend(row.iter().cloned());
+            match self.insert(&full) {
+                Ok(n) => return Ok((next, n)),
+                Err(e) if e.to_string().contains("Duplicate primary key") => continue,
+                Err(e) => return Err(e),
+            }
+        }
+        Err(bad("auto id: too many conflicts"))
+    }
 }
 
 /// Result of `find().run()`.

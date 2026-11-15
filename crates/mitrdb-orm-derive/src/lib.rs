@@ -59,12 +59,13 @@ fn expand(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
     let mut from_row = Vec::new();
     let mut handles = Vec::new();
     let mut pk_count = 0;
+    let mut auto_pk = quote!(::std::option::Option::None);
 
     for f in fields {
         let ident = f.ident.as_ref().unwrap();
         let fname = ident.to_string().trim_start_matches("r#").to_string();
         let ty = &f.ty;
-        let (mut pk, mut uq, mut ix) = (false, false, false);
+        let (mut pk, mut uq, mut ix, mut au) = (false, false, false, false);
         for attr in &f.attrs {
             if attr.path().is_ident("col") {
                 attr.parse_nested_meta(|m| {
@@ -74,9 +75,11 @@ fn expand(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
                         uq = true;
                     } else if m.path.is_ident("index") {
                         ix = true;
+                    } else if m.path.is_ident("auto") {
+                        au = true;
                     } else {
                         return Err(m.error(
-                            "unknown #[col(..)] option, expected: primary_key, unique, index",
+                            "unknown #[col(..)] option, expected: primary_key, unique, index, auto",
                         ));
                     }
                     Ok(())
@@ -92,6 +95,12 @@ fn expand(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
                 ));
             }
         }
+        if au {
+            if !pk {
+                return Err(syn::Error::new_spanned(ident, "auto requires primary_key"));
+            }
+            auto_pk = quote!(::std::option::Option::Some(#fname));
+        }
         let mut meta = quote!(::mitrdb_orm::ColumnMeta::of::<#ty>(#fname));
         if pk {
             meta = quote!(#meta.primary_key());
@@ -101,6 +110,9 @@ fn expand(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
         }
         if ix {
             meta = quote!(#meta.index());
+        }
+        if au {
+            meta = quote!(#meta.auto());
         }
         metas.push(meta);
         to_row.push(quote!((#fname, ::mitrdb_orm::Field::to_value(&self.#ident))));
@@ -119,6 +131,7 @@ fn expand(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
         impl ::mitrdb_orm::Model for #name {
             const TABLE: &'static str = #table;
             const COLUMNS: &'static [::mitrdb_orm::ColumnMeta] = &[ #(#metas),* ];
+            const AUTO_PK: ::std::option::Option<&'static str> = #auto_pk;
             fn to_row(&self) -> ::std::vec::Vec<(&'static str, ::mitrdb_orm::Value)> {
                 ::std::vec![ #(#to_row),* ]
             }

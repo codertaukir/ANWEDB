@@ -111,6 +111,7 @@ pub struct ColumnMeta {
     pub primary_key: bool,
     pub unique: bool,
     pub index: bool,
+    pub auto: bool,
 }
 
 impl ColumnMeta {
@@ -122,6 +123,7 @@ impl ColumnMeta {
             primary_key: false,
             unique: false,
             index: false,
+            auto: false,
         }
     }
     pub const fn primary_key(mut self) -> Self {
@@ -134,6 +136,10 @@ impl ColumnMeta {
     }
     pub const fn index(mut self) -> Self {
         self.index = true;
+        self
+    }
+    pub const fn auto(mut self) -> Self {
+        self.auto = true;
         self
     }
 }
@@ -180,6 +186,8 @@ impl RowRef<'_> {
 pub trait Model: Sized {
     const TABLE: &'static str;
     const COLUMNS: &'static [ColumnMeta];
+    /// Name of the `#[col(auto)]` column, if any.
+    const AUTO_PK: Option<&'static str> = None;
     fn to_row(&self) -> Vec<(&'static str, Value)>;
     fn from_row(row: &RowRef) -> Result<Self>;
 }
@@ -289,6 +297,8 @@ pub trait Orm {
     /// Create the table or bring it in line with the struct (data is kept).
     fn sync<M: Model>(&self) -> Result<Vec<String>>;
     fn insert<M: Model>(&self, m: &M) -> Result<usize>;
+    /// Insert and return the generated id (needs a `#[col(auto)]` column).
+    fn insert_get_id<M: Model>(&self, m: &M) -> Result<i64>;
     fn find<M: Model>(&self, cond: Cond<M>) -> ModelQuery<'_, M>;
     fn all<M: Model>(&self) -> ModelQuery<'_, M>;
 }
@@ -298,7 +308,18 @@ impl Orm for Server {
         self.table(M::TABLE).sync(&spec_of(M::COLUMNS))
     }
     fn insert<M: Model>(&self, m: &M) -> Result<usize> {
-        self.table(M::TABLE).insert(&m.to_row())
+        match M::AUTO_PK {
+            None => self.table(M::TABLE).insert(&m.to_row()),
+            Some(pk) => {
+                let row: Vec<_> = m.to_row().into_iter().filter(|(n, _)| *n != pk).collect();
+                self.table(M::TABLE).insert_auto(pk, &row).map(|(_, n)| n)
+            }
+        }
+    }
+    fn insert_get_id<M: Model>(&self, m: &M) -> Result<i64> {
+        let pk = M::AUTO_PK.ok_or_else(|| err("model has no #[col(auto)] column"))?;
+        let row: Vec<_> = m.to_row().into_iter().filter(|(n, _)| *n != pk).collect();
+        self.table(M::TABLE).insert_auto(pk, &row).map(|(id, _)| id)
     }
     fn find<M: Model>(&self, cond: Cond<M>) -> ModelQuery<'_, M> {
         self.all::<M>().filter(cond)
