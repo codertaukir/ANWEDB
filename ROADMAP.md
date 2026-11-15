@@ -56,3 +56,12 @@ Status tracker. `[x]` = done and measured/tested, `[ ]` = pending.
 ## P2 & Housekeeping
 - [x] `free_pages_batch` crash-injection test (dedb3e2): blank pages write ke baad stale/missing freelist crash scenario par disk rebuild recovery verified; page leaks eliminated aur allocator reuse validated.
 - [x] B+Tree self-deadlock fix (78b3bfc): `try_mutate_leaf_in_place` ab next leaf ka first key leaf frame write lock lene se PEHLE padhta hai (pehle lock ke andar doosra page pin hota tha, buffer pool pressure mein `find_victim_frame_sharded` apne hi write-locked frame par `.read()` pe atak jata tha). `btree_newpage_fail_atomicity` hang theek (pre-existing, ee9920b par bhi tha). Verified: sab fault-injection targets pass, workspace 330 passed, ckpt_reclaim 100/100 under load, write_mark_real 4T A/B median old 73.7k vs new 74.6k ops/s (+1.1%, noise ke andar; bench hint path pe zyada chalta hai, non-hint path ka alag A/B nahi kiya).
+
+## ORM + SQL features (session: ORM completion)
+- [x] mitrdb-orm + derive(Model): struct-as-schema, typed queries, update/delete/count (d982715, 2cf6b66)
+- [x] Auto-increment id: `#[col(primary_key, auto)]`, `insert_get_id`, `Table::insert_auto` (4fbc675)
+- [x] Timestamp (i64 micros), `#[col(created_at)]`/`#[col(updated_at)]`, f64 as order-preserving int (aa65c8a). Caveat: f64 par raw SQL SUM/AVG galat, NaN mat daalo
+- [x] SQL `LIKE` (`%`, `_`, case-sensitive, text only, full scan + filter) (d6263f8); ORM `Col::like` (38e317a)
+- [x] Auto id kabhi reuse nahi hoti: `mitrdb_seq` counter table, CAS update (52d3cab)
+- [x] Perf A/B (write_mark_real 4T, 10 round): OLD 2cf6b66 248.5k vs NEW 245.0k ops/s (-1.4%, noise). Purana 73k vs 368k fark = noisy machine, engine regression nahi
+- [ ] Baaki: default values (Rust `Default` se kaam chalta hai), foreign key, CHECK, savepoints, native Timestamp/Float DataType, non-hint path A/B
