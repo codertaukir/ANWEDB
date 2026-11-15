@@ -69,3 +69,5 @@ Status tracker. `[x]` = done and measured/tested, `[ ]` = pending.
 - [x] Foreign key (RESTRICT): `#[col(references = "table.col")]`, `Table::add_foreign_key`, defs `mitrdb_fk` mein, catalog format untouched. Limit: sirf Table/ORM API enforce karta hai, raw SQL bypass, check+write atomic nahi (353fbac)
 - [x] CHECK: `#[col(check = ">= 0")]`, `Table::add_check`, defs `mitrdb_check` mein, insert/update par, NULL pass, purani rows verify nahi. f64 column par mat lagao (55b1a5f)
 - [x] Perf A/B #2 (write_mark_real 4T, 12 round): OLD 2cf6b66 82.1k vs NEW 83.9k ops/s (+2.2%, noise). Absolute numbers machine load se badalte hain, sirf relative dekho
+- [x] Non-hint path A/B (perf_bench batch 20000 rows, 12 round): OLD 78.5k vs NEW 78.3k rows/s (-0.2%, noise)
+- [x] Concurrency bugs mile aur fix hue: internal table create race (mitrdb_seq/fk/check "already exists"), FK check+write race (1500 rounds mein 21 orphans -> 0, process-wide FK lock). Limit: lock sirf ek process ke andar, raw SQL bypass (4859919 aur ye commit)
