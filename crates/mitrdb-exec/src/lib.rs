@@ -828,6 +828,34 @@ impl Executor {
                 catalog.sync_roots()?;
                 Ok(ExecutionResult::Ok)
             }
+            PhysicalPlan::Savepoint(name) => {
+                let tid = (*active_txn).ok_or_else(|| {
+                    Error::TransactionError("SAVEPOINT requires an active transaction".to_string())
+                })?;
+                txn_mgr.savepoint(tid, &name)?;
+                Ok(ExecutionResult::Ok)
+            }
+            PhysicalPlan::ReleaseSavepoint(name) => {
+                let tid = (*active_txn).ok_or_else(|| {
+                    Error::TransactionError("RELEASE requires an active transaction".to_string())
+                })?;
+                txn_mgr.release_savepoint(tid, &name)?;
+                Ok(ExecutionResult::Ok)
+            }
+            PhysicalPlan::RollbackTo(name) => {
+                let tid = (*active_txn).ok_or_else(|| {
+                    Error::TransactionError(
+                        "ROLLBACK TO requires an active transaction".to_string(),
+                    )
+                })?;
+                if let Err(e) = txn_mgr.rollback_to_savepoint(tid, &name) {
+                    if !e.to_string().contains("no such savepoint") && txn_mgr.abort(tid).is_ok() {
+                        *active_txn = None;
+                    }
+                    return Err(e);
+                }
+                Ok(ExecutionResult::Ok)
+            }
             PhysicalPlan::Checkpoint => {
                 if active_txn.is_none() && txn_mgr.active_txn_count() == 0 {
                     catalog.sync_roots()?;

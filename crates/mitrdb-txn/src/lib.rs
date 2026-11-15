@@ -987,6 +987,7 @@ pub struct TransactionContext {
     pub commit_ts: Option<u64>,
     pub last_lsn: Lsn,
     pub write_set: Vec<UndoAction>,
+    pub savepoints: Vec<(String, usize)>,
     pub read_keys: HashSet<Vec<u8>>,
     pub read_ranges: Vec<([u8; 8], KeyRange)>,
     in_rollback: bool,
@@ -1278,6 +1279,7 @@ impl TxnManager {
             commit_ts: None,
             last_lsn,
             write_set: Vec::new(),
+            savepoints: Vec::new(),
             read_keys: HashSet::new(),
             read_ranges: Vec::new(),
             in_rollback: false,
@@ -2715,6 +2717,52 @@ impl TxnManager {
             );
         }
         Ok(commit_ts)
+    }
+
+    /// SAVEPOINT: remember the current write position under `name`.
+    pub fn savepoint(&self, txn_id: TxnId, name: &str) -> Result<()> {
+        let mark = self.write_mark(txn_id)?;
+        let mut txns = self.txn_shard(txn_id).lock();
+        let ctx = txns
+            .get_mut(&txn_id)
+            .ok_or_else(|| Error::TransactionError(format!("Unknown transaction ID {}", txn_id)))?;
+        ctx.savepoints.retain(|(n, _)| n != name);
+        ctx.savepoints.push((name.to_string(), mark));
+        Ok(())
+    }
+
+    /// RELEASE: forget `name` and every savepoint made after it (writes stay).
+    pub fn release_savepoint(&self, txn_id: TxnId, name: &str) -> Result<()> {
+        let mut txns = self.txn_shard(txn_id).lock();
+        let ctx = txns
+            .get_mut(&txn_id)
+            .ok_or_else(|| Error::TransactionError(format!("Unknown transaction ID {}", txn_id)))?;
+        let pos = ctx
+            .savepoints
+            .iter()
+            .rposition(|(n, _)| n == name)
+            .ok_or_else(|| Error::TransactionError(format!("no such savepoint: {}", name)))?;
+        ctx.savepoints.truncate(pos);
+        Ok(())
+    }
+
+    /// ROLLBACK TO: undo writes made after `name`; `name` stays, later savepoints go.
+    /// An Err that is not "no such savepoint" means the caller must abort the txn.
+    pub fn rollback_to_savepoint(&self, txn_id: TxnId, name: &str) -> Result<()> {
+        let mark = {
+            let mut txns = self.txn_shard(txn_id).lock();
+            let ctx = txns.get_mut(&txn_id).ok_or_else(|| {
+                Error::TransactionError(format!("Unknown transaction ID {}", txn_id))
+            })?;
+            let pos = ctx
+                .savepoints
+                .iter()
+                .rposition(|(n, _)| n == name)
+                .ok_or_else(|| Error::TransactionError(format!("no such savepoint: {}", name)))?;
+            ctx.savepoints.truncate(pos + 1);
+            ctx.savepoints[pos].1
+        };
+        self.rollback_to_mark(txn_id, mark)
     }
 
     /// Number of undo entries so far; used as a statement-rollback mark.

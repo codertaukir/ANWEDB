@@ -621,6 +621,9 @@ pub enum Statement {
     Begin,
     Commit,
     Rollback,
+    Savepoint(String),
+    RollbackTo(String),
+    ReleaseSavepoint(String),
 }
 
 fn bind_value(v: &mut Value, params: &[Value], used: &mut [bool]) -> Result<()> {
@@ -891,6 +894,9 @@ pub enum PhysicalPlan {
     Begin,
     Commit,
     Rollback,
+    Savepoint(String),
+    RollbackTo(String),
+    ReleaseSavepoint(String),
 }
 
 impl PhysicalPlan {
@@ -984,6 +990,37 @@ impl QueryEngine {
         }
         if upper == "ROLLBACK" || upper == "ABORT" {
             return Ok(Statement::Rollback);
+        }
+        {
+            let ident = |s: &str| -> Result<String> {
+                let s = s.trim();
+                let bad = s.is_empty()
+                    || s.chars().next().is_some_and(|c| c.is_ascii_digit())
+                    || s.chars()
+                        .any(|c| c != '_' && c.is_ascii_alphanumeric() == false);
+                if bad {
+                    return Err(Error::TransactionError(format!(
+                        "Invalid savepoint name: '{}'",
+                        s
+                    )));
+                }
+                Ok(s.to_lowercase())
+            };
+            if upper.starts_with("SAVEPOINT ") {
+                return Ok(Statement::Savepoint(ident(&trimmed[10..])?));
+            }
+            if upper.starts_with("ROLLBACK TO SAVEPOINT ") {
+                return Ok(Statement::RollbackTo(ident(&trimmed[22..])?));
+            }
+            if upper.starts_with("ROLLBACK TO ") {
+                return Ok(Statement::RollbackTo(ident(&trimmed[12..])?));
+            }
+            if upper.starts_with("RELEASE SAVEPOINT ") {
+                return Ok(Statement::ReleaseSavepoint(ident(&trimmed[18..])?));
+            }
+            if upper.starts_with("RELEASE ") {
+                return Ok(Statement::ReleaseSavepoint(ident(&trimmed[8..])?));
+            }
         }
         if upper == "CHECKPOINT" {
             return Ok(Statement::Checkpoint);
@@ -1802,6 +1839,9 @@ impl QueryEngine {
             Statement::Begin => Ok(PhysicalPlan::Begin),
             Statement::Commit => Ok(PhysicalPlan::Commit),
             Statement::Rollback => Ok(PhysicalPlan::Rollback),
+            Statement::Savepoint(n) => Ok(PhysicalPlan::Savepoint(n)),
+            Statement::RollbackTo(n) => Ok(PhysicalPlan::RollbackTo(n)),
+            Statement::ReleaseSavepoint(n) => Ok(PhysicalPlan::ReleaseSavepoint(n)),
         }
     }
 
