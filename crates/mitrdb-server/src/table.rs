@@ -517,11 +517,11 @@ impl Table<'_> {
             return Err(bad(format!("column '{}' is auto, do not pass it", pk)));
         }
         const SEQ: &str = "mitrdb_seq";
-        if self.server.get_table_schema(SEQ)?.is_none() {
-            self.server
-                .table(SEQ)
-                .sync("tbl text primary key, last_id int not null")?;
-        }
+        ensure_internal(
+            self.server,
+            SEQ,
+            "tbl text primary key, last_id int not null",
+        )?;
         let seq = self.server.table(SEQ);
         let key = Value::Text(self.name.clone());
         for _ in 0..32 {
@@ -582,6 +582,18 @@ impl Table<'_> {
     }
 }
 
+/// Create/sync an internal table; if another thread created it first, that is fine.
+fn ensure_internal(server: &Server, name: &str, spec: &str) -> Result<()> {
+    if server.get_table_schema(name)?.is_some() {
+        return Ok(());
+    }
+    match server.table(name).sync(spec) {
+        Ok(_) => Ok(()),
+        Err(e) if e.to_string().contains("already exists") => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
 const FK_TABLE: &str = "mitrdb_fk";
 
 fn txt(v: &Value) -> String {
@@ -635,7 +647,9 @@ impl Table<'_> {
         if cc.data_type == DataType::Bytes {
             return Err(bad("foreign key on bytes column is not supported"));
         }
-        self.server.table(FK_TABLE).sync(
+        ensure_internal(
+            self.server,
+            FK_TABLE,
             "id int primary key, child_tbl text not null, child_col text not null, parent_tbl text not null, parent_col text not null",
         )?;
         let fk = self.server.table(FK_TABLE);
@@ -750,7 +764,9 @@ impl Table<'_> {
                 ));
             }
         };
-        self.server.table(CHECK_TABLE).sync(
+        ensure_internal(
+            self.server,
+            CHECK_TABLE,
             "id int primary key, tbl text not null, col text not null, op text not null, int_val int, text_val text",
         )?;
         let ck = self.server.table(CHECK_TABLE);
