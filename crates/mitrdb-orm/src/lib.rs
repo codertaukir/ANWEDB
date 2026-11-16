@@ -800,6 +800,53 @@ impl OrmRelations for Server {
     }
 }
 
+/// Long text outside the row (a row must fit in one 4096-byte page, ~4000 bytes total).
+/// Put the text here and keep the returned name in a `String` column (for example `body_ref`).
+/// Files live on disk, outside the database WAL: NOT atomic with the row. Use `put_and`
+/// (file first, row second, file removed if the row fails). Orphan files after a crash
+/// are not swept automatically.
+pub struct TextStore {
+    fs: mitrdb_server::FileStore,
+}
+
+fn io_kind(e: std::io::Error) -> Error {
+    err(format!("text store io error: {:?}", e.kind()))
+}
+
+impl TextStore {
+    pub fn open(dir: impl AsRef<std::path::Path>) -> Result<Self> {
+        Ok(Self {
+            fs: mitrdb_server::FileStore::open(dir)?,
+        })
+    }
+    /// Save text, return its file name (store it in the row).
+    pub fn put(&self, text: &str) -> Result<String> {
+        let mut r = text.as_bytes();
+        Ok(self.fs.save(&mut r)?.name)
+    }
+    pub fn get(&self, name: &str) -> Result<String> {
+        use std::io::Read;
+        let mut f = self.fs.open_read(name)?;
+        let mut out = String::new();
+        f.read_to_string(&mut out).map_err(io_kind)?;
+        Ok(out)
+    }
+    pub fn delete(&self, name: &str) -> Result<()> {
+        self.fs.delete(name)
+    }
+    /// File first, then `f(name)` (usually the row insert). If `f` fails the file is removed.
+    pub fn put_and<T>(&self, text: &str, f: impl FnOnce(&str) -> Result<T>) -> Result<T> {
+        let name = self.put(text)?;
+        match f(&name) {
+            Ok(v) => Ok(v),
+            Err(e) => {
+                let _ = self.delete(&name);
+                Err(e)
+            }
+        }
+    }
+}
+
 pub trait OrmCount {
     fn count<M: Model>(&self) -> Result<usize>;
     fn count_where<M: Model>(&self, cond: Cond<M>) -> Result<usize>;
