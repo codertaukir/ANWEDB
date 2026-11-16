@@ -483,6 +483,25 @@ impl<'a, M: Model> ModelQuery<'a, M> {
             .map(|(v, n)| T::from_value(v).map(|t| (t, n)))
             .collect()
     }
+    /// Cursor/poll forward: rows with `c > last`, oldest first, at most `n`.
+    /// `db.all::<Msg>().page_after(Msg::id, last_seen_id, 50)`
+    pub fn page_after<T: Field>(
+        self,
+        c: Col<M, T>,
+        last: impl Into<T>,
+        n: usize,
+    ) -> Result<Vec<M>> {
+        self.filter(c.gt(last)).order_by(c).limit(n).run()
+    }
+    /// Cursor backward (older messages): rows with `c < first`, newest first, at most `n`.
+    pub fn page_before<T: Field>(
+        self,
+        c: Col<M, T>,
+        first: impl Into<T>,
+        n: usize,
+    ) -> Result<Vec<M>> {
+        self.filter(c.lt(first)).order_by_desc(c).limit(n).run()
+    }
     pub fn filter_between(self, b: (Cond<M>, Cond<M>)) -> Self {
         self.filter(b.0).filter(b.1)
     }
