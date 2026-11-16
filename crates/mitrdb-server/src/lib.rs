@@ -17,7 +17,7 @@ pub use mitrdb_catalog::Catalog;
 pub use mitrdb_common::{Error, Result, TxnId};
 pub use mitrdb_exec::{ExecutionResult, Executor};
 use mitrdb_observe::{GLOBAL_METRICS, MetricsSnapshot};
-pub use mitrdb_query::{PhysicalPlan, QueryEngine, TableSchema, Value};
+pub use mitrdb_query::{F64, PhysicalPlan, QueryEngine, TableSchema, Value};
 pub use mitrdb_storage::{
     BackupFileMeta, BackupManager, BackupManifest, CheckpointMetadata, RestoreReport,
 };

@@ -35,6 +35,7 @@ fn type_sql(t: DataType) -> &'static str {
         DataType::Bool => "bool",
         DataType::Bytes => "bytes",
         DataType::Timestamp => "timestamp",
+        DataType::Float => "float",
     }
 }
 
@@ -64,6 +65,7 @@ fn parse_columns(spec: &str) -> Result<Vec<ColumnDef>> {
             "BOOL" | "BOOLEAN" => DataType::Bool,
             "BYTES" | "BLOB" => DataType::Bytes,
             "TIMESTAMP" | "TIMESTAMPTZ" => DataType::Timestamp,
+            "FLOAT" | "DOUBLE" | "REAL" | "FLOAT64" => DataType::Float,
             other => return Err(bad(format!("unknown column type: {other}"))),
         };
         let rest = tokens[2..].join(" ").to_uppercase();
@@ -436,6 +438,11 @@ impl IntoValue for String {
         Value::Text(self)
     }
 }
+impl IntoValue for f64 {
+    fn into_value(self) -> Value {
+        Value::Float(mitrdb_query::F64::new(self))
+    }
+}
 impl IntoValue for Vec<u8> {
     fn into_value(self) -> Value {
         Value::Bytes(self)
@@ -462,6 +469,7 @@ fn check_value(table: &str, col: &ColumnDef, v: &Value) -> Result<()> {
         Value::Text(_) if col.data_type == DataType::Text => Ok(()),
         Value::Bool(_) if col.data_type == DataType::Bool => Ok(()),
         Value::Bytes(_) if col.data_type == DataType::Bytes => Ok(()),
+        Value::Float(f) if col.data_type == DataType::Float && !f.0.is_nan() => Ok(()),
         _ => Err(bad(format!(
             "type mismatch for column '{}.{}': expected {:?}",
             table, col.name, col.data_type
@@ -904,6 +912,8 @@ fn lit(v: &Value) -> Result<String> {
         Value::Bool(b) => Ok(if *b { "TRUE" } else { "FALSE" }.to_string()),
         Value::Text(s) => Ok(format!("'{}'", s.replace('\'', "''"))),
         Value::Bytes(_) => Err(bad("bytes values cannot be used in a filter")),
+        Value::Float(f) if !f.0.is_nan() => Ok(format!("{:?}", f.0)),
+        Value::Float(_) => Err(bad("NaN cannot be used")),
         Value::Param(_) => Err(bad("parameter placeholders are not allowed here")),
     }
 }

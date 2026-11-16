@@ -104,23 +104,25 @@ impl<T: Field> Field for Option<T> {
 
 /// f64 is stored as an order-preserving i64 (so `int` column, range filters and order_by work).
 /// -0.0 is stored as 0.0. NaN is rejected by `from_value` only if it cannot round-trip; avoid NaN.
+#[allow(dead_code)]
 fn f64_enc(f: f64) -> i64 {
     let f = if f == 0.0 { 0.0 } else { f };
     let b = f.to_bits() as i64;
     if b < 0 { b ^ i64::MAX } else { b }
 }
+#[allow(dead_code)]
 fn f64_dec(v: i64) -> f64 {
     f64::from_bits((if v < 0 { v ^ i64::MAX } else { v }) as u64)
 }
 
 impl Field for f64 {
-    const SQL_TYPE: &'static str = "int";
+    const SQL_TYPE: &'static str = "float";
     fn to_value(&self) -> Value {
-        Value::Int64(f64_enc(*self))
+        Value::Float(mitrdb_server::F64::new(*self))
     }
     fn from_value(v: Value) -> Result<Self> {
         match v {
-            Value::Int64(x) => Ok(f64_dec(x)),
+            Value::Float(x) => Ok(x.0),
             _ => Err(err("expected float value")),
         }
     }

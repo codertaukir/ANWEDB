@@ -835,6 +835,8 @@ fn value_json(value: &Value) -> String {
         Value::Int64(v) => v.to_string(),
         Value::Text(s) => json_string(s),
         Value::Bool(b) => b.to_string(),
+        Value::Float(f) if f.0.is_finite() => format!("{:?}", f.0),
+        Value::Float(f) => json_string(&f.0.to_string()),
         Value::Param(n) => json_string(&format!("${}", n + 1)),
         Value::Bytes(b) => {
             let hex: String = b.iter().map(|byte| format!("{byte:02x}")).collect();

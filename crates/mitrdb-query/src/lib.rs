@@ -24,6 +24,27 @@ impl Drop for ParamsGuard {
     }
 }
 
+/// f64 for a FLOAT column. -0.0 is stored as 0.0; Eq/Hash work on the bits. NaN is rejected on write.
+#[derive(Debug, Clone, Copy)]
+pub struct F64(pub f64);
+
+impl F64 {
+    pub fn new(f: f64) -> Self {
+        F64(if f == 0.0 { 0.0 } else { f })
+    }
+}
+impl PartialEq for F64 {
+    fn eq(&self, o: &Self) -> bool {
+        self.0.to_bits() == o.0.to_bits()
+    }
+}
+impl Eq for F64 {}
+impl std::hash::Hash for F64 {
+    fn hash<H: std::hash::Hasher>(&self, h: &mut H) {
+        self.0.to_bits().hash(h)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Value {
     Null,
@@ -31,6 +52,7 @@ pub enum Value {
     Text(String),
     Bool(bool),
     Bytes(Vec<u8>),
+    Float(F64),
     /// Placeholder `$n` (stored 0-based). Exists only between parse and bind.
     Param(usize),
 }
@@ -54,6 +76,13 @@ impl Value {
             Value::Bytes(b) => {
                 let mut out = vec![4];
                 out.extend_from_slice(b);
+                out
+            }
+            Value::Float(f) => {
+                let b = f.0.to_bits();
+                let k = if b >> 63 == 1 { !b } else { b ^ (1u64 << 63) };
+                let mut out = vec![5];
+                out.extend_from_slice(&k.to_be_bytes());
                 out
             }
             Value::Param(_) => vec![255],
@@ -1143,6 +1172,7 @@ impl QueryEngine {
             Value::Text(_) if col.data_type == DataType::Text => Ok(()),
             Value::Bool(_) if col.data_type == DataType::Bool => Ok(()),
             Value::Bytes(_) if col.data_type == DataType::Bytes => Ok(()),
+            Value::Float(f) if col.data_type == DataType::Float && !f.0.is_nan() => Ok(()),
             _ => Err(Error::TransactionError(format!(
                 "Type mismatch for column '{}.{}': expected {:?}",
                 table_name, col.name, col.data_type
@@ -2567,6 +2597,7 @@ impl QueryEngine {
                         "BOOL" | "BOOLEAN" => DataType::Bool,
                         "BYTES" | "BLOB" => DataType::Bytes,
                         "TIMESTAMP" | "TIMESTAMPTZ" => DataType::Timestamp,
+                        "FLOAT" | "DOUBLE" | "REAL" | "FLOAT64" => DataType::Float,
                         other => {
                             return Err(Error::TransactionError(format!(
                                 "Unknown column type in ALTER TABLE: {}",
@@ -2624,6 +2655,7 @@ impl QueryEngine {
                 "BOOL" | "BOOLEAN" => DataType::Bool,
                 "BYTES" | "BLOB" => DataType::Bytes,
                 "TIMESTAMP" | "TIMESTAMPTZ" => DataType::Timestamp,
+                "FLOAT" | "DOUBLE" | "REAL" | "FLOAT64" => DataType::Float,
                 other => {
                     return Err(Error::TransactionError(format!(
                         "Unknown column type in ALTER TABLE: {}",
@@ -3128,6 +3160,7 @@ impl QueryEngine {
                 | (DataType::Text, Value::Text(_))
                 | (DataType::Bool, Value::Bool(_))
                 | (DataType::Bytes, Value::Bytes(_))
+                | (DataType::Float, Value::Float(_))
         );
         if !valid {
             return Err(Error::TransactionError(format!(
@@ -3206,6 +3239,7 @@ impl QueryEngine {
                 "BOOL" | "BOOLEAN" => DataType::Bool,
                 "BYTES" | "BLOB" => DataType::Bytes,
                 "TIMESTAMP" | "TIMESTAMPTZ" => DataType::Timestamp,
+                "FLOAT" | "DOUBLE" | "REAL" | "FLOAT64" => DataType::Float,
                 other => {
                     return Err(Error::TransactionError(format!(
                         "Unknown column type: {}",
@@ -4123,6 +4157,12 @@ impl QueryEngine {
         }
         if let Ok(n) = token.parse::<i64>() {
             return Ok(Value::Int64(n));
+        }
+        if token.bytes().any(|c| c == b'.' || c == b'e' || c == b'E')
+            && let Ok(f) = token.parse::<f64>()
+            && f.is_finite()
+        {
+            return Ok(Value::Float(F64::new(f)));
         }
         Err(Error::TransactionError(format!(
             "Invalid SQL literal: {}",

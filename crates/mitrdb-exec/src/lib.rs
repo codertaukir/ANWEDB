@@ -306,6 +306,10 @@ impl Tuple {
                     buf.extend_from_slice(&(b.len() as u16).to_le_bytes());
                     buf.extend_from_slice(b);
                 }
+                Value::Float(f) => {
+                    buf.push(5);
+                    buf.extend_from_slice(&f.0.to_bits().to_le_bytes());
+                }
                 Value::Param(_) => unreachable!("unbound parameter reached the row codec"),
             }
         }
@@ -371,6 +375,14 @@ impl Tuple {
                     }
                     values.push(Value::Bytes(buf[pos..pos + len].to_vec()));
                     pos += len;
+                }
+                5 => {
+                    if pos + 8 > buf.len() {
+                        return Err(Error::PageCorrupted("Truncated Float in tuple".to_string()));
+                    }
+                    let bits = u64::from_le_bytes(buf[pos..pos + 8].try_into().unwrap());
+                    pos += 8;
+                    values.push(Value::Float(mitrdb_query::F64(f64::from_bits(bits))));
                 }
                 other => {
                     return Err(Error::PageCorrupted(format!(
@@ -1177,6 +1189,7 @@ impl Executor {
                         (DataType::Text, Value::Text(_)) => true,
                         (DataType::Bool, Value::Bool(_)) => true,
                         (DataType::Bytes, Value::Bytes(_)) => true,
+                        (DataType::Float, Value::Float(f)) => !f.0.is_nan(),
                         _ => false,
                     };
                     if !type_matches {
@@ -2642,6 +2655,7 @@ impl Executor {
             Value::Text(_) if col.data_type == DataType::Text => Ok(()),
             Value::Bool(_) if col.data_type == DataType::Bool => Ok(()),
             Value::Bytes(_) if col.data_type == DataType::Bytes => Ok(()),
+            Value::Float(f) if col.data_type == DataType::Float && !f.0.is_nan() => Ok(()),
             _ => Err(Error::TransactionError(format!(
                 "Type mismatch for column '{}.{}': expected {:?}",
                 table_name, col.name, col.data_type
