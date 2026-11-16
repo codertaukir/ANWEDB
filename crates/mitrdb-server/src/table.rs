@@ -1040,6 +1040,26 @@ impl Table<'_> {
     }
 }
 
+impl Query<'_> {
+    /// One OR group: `(c1 OR c2 ...)`, combined with the other conditions by AND.
+    pub fn filter_any(mut self, group: Vec<(String, String, Value)>) -> Self {
+        self.anys.push(group);
+        self
+    }
+}
+impl Update<'_> {
+    pub fn filter_any(mut self, group: Vec<(String, String, Value)>) -> Self {
+        self.anys.push(group);
+        self
+    }
+}
+impl Delete<'_> {
+    pub fn filter_any(mut self, group: Vec<(String, String, Value)>) -> Self {
+        self.anys.push(group);
+        self
+    }
+}
+
 /// Result of `find().run()`.
 #[derive(Debug, Clone)]
 pub struct Rows {
@@ -1052,6 +1072,7 @@ pub struct Query<'a> {
     server: &'a Server,
     table: String,
     conds: Vec<(String, String, Value)>,
+    anys: Vec<Vec<(String, String, Value)>>,
     cols: Option<Vec<String>>,
     order: Option<(String, bool)>,
     limit: Option<usize>,
@@ -1065,6 +1086,7 @@ impl<'a> Table<'a> {
             server: self.server,
             table: self.name.clone(),
             conds: Vec::new(),
+            anys: Vec::new(),
             cols: None,
             order: None,
             limit: None,
@@ -1148,7 +1170,7 @@ impl Query<'_> {
         sql.push_str(&format!(" FROM {}", self.table));
 
         let mut params: Vec<Value> = Vec::new();
-        sql.push_str(&where_sql(&known, &self.conds, &mut params)?);
+        sql.push_str(&where_sql(&known, &self.conds, &self.anys, &mut params)?);
         if let Some((col, desc)) = &self.order {
             if !known(col) {
                 return Err(bad(format!("unknown column '{}'", col)));
@@ -1173,33 +1195,57 @@ impl Query<'_> {
     }
 }
 
+fn cond_sql(
+    known: &dyn Fn(&str) -> bool,
+    col: &str,
+    op: &str,
+    v: &Value,
+    params: &mut Vec<Value>,
+) -> Result<String> {
+    if !known(col) {
+        return Err(bad(format!("unknown column '{}'", col)));
+    }
+    Ok(match (op, v) {
+        ("=", Value::Null) => format!("{} IS NULL", col),
+        ("!=", Value::Null) => format!("{} IS NOT NULL", col),
+        (_, Value::Null) => return Err(bad("NULL can only be used with = or !=")),
+        ("like" | "LIKE", Value::Text(_)) => {
+            params.push(v.clone());
+            format!("{} LIKE ${}", col, params.len())
+        }
+        ("like" | "LIKE", _) => return Err(bad("LIKE needs a text pattern")),
+        ("=" | "!=" | ">" | "<" | ">=" | "<=", _) => {
+            lit(v)?;
+            params.push(v.clone());
+            format!("{} {} ${}", col, op, params.len())
+        }
+        _ => return Err(bad(format!("unknown operator '{}'", op))),
+    })
+}
+
 fn where_sql(
     known: &dyn Fn(&str) -> bool,
     conds: &[(String, String, Value)],
+    anys: &[Vec<(String, String, Value)>],
     params: &mut Vec<Value>,
 ) -> Result<String> {
     let mut parts: Vec<String> = Vec::new();
     for (col, op, v) in conds {
-        if !known(col) {
-            return Err(bad(format!("unknown column '{}'", col)));
+        parts.push(cond_sql(known, col, op, v, params)?);
+    }
+    for g in anys {
+        if g.is_empty() {
+            return Err(bad("empty OR / IN list"));
         }
-        let part = match (op.as_str(), v) {
-            ("=", Value::Null) => format!("{} IS NULL", col),
-            ("!=", Value::Null) => format!("{} IS NOT NULL", col),
-            (_, Value::Null) => return Err(bad("NULL can only be used with = or !=")),
-            ("like" | "LIKE", Value::Text(_)) => {
-                params.push(v.clone());
-                format!("{} LIKE ${}", col, params.len())
-            }
-            ("like" | "LIKE", _) => return Err(bad("LIKE needs a text pattern")),
-            ("=" | "!=" | ">" | "<" | ">=" | "<=", _) => {
-                lit(v)?;
-                params.push(v.clone());
-                format!("{} {} ${}", col, op, params.len())
-            }
-            _ => return Err(bad(format!("unknown operator '{}'", op))),
-        };
-        parts.push(part);
+        let mut ps = Vec::new();
+        for (col, op, v) in g {
+            ps.push(cond_sql(known, col, op, v, params)?);
+        }
+        parts.push(if ps.len() == 1 {
+            ps.remove(0)
+        } else {
+            format!("({})", ps.join(" OR "))
+        });
     }
     if parts.is_empty() {
         Ok(String::new())
@@ -1214,6 +1260,7 @@ pub struct Update<'a> {
     table: String,
     sets: Vec<(String, Value)>,
     conds: Vec<(String, String, Value)>,
+    anys: Vec<Vec<(String, String, Value)>>,
     all: bool,
 }
 
@@ -1222,6 +1269,7 @@ pub struct Delete<'a> {
     server: &'a Server,
     table: String,
     conds: Vec<(String, String, Value)>,
+    anys: Vec<Vec<(String, String, Value)>>,
     all: bool,
 }
 
@@ -1233,6 +1281,7 @@ impl<'a> Table<'a> {
             table: self.name.clone(),
             sets: Vec::new(),
             conds: Vec::new(),
+            anys: Vec::new(),
             all: false,
         }
     }
@@ -1243,6 +1292,7 @@ impl<'a> Table<'a> {
             server: self.server,
             table: self.name.clone(),
             conds: Vec::new(),
+            anys: Vec::new(),
             all: false,
         }
     }
@@ -1309,7 +1359,7 @@ impl Update<'_> {
             self.server.table(&self.table).check_fks(&names, &vals)?;
             self.server.table(&self.table).check_checks(&names, &vals)?;
         }
-        let wh = where_sql(&known, &self.conds, &mut params)?;
+        let wh = where_sql(&known, &self.conds, &self.anys, &mut params)?;
         let sql = format!("UPDATE {} SET {}{}", self.table, assigns.join(", "), wh);
         match self.server.execute_sql_params(&sql, &params)? {
             ExecutionResult::Affected(n) => Ok(n),
@@ -1344,7 +1394,7 @@ impl Delete<'_> {
         }
         let known = |c: &str| schema.columns.iter().any(|x| x.name == c);
         let mut params: Vec<Value> = Vec::new();
-        let wh = where_sql(&known, &self.conds, &mut params)?;
+        let wh = where_sql(&known, &self.conds, &self.anys, &mut params)?;
         let _fk_guard = self.server.table(&self.table).fk_guard(true)?;
         {
             let t = self.server.table(&self.table);
@@ -1352,6 +1402,9 @@ impl Delete<'_> {
                 let mut q = t.find().columns(&[pcol.as_str()]);
                 for (c, o, v) in &self.conds {
                     q = q.filter(c, o, v.clone());
+                }
+                for g in &self.anys {
+                    q = q.filter_any(g.clone());
                 }
                 for row in q.run()?.rows {
                     let v = row[0].clone();
@@ -1408,7 +1461,7 @@ impl Query<'_> {
             .ok_or_else(|| bad(format!("table '{}' not found", self.table)))?;
         let known = |c: &str| schema.columns.iter().any(|x| x.name == c);
         let mut params: Vec<Value> = Vec::new();
-        let wh = where_sql(&known, &self.conds, &mut params)?;
+        let wh = where_sql(&known, &self.conds, &self.anys, &mut params)?;
         let sql = format!("SELECT COUNT(*) FROM {}{}", self.table, wh);
         match self.server.execute_sql_params(&sql, &params)? {
             ExecutionResult::Rows { rows, .. } => match rows.first().and_then(|r| r.first()) {

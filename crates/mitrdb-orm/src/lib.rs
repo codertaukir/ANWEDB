@@ -373,6 +373,65 @@ impl<M, T: TextField> Col<M, T> {
     }
 }
 
+/// OR group: `User::age.lt(5).or(User::age.gt(60))`, `User::id.in_list([1, 2, 3])`.
+pub struct AnyOf<M> {
+    conds: Vec<(String, String, Value)>,
+    _p: PhantomData<fn() -> M>,
+}
+
+impl<M> AnyOf<M> {
+    pub fn or(mut self, c: Cond<M>) -> Self {
+        self.conds
+            .push((c.col.to_string(), c.op.to_string(), c.value));
+        self
+    }
+}
+
+impl<M> Cond<M> {
+    pub fn or(self, o: Cond<M>) -> AnyOf<M> {
+        AnyOf {
+            conds: vec![
+                (self.col.to_string(), self.op.to_string(), self.value),
+                (o.col.to_string(), o.op.to_string(), o.value),
+            ],
+            _p: PhantomData,
+        }
+    }
+}
+
+impl<M, T: Field> Col<M, T> {
+    /// `col IN (...)`, built as OR of equals. An empty list is an error at run().
+    pub fn in_list<I: IntoIterator<Item = T>>(&self, vals: I) -> AnyOf<M> {
+        AnyOf {
+            conds: vals
+                .into_iter()
+                .map(|v| (self.name.to_string(), "=".to_string(), v.to_value()))
+                .collect(),
+            _p: PhantomData,
+        }
+    }
+    pub fn is_null(&self) -> Cond<M> {
+        Cond {
+            col: self.name,
+            op: "=",
+            value: Value::Null,
+            _p: PhantomData,
+        }
+    }
+    pub fn is_not_null(&self) -> Cond<M> {
+        Cond {
+            col: self.name,
+            op: "!=",
+            value: Value::Null,
+            _p: PhantomData,
+        }
+    }
+    /// lo <= col <= hi (two conditions, ANDed).
+    pub fn between(&self, lo: impl Into<T>, hi: impl Into<T>) -> (Cond<M>, Cond<M>) {
+        (self.cond(">=", lo), self.cond("<=", hi))
+    }
+}
+
 /// Typed query. Conditions are combined with AND.
 pub struct ModelQuery<'a, M> {
     q: Query<'a>,
@@ -380,6 +439,13 @@ pub struct ModelQuery<'a, M> {
 }
 
 impl<'a, M: Model> ModelQuery<'a, M> {
+    pub fn filter_any(mut self, g: AnyOf<M>) -> Self {
+        self.q = self.q.filter_any(g.conds);
+        self
+    }
+    pub fn filter_between(self, b: (Cond<M>, Cond<M>)) -> Self {
+        self.filter(b.0).filter(b.1)
+    }
     pub fn filter(mut self, c: Cond<M>) -> Self {
         self.q = self.q.filter(c.col, c.op, c.value);
         self
@@ -504,6 +570,10 @@ pub struct ModelUpdate<'a, M> {
 }
 
 impl<M: Model> ModelUpdate<'_, M> {
+    pub fn filter_any(mut self, g: AnyOf<M>) -> Self {
+        self.u = self.u.filter_any(g.conds);
+        self
+    }
     pub fn set<T: Field>(mut self, c: Col<M, T>, v: impl Into<T>) -> Self {
         if Some(c.name) == M::UPDATED_AT {
             self.touched = true;
@@ -536,6 +606,10 @@ pub struct ModelDelete<'a, M> {
 }
 
 impl<M: Model> ModelDelete<'_, M> {
+    pub fn filter_any(mut self, g: AnyOf<M>) -> Self {
+        self.d = self.d.filter_any(g.conds);
+        self
+    }
     pub fn filter(mut self, c: Cond<M>) -> Self {
         self.d = self.d.filter(c.col, c.op, c.value);
         self
