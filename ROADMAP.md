@@ -89,8 +89,8 @@ Status tracker. `[x]` = done and measured/tested, `[ ]` = pending.
 - [x] 1. MIN/MAX Timestamp+Float, ORM sum/avg/min/max (69396e6)
 - [x] 2. Float SUM/AVG, plain + GROUP BY (25ed178)
 - [x] 3. ORM group_count / group_count_top (4db5a58)
-- [ ] 4. LIMIT $n / OFFSET $n parameter
-- [ ] 5. Cursor pagination + polling helper (id > last_seen, id < before)
+- [x] 4. LIMIT $n / OFFSET $n: SKIPPED jaan-boojhkar (ORM limit/offset usize hain, injection nahi; raw SQL ke liye Select ka type badalna padta, risk zyada)
+- [x] 5. Cursor pagination: ORM page_after / page_before (52ff9d8)
 - [ ] 6. ORM relations / joins (post.author, user.posts)
 - [ ] 7. TCP path se FK / auto-id / cascade test (network.rs, multi-client)
 - [ ] 8. Purane int-encoded Timestamp/f64 ORM tables ka migration (sync_allow_type_change ya naya column)
