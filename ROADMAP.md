@@ -96,7 +96,7 @@ Status tracker. `[x]` = done and measured/tested, `[ ]` = pending.
 - [x] 8. SKIPPED jaan-boojhkar: migration system nahi chahiye (design: sync(), no migration files). Purane int-encoded tables ko drop + sync() se dobara banao. Agar data bachana ho: legacy_migrate_probe.rs mein verified recipe hai (ADD COLUMN shadow, f64_dec, DROP, RENAME; ALTER TYPE timestamp seedha chalta hai)
 - [ ] 9. Optional: engine-level FK/CHECK/DEFAULT (raw SQL par bhi enforce, catalog format badlega, sabse risky)
 - [ ] 10. Optional: LIKE ke liye index prefix scan (abhi full scan)
-- [ ] 11. Value limit ~3900 bytes: lambi post/message ke liye FileStore ya chunk helper
+- [ ] 11. Value limit: MEASURED (value_limit_probe.rs) per-ROW ~4000 bytes total (1 col 4000 ok / 4050 fail; 3 cols total 3900 ok / 4500 fail), PAGE_SIZE 4096. FileStore: koi size limit nahi (1MB = CHUNK_BYTES buffer), sirf in-process, TCP upload path nahi. Plan: TextStore helper (body_ref = file name). F5: LIMITATIONS 'value limit' per-row likho
 
 ## Final gate (sabse last, is order mein)
 - [ ] F1. cargo test --workspace --release (pehle 348+, ab zyada) 0 failed
