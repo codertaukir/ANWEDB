@@ -92,7 +92,7 @@ Status tracker. `[x]` = done and measured/tested, `[ ]` = pending.
 - [x] 4. LIMIT $n / OFFSET $n: SKIPPED jaan-boojhkar (ORM limit/offset usize hain, injection nahi; raw SQL ke liye Select ka type badalna padta, risk zyada)
 - [x] 5. Cursor pagination: ORM page_after / page_before (52ff9d8)
 - [x] 6. ORM relations v1: belongs_to / has_many / load_many (do-query helpers, chunk 50 kyunki WHERE depth limit 128; real JOIN eager loading nahi, ek call ke queries ke beech snapshot consistent nahi) (b23e37a)
-- [x] 7. TCP path test (tcp_fk.rs): raw TCP INSERT FK bypass kar deta hai (limit test se pinned, enforcement nahi), 4 client x 250 raw INSERT/UPDATE exact (d0a18dc). Note: 1500 autocommit stmts 15.6s (~10ms/stmt) TCP pe, kaaran unmeasured (fsync ya Nagle?)
+- [x] 7. TCP path test (tcp_fk.rs): raw TCP INSERT FK bypass kar deta hai (limit test se pinned), 4 client x 250 raw INSERT/UPDATE exact. Latency probe (tcp_latency.rs, 300 stmts): client nodelay OFF 41ms/stmt (Nagle+delayed-ACK, client artifact), nodelay ON 431us, in-process 95us. TCP clients ko set_nodelay(true) + length+payload ek write mein chahiye
 - [ ] 8. Purane int-encoded Timestamp/f64 ORM tables ka migration (sync_allow_type_change ya naya column)
 - [ ] 9. Optional: engine-level FK/CHECK/DEFAULT (raw SQL par bhi enforce, catalog format badlega, sabse risky)
 - [ ] 10. Optional: LIKE ke liye index prefix scan (abhi full scan)
