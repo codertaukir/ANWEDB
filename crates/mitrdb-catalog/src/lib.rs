@@ -15,6 +15,7 @@ pub enum DataType {
     Text,
     Bool,
     Bytes,
+    Timestamp,
 }
 
 impl DataType {
@@ -24,6 +25,7 @@ impl DataType {
             DataType::Text => 2,
             DataType::Bool => 3,
             DataType::Bytes => 4,
+            DataType::Timestamp => 5,
         }
     }
 
@@ -33,6 +35,7 @@ impl DataType {
             2 => Ok(DataType::Text),
             3 => Ok(DataType::Bool),
             4 => Ok(DataType::Bytes),
+            5 => Ok(DataType::Timestamp),
             _ => Err(Error::PageCorrupted(format!(
                 "Invalid catalog column type tag: {}",
                 v

@@ -34,6 +34,7 @@ fn type_sql(t: DataType) -> &'static str {
         DataType::Text => "text",
         DataType::Bool => "bool",
         DataType::Bytes => "bytes",
+        DataType::Timestamp => "timestamp",
     }
 }
 
@@ -62,6 +63,7 @@ fn parse_columns(spec: &str) -> Result<Vec<ColumnDef>> {
             "TEXT" | "VARCHAR" | "STRING" => DataType::Text,
             "BOOL" | "BOOLEAN" => DataType::Bool,
             "BYTES" | "BLOB" => DataType::Bytes,
+            "TIMESTAMP" | "TIMESTAMPTZ" => DataType::Timestamp,
             other => return Err(bad(format!("unknown column type: {other}"))),
         };
         let rest = tokens[2..].join(" ").to_uppercase();
@@ -456,7 +458,7 @@ fn check_value(table: &str, col: &ColumnDef, v: &Value) -> Result<()> {
                 Ok(())
             }
         }
-        Value::Int64(_) if col.data_type == DataType::Int64 => Ok(()),
+        Value::Int64(_) if matches!(col.data_type, DataType::Int64 | DataType::Timestamp) => Ok(()),
         Value::Text(_) if col.data_type == DataType::Text => Ok(()),
         Value::Bool(_) if col.data_type == DataType::Bool => Ok(()),
         Value::Bytes(_) if col.data_type == DataType::Bytes => Ok(()),

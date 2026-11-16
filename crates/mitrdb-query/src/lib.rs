@@ -1137,7 +1137,9 @@ impl QueryEngine {
                 }
                 Ok(())
             }
-            Value::Int64(_) if col.data_type == DataType::Int64 => Ok(()),
+            Value::Int64(_) if matches!(col.data_type, DataType::Int64 | DataType::Timestamp) => {
+                Ok(())
+            }
             Value::Text(_) if col.data_type == DataType::Text => Ok(()),
             Value::Bool(_) if col.data_type == DataType::Bool => Ok(()),
             Value::Bytes(_) if col.data_type == DataType::Bytes => Ok(()),
@@ -2564,6 +2566,7 @@ impl QueryEngine {
                         "TEXT" | "VARCHAR" | "STRING" => DataType::Text,
                         "BOOL" | "BOOLEAN" => DataType::Bool,
                         "BYTES" | "BLOB" => DataType::Bytes,
+                        "TIMESTAMP" | "TIMESTAMPTZ" => DataType::Timestamp,
                         other => {
                             return Err(Error::TransactionError(format!(
                                 "Unknown column type in ALTER TABLE: {}",
@@ -2620,6 +2623,7 @@ impl QueryEngine {
                 "TEXT" | "VARCHAR" | "STRING" => DataType::Text,
                 "BOOL" | "BOOLEAN" => DataType::Bool,
                 "BYTES" | "BLOB" => DataType::Bytes,
+                "TIMESTAMP" | "TIMESTAMPTZ" => DataType::Timestamp,
                 other => {
                     return Err(Error::TransactionError(format!(
                         "Unknown column type in ALTER TABLE: {}",
@@ -3120,6 +3124,7 @@ impl QueryEngine {
             (expected, value),
             (_, Value::Null)
                 | (DataType::Int64, Value::Int64(_))
+                | (DataType::Timestamp, Value::Int64(_))
                 | (DataType::Text, Value::Text(_))
                 | (DataType::Bool, Value::Bool(_))
                 | (DataType::Bytes, Value::Bytes(_))
@@ -3200,6 +3205,7 @@ impl QueryEngine {
                 "TEXT" | "VARCHAR" | "STRING" => DataType::Text,
                 "BOOL" | "BOOLEAN" => DataType::Bool,
                 "BYTES" | "BLOB" => DataType::Bytes,
+                "TIMESTAMP" | "TIMESTAMPTZ" => DataType::Timestamp,
                 other => {
                     return Err(Error::TransactionError(format!(
                         "Unknown column type: {}",

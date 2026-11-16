@@ -36,7 +36,9 @@ fn main() {
 
     db.sync::<User>().unwrap(); // create the table, or bring it in line with the struct
 
-    let id = db.insert_get_id(&user("a@x.com", "Amit", Some(30), 10)).unwrap();
+    let id = db
+        .insert_get_id(&user("a@x.com", "Amit", Some(30), 10))
+        .unwrap();
     db.insert(&user("b@x.com", "Anil", Some(17), 5)).unwrap();
     println!("new id = {id}");
 
@@ -46,11 +48,21 @@ fn main() {
     let a_names = db.find(User::name.like("A%")).run().unwrap();
     println!("names starting with A = {}", a_names.len());
 
-    db.update::<User>().set(User::name, "Amit K").filter(User::id.eq(id)).run().unwrap();
-    println!("after update = {:?}", db.find_by_id::<User, i64>(id).unwrap());
+    db.update::<User>()
+        .set(User::name, "Amit K")
+        .filter(User::id.eq(id))
+        .run()
+        .unwrap();
+    println!(
+        "after update = {:?}",
+        db.find_by_id::<User, i64>(id).unwrap()
+    );
 
     // CHECK: a negative score is rejected
-    println!("negative score -> {:?}", db.insert(&user("c@x.com", "C", None, -1)).is_err());
+    println!(
+        "negative score -> {:?}",
+        db.insert(&user("c@x.com", "C", None, -1)).is_err()
+    );
 
     // savepoint
     db.execute_sql("BEGIN").unwrap();

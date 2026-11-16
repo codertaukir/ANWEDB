@@ -146,7 +146,7 @@ impl From<i64> for Timestamp {
 }
 
 impl Field for Timestamp {
-    const SQL_TYPE: &'static str = "int";
+    const SQL_TYPE: &'static str = "timestamp";
     fn to_value(&self) -> Value {
         Value::Int64(self.0)
     }

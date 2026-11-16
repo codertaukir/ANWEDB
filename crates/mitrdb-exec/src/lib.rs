@@ -1173,6 +1173,7 @@ impl Executor {
                     let col_def = &schema.columns[col_pos];
                     let type_matches = match (&col_def.data_type, def_val) {
                         (DataType::Int64, Value::Int64(_)) => true,
+                        (DataType::Timestamp, Value::Int64(_)) => true,
                         (DataType::Text, Value::Text(_)) => true,
                         (DataType::Bool, Value::Bool(_)) => true,
                         (DataType::Bytes, Value::Bytes(_)) => true,
@@ -2615,6 +2616,7 @@ impl Executor {
                 _ => Err(format!("{} is not 0 or 1", n)),
             },
             (Value::Bool(b), DataType::Int64) => Ok(Value::Int64(i64::from(*b))),
+            (Value::Int64(n), DataType::Timestamp) => Ok(Value::Int64(*n)),
             (Value::Text(s), DataType::Bytes) => Ok(Value::Bytes(s.as_bytes().to_vec())),
             (Value::Bytes(b), DataType::Text) => String::from_utf8(b.clone())
                 .map(Value::Text)
@@ -2634,7 +2636,9 @@ impl Executor {
                 }
                 Ok(())
             }
-            Value::Int64(_) if col.data_type == DataType::Int64 => Ok(()),
+            Value::Int64(_) if matches!(col.data_type, DataType::Int64 | DataType::Timestamp) => {
+                Ok(())
+            }
             Value::Text(_) if col.data_type == DataType::Text => Ok(()),
             Value::Bool(_) if col.data_type == DataType::Bool => Ok(()),
             Value::Bytes(_) if col.data_type == DataType::Bytes => Ok(()),
