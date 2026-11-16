@@ -1327,7 +1327,7 @@ impl Update<'_> {
         if self.sets.is_empty() {
             return Err(bad("update needs at least one set(...)"));
         }
-        if self.conds.is_empty() && !self.all {
+        if self.conds.is_empty() && self.anys.iter().all(|g| g.is_empty()) && !self.all {
             return Err(bad("update without filter: add filter(...) or all()"));
         }
 
@@ -1389,7 +1389,7 @@ impl Delete<'_> {
             .server
             .get_table_schema(&self.table)?
             .ok_or_else(|| bad(format!("table '{}' not found", self.table)))?;
-        if self.conds.is_empty() && !self.all {
+        if self.conds.is_empty() && self.anys.iter().all(|g| g.is_empty()) && !self.all {
             return Err(bad("delete without filter: add filter(...) or all()"));
         }
         let known = |c: &str| schema.columns.iter().any(|x| x.name == c);
