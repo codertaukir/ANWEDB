@@ -157,7 +157,7 @@ Status tracker. `[x]` = done and measured/tested, `[ ]` = pending.
 - [ ] F3. perf A/B: write_mark_real 4T aur perf_bench batch, OLD 2cf6b66 vs NEW, 12 round, alternate order, taskset 0-3, sha256 alag (63166bf)
   - perf_bench batch (measured): median OLD 75668 vs NEW 75644 rows/s (-0.03%), spread 71.5k-76.2k. Flat.
   - write_mark_real 4T (measured): median OLD 148763 vs NEW 129950 ops/s (-12.6%), par spread OLD 79k-201k, NEW 54k-444k. Inconclusive (noise), regression nahi maana. Andaza: WAL lock contention se variance. Tight number ke liye T=1/T=2 + 30 round baaki.
-- [ ] F4. clippy clean: cargo clippy --workspace --release
+- [x] F4. clippy clean: cargo clippy --workspace --release: 7 warnings (6 needless_borrow in exec, 1 bool_comparison in query) fixed, now 0 warnings (measured)
 - [ ] F5. (copy the 'Limits and numbers' section above into README + docs/LIMITATIONS.md first; drop the [verified]/[unverified] tags only after checking the unverified lines) (LIMITATIONS.md stale lines 7, 12, 23: DEFAULT, cascade, mitrdb_default reserved) Docs update: README Limits (Timestamp/Float native, DEFAULT, LIKE, composite), docs/ORM.md (types, default, on_delete, unique_together, OR/IN, aggregates), docs/LIMITATIONS.md (purani lines hatao)
 - [ ] F6. ROADMAP [x] + git push origin anwedb-clean
 
