@@ -103,7 +103,7 @@ Status tracker. `[x]` = done and measured/tested, `[ ]` = pending.
 - [ ] F2. fault-injection loop (handoff wali for c in mitrdb-storage mitrdb-txn mitrdb-server ...)
 - [ ] F3. perf A/B: write_mark_real 4T aur perf_bench batch, OLD 2cf6b66 vs NEW, 12 round
 - [ ] F4. clippy clean: cargo clippy --workspace --release
-- [ ] F5. Docs update: README Limits (Timestamp/Float native, DEFAULT, LIKE, composite), docs/ORM.md (types, default, on_delete, unique_together, OR/IN, aggregates), docs/LIMITATIONS.md (purani lines hatao)
+- [ ] F5. (LIMITATIONS.md stale lines 7, 12, 23: DEFAULT, cascade, mitrdb_default reserved) Docs update: README Limits (Timestamp/Float native, DEFAULT, LIKE, composite), docs/ORM.md (types, default, on_delete, unique_together, OR/IN, aggregates), docs/LIMITATIONS.md (purani lines hatao)
 - [ ] F6. ROADMAP [x] + git push origin anwedb-clean
 
 ## Known limits (jaan-boojhkar)
