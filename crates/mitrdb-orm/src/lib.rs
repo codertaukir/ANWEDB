@@ -741,6 +741,65 @@ impl<M: Model> ModelQuery<'_, M> {
 }
 
 /// `db.count::<User>()` and `db.count_where(User::age.gt(18))`.
+/// Relation helpers built on find / in_list (no engine changes).
+/// Each call is a separate query: wrap in one explicit txn if you need a
+/// consistent snapshot across them.
+/// Max ids per IN-style query. Engine WHERE depth limit is 128 (OR chain nests),
+/// so stay well below it.
+const LOAD_MANY_CHUNK: usize = 50;
+
+pub trait OrmRelations {
+    /// `post.author`: parent row whose primary key equals `fk`.
+    fn belongs_to<P: Model, K: Field>(&self, fk: K) -> Result<Option<P>>;
+    /// `user.posts`: child rows whose `fk_col` equals `parent_id`.
+    fn has_many<C: Model, K: Field>(&self, fk_col: Col<C, K>, parent_id: K) -> Result<Vec<C>>;
+    /// Batch version (avoids N+1): children grouped by FK value.
+    /// Parents with no children are absent from the map.
+    fn load_many<C: Model, K: Field + Clone + Eq + std::hash::Hash>(
+        &self,
+        fk_col: Col<C, K>,
+        ids: &[K],
+    ) -> Result<std::collections::HashMap<K, Vec<C>>>;
+}
+
+impl OrmRelations for Server {
+    fn belongs_to<P: Model, K: Field>(&self, fk: K) -> Result<Option<P>> {
+        self.find_by_id::<P, K>(fk)
+    }
+    fn has_many<C: Model, K: Field>(&self, fk_col: Col<C, K>, parent_id: K) -> Result<Vec<C>> {
+        self.find(fk_col.eq(parent_id)).run()
+    }
+    fn load_many<C: Model, K: Field + Clone + Eq + std::hash::Hash>(
+        &self,
+        fk_col: Col<C, K>,
+        ids: &[K],
+    ) -> Result<std::collections::HashMap<K, Vec<C>>> {
+        let mut out: std::collections::HashMap<K, Vec<C>> = std::collections::HashMap::new();
+        let mut seen = std::collections::HashSet::new();
+        let uniq: Vec<K> = ids
+            .iter()
+            .filter(|k| seen.insert((*k).clone()))
+            .cloned()
+            .collect();
+        for chunk in uniq.chunks(LOAD_MANY_CHUNK) {
+            let rows = self
+                .all::<C>()
+                .filter_any(fk_col.in_list(chunk.iter().cloned()))
+                .run()?;
+            for r in rows {
+                let v = r
+                    .to_row()
+                    .into_iter()
+                    .find(|(n, _)| *n == fk_col.name)
+                    .map(|(_, v)| v)
+                    .ok_or_else(|| err("fk column missing in row"))?;
+                out.entry(K::from_value(v)?).or_default().push(r);
+            }
+        }
+        Ok(out)
+    }
+}
+
 pub trait OrmCount {
     fn count<M: Model>(&self) -> Result<usize>;
     fn count_where<M: Model>(&self, cond: Cond<M>) -> Result<usize>;
