@@ -277,6 +277,8 @@ pub trait Model: Sized {
     const AUTO_PK: Option<&'static str> = None;
     const CREATED_AT: Option<&'static str> = None;
     const UPDATED_AT: Option<&'static str> = None;
+    /// Composite indexes: ("col_a,col_b", unique).
+    const INDEXES: &'static [(&'static str, bool)] = &[];
     fn to_row(&self) -> Vec<(&'static str, Value)>;
     fn from_row(row: &RowRef) -> Result<Self>;
 }
@@ -426,6 +428,16 @@ impl Orm for Server {
                     self.table(M::TABLE).add_check(c.name, op, v)?;
                 }
             }
+        }
+        for (cols, uniq) in M::INDEXES {
+            let list: Vec<&str> = cols.split(',').map(|c| c.trim()).collect();
+            let name = format!(
+                "{}_{}_{}",
+                M::TABLE,
+                list.join("_"),
+                if *uniq { "uq" } else { "ix" }
+            );
+            self.table(M::TABLE).create_index(&name, &list, *uniq)?;
         }
         Ok(plan)
     }

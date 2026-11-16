@@ -39,6 +39,7 @@ fn expand(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
         }
     };
 
+    let mut idxs: Vec<(String, bool)> = Vec::new();
     let mut table = format!("{}s", name.to_string().to_lowercase());
     for attr in &input.attrs {
         if attr.path().is_ident("model") {
@@ -47,8 +48,18 @@ fn expand(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
                     let v: LitStr = m.value()?.parse()?;
                     table = v.value();
                     Ok(())
+                } else if m.path.is_ident("unique_together") {
+                    let v: LitStr = m.value()?.parse()?;
+                    idxs.push((v.value(), true));
+                    Ok(())
+                } else if m.path.is_ident("index") {
+                    let v: LitStr = m.value()?.parse()?;
+                    idxs.push((v.value(), false));
+                    Ok(())
                 } else {
-                    Err(m.error("unknown #[model(..)] option, expected: table = \"name\""))
+                    Err(m.error(
+                        "unknown #[model(..)] option, expected: table, unique_together, index",
+                    ))
                 }
             })?;
         }
@@ -150,6 +161,8 @@ fn expand(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
         });
     }
 
+    let idx_c: Vec<&String> = idxs.iter().map(|(c, _)| c).collect();
+    let idx_u: Vec<bool> = idxs.iter().map(|(_, u)| *u).collect();
     Ok(quote! {
         #[allow(non_upper_case_globals)]
         impl #name {
@@ -162,6 +175,7 @@ fn expand(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
             const AUTO_PK: ::std::option::Option<&'static str> = #auto_pk;
             const CREATED_AT: ::std::option::Option<&'static str> = #created;
             const UPDATED_AT: ::std::option::Option<&'static str> = #updated;
+            const INDEXES: &'static [(&'static str, bool)] = &[ #( (#idx_c, #idx_u) ),* ];
             fn to_row(&self) -> ::std::vec::Vec<(&'static str, ::mitrdb_orm::Value)> {
                 ::std::vec![ #(#to_row),* ]
             }
