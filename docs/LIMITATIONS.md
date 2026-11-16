@@ -7,7 +7,7 @@
 - No default values in the schema. Use Rust `Default` (`..Default::default()`).
 
 **Constraints**
-- Foreign keys and CHECK are enforced by the Table/ORM API only. Raw `execute_sql` bypasses them.
+- Foreign keys and CHECK are enforced by the Table/ORM API only. Raw `execute_sql` and raw SQL sent over TCP bypass them (pinned by `crates/mitrdb-orm/tests/tcp_fk.rs`).
 - The foreign-key lock works inside one process only. Two processes on the same database cannot enforce FKs safely.
 - Foreign keys are RESTRICT only (no cascade). The parent column must be a primary key of the same type; `bytes` is not supported.
 - CHECK supports `column op literal` (int or text literal). NULL passes. Existing rows are not verified when a check is added.
