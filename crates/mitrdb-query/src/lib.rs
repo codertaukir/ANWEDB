@@ -3130,7 +3130,10 @@ impl QueryEngine {
                 }
                 let col_idx = Self::resolve_column_index(schema, arg_str)?;
                 let dtype = schema.columns[col_idx].data_type;
-                if !matches!(dtype, DataType::Int64 | DataType::Text) {
+                if !matches!(
+                    dtype,
+                    DataType::Int64 | DataType::Text | DataType::Timestamp | DataType::Float
+                ) {
                     return Err(Error::TransactionError(format!(
                         "{} requires INT64 or TEXT column, found {:?} on '{}'",
                         func_str, dtype, schema.columns[col_idx].name

@@ -443,6 +443,27 @@ impl<'a, M: Model> ModelQuery<'a, M> {
         self.q = self.q.filter_any(g.conds);
         self
     }
+    fn agg<T: Field>(self, f: &str, c: Col<M, T>) -> Result<Option<T>> {
+        match self.q.aggregate(f, c.name)? {
+            Value::Null => Ok(None),
+            v => T::from_value(v).map(Some),
+        }
+    }
+    /// `db.all::<Order>().sum(Order::qty)`; None when no rows. Int columns only. Overflow is an error.
+    pub fn sum<T: Field>(self, c: Col<M, T>) -> Result<Option<T>> {
+        self.agg("SUM", c)
+    }
+    /// Integer average (truncated). Int columns only.
+    pub fn avg<T: Field>(self, c: Col<M, T>) -> Result<Option<T>> {
+        self.agg("AVG", c)
+    }
+    /// Works on i64, i32, String, Timestamp, f64.
+    pub fn min<T: Field>(self, c: Col<M, T>) -> Result<Option<T>> {
+        self.agg("MIN", c)
+    }
+    pub fn max<T: Field>(self, c: Col<M, T>) -> Result<Option<T>> {
+        self.agg("MAX", c)
+    }
     pub fn filter_between(self, b: (Cond<M>, Cond<M>)) -> Self {
         self.filter(b.0).filter(b.1)
     }

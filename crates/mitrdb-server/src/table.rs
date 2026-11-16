@@ -1472,6 +1472,40 @@ impl Query<'_> {
         }
     }
 
+    /// `SUM`/`AVG`/`MIN`/`MAX` of one column over the matching rows. NULL if no rows.
+    /// SUM/AVG: int columns only (AVG truncates). MIN/MAX: int, text, timestamp, float.
+    pub fn aggregate(self, func: &str, col: &str) -> Result<Value> {
+        let f = func.to_uppercase();
+        if !["SUM", "AVG", "MIN", "MAX"].contains(&f.as_str()) {
+            return Err(bad(format!("unknown aggregate '{}'", func)));
+        }
+        if self.limit.is_some() || self.offset.is_some() {
+            return Err(bad("aggregate() cannot be used with limit() or offset()"));
+        }
+        if !valid_ident(&self.table) {
+            return Err(bad(format!("bad table name: '{}'", self.table)));
+        }
+        let schema = self
+            .server
+            .get_table_schema(&self.table)?
+            .ok_or_else(|| bad(format!("table '{}' not found", self.table)))?;
+        let known = |c: &str| schema.columns.iter().any(|x| x.name == c);
+        if !known(col) {
+            return Err(bad(format!("unknown column '{}'", col)));
+        }
+        let mut params: Vec<Value> = Vec::new();
+        let wh = where_sql(&known, &self.conds, &self.anys, &mut params)?;
+        let sql = format!("SELECT {}({}) FROM {}{}", f, col, self.table, wh);
+        match self.server.execute_sql_params(&sql, &params)? {
+            ExecutionResult::Rows { rows, .. } => rows
+                .first()
+                .and_then(|r| r.first())
+                .cloned()
+                .ok_or_else(|| bad("empty aggregate result")),
+            other => Err(bad(format!("unexpected result: {other:?}"))),
+        }
+    }
+
     /// First matching row (in the table's column order), or None.
     pub fn one(self) -> Result<Option<Vec<Value>>> {
         Ok(self.limit(1).run()?.rows.into_iter().next())
