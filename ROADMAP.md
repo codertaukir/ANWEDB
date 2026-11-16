@@ -87,7 +87,7 @@ Status tracker. `[x]` = done and measured/tested, `[ ]` = pending.
 
 ## Baaki (is order mein karo, har step ke baad sirf cargo check; full test last mein)
 - [x] 1. MIN/MAX Timestamp+Float, ORM sum/avg/min/max (69396e6)
-- [ ] 2. Float SUM/AVG (compute_aggregates + AccumulatorSum ke Float arm; output type DataType::Float)
+- [x] 2. Float SUM/AVG, plain + GROUP BY (25ed178)
 - [ ] 3. ORM group_count / GROUP BY helper
 - [ ] 4. LIMIT $n / OFFSET $n parameter
 - [ ] 5. Cursor pagination + polling helper (id > last_seen, id < before)
