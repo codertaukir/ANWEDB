@@ -86,7 +86,7 @@ Status tracker. `[x]` = done and measured/tested, `[ ]` = pending.
 - [x] Insert cost measure: plain 120us vs FK+CHECK 159us (+32%), cache zaroori nahi, mat banao
 
 ## Baaki (is order mein karo, har step ke baad sirf cargo check; full test last mein)
-- [ ] 1. MIN/MAX Timestamp+Float, ORM sum/avg/min/max (patch_agg.py + tests/agg.rs, commit baaki)
+- [x] 1. MIN/MAX Timestamp+Float, ORM sum/avg/min/max (69396e6)
 - [ ] 2. Float SUM/AVG (compute_aggregates + AccumulatorSum ke Float arm; output type DataType::Float)
 - [ ] 3. ORM group_count / GROUP BY helper
 - [ ] 4. LIMIT $n / OFFSET $n parameter
