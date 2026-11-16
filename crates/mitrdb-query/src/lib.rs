@@ -3288,7 +3288,24 @@ impl QueryEngine {
             .rfind(')')
             .ok_or_else(|| Error::TransactionError("Missing ')' in CREATE INDEX".to_string()))?;
         let table_name = after_on[..open_paren].trim().to_string();
-        let column_name = after_on[open_paren + 1..close_paren].trim().to_string();
+        let mut parts: Vec<String> = Vec::new();
+        for c in after_on[open_paren + 1..close_paren].split(',') {
+            let c = c.trim();
+            Self::validate_name("column", c)?;
+            if parts.iter().any(|x| x == c) {
+                return Err(Error::TransactionError(format!(
+                    "Duplicate column '{}' in index",
+                    c
+                )));
+            }
+            parts.push(c.to_string());
+        }
+        if parts.len() > 4 {
+            return Err(Error::TransactionError(
+                "An index can have at most 4 columns".to_string(),
+            ));
+        }
+        let column_name = parts.join(",");
         Ok(Statement::CreateIndex {
             index_name,
             table_name,

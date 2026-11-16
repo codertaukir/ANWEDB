@@ -872,6 +872,29 @@ impl Table<'_> {
     }
 }
 
+impl Table<'_> {
+    /// Composite (multi-column) index, 2..=4 columns. Safe to call again.
+    /// `db.table("likes").create_index("likes_u_p", &["user_id", "post_id"], true)?`
+    pub fn create_index(&self, name: &str, cols: &[&str], unique: bool) -> Result<()> {
+        self.check_name()?;
+        if cols.is_empty()
+            || cols.len() > 4
+            || !valid_ident(name)
+            || !cols.iter().all(|c| valid_ident(c))
+        {
+            return Err(bad("bad index name or columns (1..=4 columns)"));
+        }
+        let sql = format!(
+            "CREATE {}INDEX IF NOT EXISTS {} ON {} ({})",
+            if unique { "UNIQUE " } else { "" },
+            name,
+            self.name,
+            cols.join(", ")
+        );
+        self.server.execute_sql(&sql).map(|_| ())
+    }
+}
+
 /// Result of `find().run()`.
 #[derive(Debug, Clone)]
 pub struct Rows {

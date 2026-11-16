@@ -595,7 +595,10 @@ impl Catalog {
             Error::TransactionError(format!("Table '{}' does not exist", table_name))
         })?;
         let schema = state.schemas.get(&table_id).unwrap();
-        if !schema.columns.iter().any(|c| c.name == column_name) {
+        if !column_name
+            .split(',')
+            .all(|n| schema.columns.iter().any(|c| c.name == n))
+        {
             return Err(Error::TransactionError(format!(
                 "Column '{}' not found in table '{}'",
                 column_name, table_name
@@ -877,11 +880,27 @@ impl Catalog {
             .indexes
             .values()
             .filter(|idx| {
-                idx.table_id == table_id && idx.column_name.eq_ignore_ascii_case(old_name)
+                idx.table_id == table_id
+                    && idx
+                        .column_name
+                        .split(',')
+                        .any(|p| p.eq_ignore_ascii_case(old_name))
             })
             .map(|idx| {
                 let mut m = idx.clone();
-                m.column_name = new_name.to_string();
+                let nn = m
+                    .column_name
+                    .split(',')
+                    .map(|p| {
+                        if p.eq_ignore_ascii_case(old_name) {
+                            new_name
+                        } else {
+                            p
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(",");
+                m.column_name = nn;
                 m
             })
             .collect();
@@ -1194,11 +1213,12 @@ impl Catalog {
                 "Cannot drop primary key column".to_string(),
             ));
         }
-        if state
-            .indexes
-            .values()
-            .any(|i| i.table_id == table_id && i.column_name.eq_ignore_ascii_case(col_name))
-        {
+        if state.indexes.values().any(|i| {
+            i.table_id == table_id
+                && i.column_name
+                    .split(',')
+                    .any(|p| p.eq_ignore_ascii_case(col_name))
+        }) {
             return Err(Error::TransactionError(format!(
                 "Column '{}' has an index; DROP INDEX first",
                 col_name

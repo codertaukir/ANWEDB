@@ -952,7 +952,7 @@ impl Executor {
                             index_name, table_name
                         )));
                     }
-                    if let Some(col_pos) = schema.columns.iter().position(|c| c.name == column_name)
+                    if let Some(col_pos) = Self::idx_cols(&schema, &column_name)
                         && let Some(table_tree) = catalog.table_tree(schema.table_id)
                     {
                         let pk_idx = Self::primary_key_index(&schema);
@@ -962,10 +962,10 @@ impl Executor {
                             let tuple =
                                 Tuple::deserialize_for_table(&row_bytes, schema.columns.len())?;
                             let pk_bytes = tuple[pk_idx].to_key_bytes();
-                            let idx_key = tuple[col_pos].to_key_bytes();
+                            let idx_key = Self::ikey(&col_pos, &tuple);
                             let pks = key_map.entry(idx_key).or_default();
                             if unique
-                                && !matches!(tuple[col_pos], Value::Null)
+                                && !col_pos.iter().any(|&i| matches!(tuple[i], Value::Null))
                                 && pks.iter().any(|existing_pk| existing_pk != &pk_bytes)
                             {
                                 return Err(Error::WriteConflict(format!(
@@ -2586,14 +2586,11 @@ impl Executor {
             let _ = txn_mgr.get(txn_id, table_tree, pk)?;
         }
         for idx_meta in &indexes {
-            if let Some(col_pos) = schema
-                .columns
-                .iter()
-                .position(|c| c.name == idx_meta.column_name)
+            if let Some(col_pos) = Self::idx_cols(&schema, &idx_meta.column_name)
                 && let Some(idx_tree) = catalog.index_tree(idx_meta.index_id)
             {
                 for (_pk, tuple) in rows {
-                    let idx_key = tuple[col_pos].to_key_bytes();
+                    let idx_key = Self::ikey(&col_pos, &tuple);
                     let _ = txn_mgr.get(txn_id, &idx_tree, &idx_key)?;
                 }
             }
@@ -2663,6 +2660,28 @@ impl Executor {
         }
     }
 
+    /// Column positions of an index (`"a"` or composite `"a,b"`); None if a column is missing.
+    fn idx_cols(schema: &TableSchema, column_name: &str) -> Option<Vec<usize>> {
+        column_name
+            .split(',')
+            .map(|n| schema.columns.iter().position(|c| c.name == n))
+            .collect()
+    }
+
+    /// Index key: single column = plain key bytes (unchanged); composite = length-prefixed parts.
+    fn ikey(cols: &[usize], t: &[Value]) -> Vec<u8> {
+        if cols.len() == 1 {
+            return t[cols[0]].to_key_bytes();
+        }
+        let mut o = Vec::new();
+        for &i in cols {
+            let k = t[i].to_key_bytes();
+            o.extend_from_slice(&(k.len() as u32).to_be_bytes());
+            o.extend_from_slice(&k);
+        }
+        o
+    }
+
     fn exec_insert(
         &self,
         catalog: &Catalog,
@@ -2694,13 +2713,10 @@ impl Executor {
         let indexes = catalog.get_table_indexes(schema.table_id);
         let mut idx_writes = Vec::new();
         for idx_meta in &indexes {
-            if let Some(col_pos) = schema
-                .columns
-                .iter()
-                .position(|c| c.name == idx_meta.column_name)
+            if let Some(col_pos) = Self::idx_cols(&schema, &idx_meta.column_name)
                 && let Some(idx_tree) = catalog.index_tree(idx_meta.index_id)
             {
-                let idx_key = values[col_pos].to_key_bytes();
+                let idx_key = Self::ikey(&col_pos, values);
                 idx_writes.push((idx_meta.clone(), idx_tree, idx_key));
             }
         }
@@ -2725,11 +2741,8 @@ impl Executor {
             let (mut pks, old_raw) = Self::idx_read_all(txn_mgr, txn_id, idx_tree, idx_key)?;
             if idx_meta.unique
                 && pks.iter().any(|existing_pk| existing_pk != &pk_bytes)
-                && !schema
-                    .columns
-                    .iter()
-                    .position(|c| c.name == idx_meta.column_name)
-                    .is_some_and(|cp| matches!(values[cp], Value::Null))
+                && !Self::idx_cols(&schema, &idx_meta.column_name)
+                    .is_some_and(|cp| cp.iter().any(|&i| matches!(values[i], Value::Null)))
             {
                 return Err(Error::WriteConflict(format!(
                     "Duplicate key violates unique index '{}'",
@@ -2957,10 +2970,7 @@ impl Executor {
 
         let mut idx_trees = Vec::new();
         for idx_meta in &indexes {
-            if let Some(col_pos) = schema
-                .columns
-                .iter()
-                .position(|c| c.name == idx_meta.column_name)
+            if let Some(col_pos) = Self::idx_cols(&schema, &idx_meta.column_name)
                 && let Some(idx_tree) = catalog.index_tree(idx_meta.index_id)
             {
                 idx_trees.push((idx_meta.clone(), col_pos, idx_tree));
@@ -2974,8 +2984,8 @@ impl Executor {
                 lock_targets.push((&tree, new_pk_bytes.clone()));
             }
             for (_, col_pos, idx_tree) in &idx_trees {
-                let old_idx_key = old_tuple[*col_pos].to_key_bytes();
-                let new_idx_key = new_tuple[*col_pos].to_key_bytes();
+                let old_idx_key = Self::ikey(col_pos, old_tuple);
+                let new_idx_key = Self::ikey(col_pos, new_tuple);
                 // Index entry is never written when key and pk are unchanged: no lock needed.
                 if new_idx_key == old_idx_key && new_pk_bytes == old_pk_bytes {
                     continue;
@@ -3011,10 +3021,10 @@ impl Executor {
             if idx_meta.unique {
                 let mut batch_seen_keys = HashSet::new();
                 for (old_pk_bytes, _, _, new_tuple) in &planned_updates {
-                    if matches!(new_tuple[*col_pos], Value::Null) {
+                    if col_pos.iter().any(|&i| matches!(new_tuple[i], Value::Null)) {
                         continue;
                     }
-                    let new_idx_key = new_tuple[*col_pos].to_key_bytes();
+                    let new_idx_key = Self::ikey(col_pos, new_tuple);
                     if !batch_seen_keys.insert(new_idx_key.clone()) {
                         return Err(Error::WriteConflict(format!(
                             "Duplicate key violates unique index '{}'",
@@ -3042,8 +3052,8 @@ impl Executor {
                 let _ = txn_mgr.delete(txn_id, &tree, old_pk_bytes)?;
             }
             for (_, col_pos, idx_tree) in &idx_trees {
-                let old_idx_key = old_tuple[*col_pos].to_key_bytes();
-                let new_idx_key = new_tuple[*col_pos].to_key_bytes();
+                let old_idx_key = Self::ikey(col_pos, old_tuple);
+                let new_idx_key = Self::ikey(col_pos, new_tuple);
                 if old_idx_key != new_idx_key || old_pk_bytes != new_pk_bytes {
                     let (mut pks, old_raw) =
                         Self::idx_read_all(txn_mgr, txn_id, idx_tree, &old_idx_key)?;
@@ -3071,8 +3081,8 @@ impl Executor {
             txn_mgr.put(txn_id, &tree, new_pk_bytes, &new_row_bytes)?;
 
             for (_, col_pos, idx_tree) in &idx_trees {
-                let old_idx_key = old_tuple[*col_pos].to_key_bytes();
-                let new_idx_key = new_tuple[*col_pos].to_key_bytes();
+                let old_idx_key = Self::ikey(col_pos, old_tuple);
+                let new_idx_key = Self::ikey(col_pos, new_tuple);
                 if old_idx_key != new_idx_key || old_pk_bytes != new_pk_bytes {
                     let (mut pks, old_raw) =
                         Self::idx_read_all(txn_mgr, txn_id, idx_tree, &new_idx_key)?;
@@ -3563,10 +3573,7 @@ impl Executor {
 
         let mut idx_trees = Vec::new();
         for idx_meta in &indexes {
-            if let Some(col_pos) = schema
-                .columns
-                .iter()
-                .position(|c| c.name == idx_meta.column_name)
+            if let Some(col_pos) = Self::idx_cols(&schema, &idx_meta.column_name)
                 && let Some(idx_tree) = catalog.index_tree(idx_meta.index_id)
             {
                 idx_trees.push((col_pos, idx_tree));
@@ -3588,7 +3595,7 @@ impl Executor {
                 lock_targets.push((&tree, bf.value.to_key_bytes()));
             } else {
                 for (col_pos, idx_tree) in &idx_trees {
-                    if *col_pos == bf.column_idx {
+                    if col_pos.len() == 1 && col_pos[0] == bf.column_idx {
                         lock_targets.push((idx_tree, bf.value.to_key_bytes()));
                     }
                 }
@@ -3604,7 +3611,7 @@ impl Executor {
                 lock_targets.push((&tree, pk_bytes.clone()));
             }
             for (col_pos, idx_tree) in &idx_trees {
-                let idx_k = tuple[*col_pos].to_key_bytes();
+                let idx_k = Self::ikey(col_pos, tuple);
                 let idx_ptr = Arc::as_ptr(idx_tree) as usize;
                 if seen_lock_targets.insert((idx_ptr, idx_k.clone())) {
                     lock_targets.push((idx_tree, idx_k));
@@ -3622,7 +3629,7 @@ impl Executor {
             std::collections::HashMap::new();
         for (pk_bytes, tuple) in &to_delete {
             for (idx_pos, (col_pos, _)) in idx_trees.iter().enumerate() {
-                let idx_key = tuple[*col_pos].to_key_bytes();
+                let idx_key = Self::ikey(col_pos, tuple);
                 idx_removals
                     .entry((idx_pos, idx_key))
                     .or_default()
