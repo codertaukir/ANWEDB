@@ -96,7 +96,7 @@ Status tracker. `[x]` = done and measured/tested, `[ ]` = pending.
 - [x] 8. SKIPPED jaan-boojhkar: migration system nahi chahiye (design: sync(), no migration files). Purane int-encoded tables ko drop + sync() se dobara banao. Agar data bachana ho: legacy_migrate_probe.rs mein verified recipe hai (ADD COLUMN shadow, f64_dec, DROP, RENAME; ALTER TYPE timestamp seedha chalta hai)
 - [ ] 9. Optional: engine-level FK/CHECK/DEFAULT (raw SQL par bhi enforce, catalog format badlega, sabse risky)
 - [ ] 10. Optional: LIKE ke liye index prefix scan (abhi full scan)
-- [ ] 11. Value limit: MEASURED (value_limit_probe.rs) per-ROW ~4000 bytes total (1 col 4000 ok / 4050 fail; 3 cols total 3900 ok / 4500 fail), PAGE_SIZE 4096. FileStore: koi size limit nahi (1MB = CHUNK_BYTES buffer), sirf in-process, TCP upload path nahi. Plan: TextStore helper (body_ref = file name). F5: LIMITATIONS 'value limit' per-row likho
+- [x] 11. Value limit: row ~4000 bytes total (measured, value_limit_probe.rs). ORM TextStore (put/get/delete/put_and): long text in FileStore, row keeps body_ref; 140 KB Hindi round-trip, failed insert leaves no orphan file (9c9725a). Limit: not atomic with WAL, crash orphans not swept, in-process only
 
 ## Limits and numbers (source for README + docs/LIMITATIONS.md, English)
 [verified] = read in code or measured by a test. [unverified] = reasoning only, check before publishing.
