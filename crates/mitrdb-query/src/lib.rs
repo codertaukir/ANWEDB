@@ -1028,7 +1028,7 @@ impl QueryEngine {
                 let bad = s.is_empty()
                     || s.chars().next().is_some_and(|c| c.is_ascii_digit())
                     || s.chars()
-                        .any(|c| c != '_' && c.is_ascii_alphanumeric() == false);
+                        .any(|c| c != '_' && !c.is_ascii_alphanumeric());
                 if bad {
                     return Err(Error::TransactionError(format!(
                         "Invalid savepoint name: '{}'",

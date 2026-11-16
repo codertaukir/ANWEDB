@@ -2679,11 +2679,11 @@ impl Executor {
             let _ = txn_mgr.get(txn_id, table_tree, pk)?;
         }
         for idx_meta in &indexes {
-            if let Some(col_pos) = Self::idx_cols(&schema, &idx_meta.column_name)
+            if let Some(col_pos) = Self::idx_cols(schema, &idx_meta.column_name)
                 && let Some(idx_tree) = catalog.index_tree(idx_meta.index_id)
             {
                 for (_pk, tuple) in rows {
-                    let idx_key = Self::ikey(&col_pos, &tuple);
+                    let idx_key = Self::ikey(&col_pos, tuple);
                     let _ = txn_mgr.get(txn_id, &idx_tree, &idx_key)?;
                 }
             }
@@ -2806,7 +2806,7 @@ impl Executor {
         let indexes = catalog.get_table_indexes(schema.table_id);
         let mut idx_writes = Vec::new();
         for idx_meta in &indexes {
-            if let Some(col_pos) = Self::idx_cols(&schema, &idx_meta.column_name)
+            if let Some(col_pos) = Self::idx_cols(schema, &idx_meta.column_name)
                 && let Some(idx_tree) = catalog.index_tree(idx_meta.index_id)
             {
                 let idx_key = Self::ikey(&col_pos, values);
@@ -2834,7 +2834,7 @@ impl Executor {
             let (mut pks, old_raw) = Self::idx_read_all(txn_mgr, txn_id, idx_tree, idx_key)?;
             if idx_meta.unique
                 && pks.iter().any(|existing_pk| existing_pk != &pk_bytes)
-                && !Self::idx_cols(&schema, &idx_meta.column_name)
+                && !Self::idx_cols(schema, &idx_meta.column_name)
                     .is_some_and(|cp| cp.iter().any(|&i| matches!(values[i], Value::Null)))
             {
                 return Err(Error::WriteConflict(format!(
@@ -3063,7 +3063,7 @@ impl Executor {
 
         let mut idx_trees = Vec::new();
         for idx_meta in &indexes {
-            if let Some(col_pos) = Self::idx_cols(&schema, &idx_meta.column_name)
+            if let Some(col_pos) = Self::idx_cols(schema, &idx_meta.column_name)
                 && let Some(idx_tree) = catalog.index_tree(idx_meta.index_id)
             {
                 idx_trees.push((idx_meta.clone(), col_pos, idx_tree));
@@ -3666,7 +3666,7 @@ impl Executor {
 
         let mut idx_trees = Vec::new();
         for idx_meta in &indexes {
-            if let Some(col_pos) = Self::idx_cols(&schema, &idx_meta.column_name)
+            if let Some(col_pos) = Self::idx_cols(schema, &idx_meta.column_name)
                 && let Some(idx_tree) = catalog.index_tree(idx_meta.index_id)
             {
                 idx_trees.push((col_pos, idx_tree));
