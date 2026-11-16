@@ -464,6 +464,25 @@ impl<'a, M: Model> ModelQuery<'a, M> {
     pub fn max<T: Field>(self, c: Col<M, T>) -> Result<Option<T>> {
         self.agg("MAX", c)
     }
+    /// Count rows per value of `c`: `db.all::<Like>().group_count(Like::post_id)`.
+    /// Ordered by group value. Use `group_count_top` for HAVING / biggest-first / limit.
+    pub fn group_count<T: Field>(self, c: Col<M, T>) -> Result<Vec<(T, i64)>> {
+        self.group_count_top(c, None, false, None)
+    }
+    /// `min_count` = HAVING COUNT(*) >= n; `by_count_desc` = biggest groups first; `top` = LIMIT.
+    pub fn group_count_top<T: Field>(
+        self,
+        c: Col<M, T>,
+        min_count: Option<i64>,
+        by_count_desc: bool,
+        top: Option<usize>,
+    ) -> Result<Vec<(T, i64)>> {
+        self.q
+            .group_count(c.name, min_count, by_count_desc, top)?
+            .into_iter()
+            .map(|(v, n)| T::from_value(v).map(|t| (t, n)))
+            .collect()
+    }
     pub fn filter_between(self, b: (Cond<M>, Cond<M>)) -> Self {
         self.filter(b.0).filter(b.1)
     }

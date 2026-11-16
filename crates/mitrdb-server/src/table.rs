@@ -1506,6 +1506,56 @@ impl Query<'_> {
         }
     }
 
+    /// `SELECT col, COUNT(*) ... GROUP BY col`. `min_count` = HAVING COUNT(*) >= n,
+    /// `by_count_desc` = biggest groups first, `top` = LIMIT. Returns (group value, count).
+    pub fn group_count(
+        self,
+        col: &str,
+        min_count: Option<i64>,
+        by_count_desc: bool,
+        top: Option<usize>,
+    ) -> Result<Vec<(Value, i64)>> {
+        if self.limit.is_some() || self.offset.is_some() {
+            return Err(bad("group_count() cannot be used with limit() or offset()"));
+        }
+        if !valid_ident(&self.table) {
+            return Err(bad(format!("bad table name: '{}'", self.table)));
+        }
+        let schema = self
+            .server
+            .get_table_schema(&self.table)?
+            .ok_or_else(|| bad(format!("table '{}' not found", self.table)))?;
+        let known = |c: &str| schema.columns.iter().any(|x| x.name == c);
+        if !known(col) {
+            return Err(bad(format!("unknown column '{}'", col)));
+        }
+        let mut params: Vec<Value> = Vec::new();
+        let wh = where_sql(&known, &self.conds, &self.anys, &mut params)?;
+        let mut sql = format!(
+            "SELECT {col}, COUNT(*) FROM {}{} GROUP BY {col}",
+            self.table, wh
+        );
+        if let Some(n) = min_count {
+            sql.push_str(&format!(" HAVING COUNT(*) >= {}", n));
+        }
+        if by_count_desc {
+            sql.push_str(" ORDER BY COUNT(*) DESC");
+        }
+        if let Some(n) = top {
+            sql.push_str(&format!(" LIMIT {}", n));
+        }
+        match self.server.execute_sql_params(&sql, &params)? {
+            ExecutionResult::Rows { rows, .. } => rows
+                .into_iter()
+                .map(|r| match (r.first(), r.get(1)) {
+                    (Some(g), Some(Value::Int64(n))) => Ok((g.clone(), *n)),
+                    _ => Err(bad("unexpected GROUP BY row")),
+                })
+                .collect(),
+            other => Err(bad(format!("unexpected result: {other:?}"))),
+        }
+    }
+
     /// First matching row (in the table's column order), or None.
     pub fn one(self) -> Result<Option<Vec<Value>>> {
         Ok(self.limit(1).run()?.rows.into_iter().next())
