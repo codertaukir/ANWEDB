@@ -1969,6 +1969,21 @@ impl QueryEngine {
         }
 
         if let Some(ref bf) = bound_filter {
+            if let Some((im, r)) = Self::composite_prefix_range(&schema, &indexes, &bf.predicate, 2)
+            {
+                return PhysicalPlan::IndexRangeScan {
+                    schema,
+                    index: im,
+                    ranges: vec![r],
+                    filter: Some(bf.clone()),
+                    projection,
+                    order_by,
+                    sort_keys,
+                    limit,
+                    offset,
+                    top_n,
+                };
+            }
             // Preserve PhysicalPlan::IndexScan for single simple equality predicate on an indexed column
             if let BoundPredicate::Comparison {
                 column_idx,
@@ -1993,6 +2008,7 @@ impl QueryEngine {
                 }
             }
 
+            let comp1 = Self::composite_prefix_range(&schema, &indexes, &bf.predicate, 1);
             // Evaluate candidate IndexRangeScans across available secondary indexes
             let mut best_candidate: Option<(u8, IndexMetadata, Vec<KeyRange>)> = None;
             for idx_meta in indexes {
@@ -2013,6 +2029,11 @@ impl QueryEngine {
                 }
             }
 
+            if best_candidate.is_none()
+                && let Some((im, r)) = comp1
+            {
+                best_candidate = Some((0, im, vec![r]));
+            }
             if let Some((_, idx_meta, ranges)) = best_candidate {
                 return PhysicalPlan::IndexRangeScan {
                     schema,
@@ -2039,6 +2060,75 @@ impl QueryEngine {
             offset,
             top_n,
         }
+    }
+
+    /// Composite index whose leading columns are all pinned by `=` in an AND chain.
+    /// Returns the index and the key-prefix range. Longest match wins; needs >= min_k columns.
+    fn composite_prefix_range(
+        schema: &TableSchema,
+        indexes: &[IndexMetadata],
+        pred: &BoundPredicate,
+        min_k: usize,
+    ) -> Option<(IndexMetadata, KeyRange)> {
+        fn walk(p: &BoundPredicate, out: &mut Vec<(usize, Value)>) {
+            match p {
+                BoundPredicate::Comparison {
+                    column_idx,
+                    op: CompareOp::Eq,
+                    value,
+                } if !matches!(value, Value::Null) => out.push((*column_idx, value.clone())),
+                BoundPredicate::And(a, b) => {
+                    walk(a, out);
+                    walk(b, out);
+                }
+                _ => {}
+            }
+        }
+        let mut eqs: Vec<(usize, Value)> = Vec::new();
+        walk(pred, &mut eqs);
+        let mut best: Option<(usize, IndexMetadata, Vec<u8>)> = None;
+        for im in indexes {
+            if !im.column_name.contains(',') {
+                continue;
+            }
+            let mut prefix: Vec<u8> = Vec::new();
+            let mut k = 0usize;
+            for name in im.column_name.split(',') {
+                let Some(ci) = schema.columns.iter().position(|c| c.name == name) else {
+                    break;
+                };
+                let Some((_, v)) = eqs.iter().find(|(c, _)| *c == ci) else {
+                    break;
+                };
+                let kb = v.to_key_bytes();
+                prefix.extend_from_slice(&(kb.len() as u32).to_be_bytes());
+                prefix.extend_from_slice(&kb);
+                k += 1;
+            }
+            if k >= min_k && best.as_ref().is_none_or(|b| k > b.0) {
+                best = Some((k, im.clone(), prefix));
+            }
+        }
+        let (_, im, p) = best?;
+        let mut succ = p.clone();
+        while let Some(last) = succ.last_mut() {
+            if *last == 0xFF {
+                succ.pop();
+            } else {
+                *last += 1;
+                break;
+            }
+        }
+        if succ.is_empty() {
+            return None;
+        }
+        Some((
+            im,
+            KeyRange {
+                start: mitrdb_catalog::KeyBound::Included(p),
+                end: mitrdb_catalog::KeyBound::Excluded(succ),
+            },
+        ))
     }
 
     fn score_index_ranges(ranges: &[KeyRange]) -> u8 {
