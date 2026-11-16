@@ -91,7 +91,7 @@ Status tracker. `[x]` = done and measured/tested, `[ ]` = pending.
 - [x] 3. ORM group_count / group_count_top (4db5a58)
 - [x] 4. LIMIT $n / OFFSET $n: SKIPPED jaan-boojhkar (ORM limit/offset usize hain, injection nahi; raw SQL ke liye Select ka type badalna padta, risk zyada)
 - [x] 5. Cursor pagination: ORM page_after / page_before (52ff9d8)
-- [ ] 6. ORM relations / joins (post.author, user.posts)
+- [x] 6. ORM relations v1: belongs_to / has_many / load_many (do-query helpers, chunk 50 kyunki WHERE depth limit 128; real JOIN eager loading nahi, ek call ke queries ke beech snapshot consistent nahi) (b23e37a)
 - [ ] 7. TCP path se FK / auto-id / cascade test (network.rs, multi-client)
 - [ ] 8. Purane int-encoded Timestamp/f64 ORM tables ka migration (sync_allow_type_change ya naya column)
 - [ ] 9. Optional: engine-level FK/CHECK/DEFAULT (raw SQL par bhi enforce, catalog format badlega, sabse risky)
