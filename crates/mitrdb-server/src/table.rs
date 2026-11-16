@@ -496,13 +496,14 @@ impl Table<'_> {
             }
         }
 
+        let defaults = self.load_defaults()?;
         let mut values = Vec::with_capacity(schema.columns.len());
         for col in &schema.columns {
             let v = row
                 .iter()
                 .find(|(n, _)| *n == col.name)
                 .map(|(_, v)| v.clone())
-                .unwrap_or(Value::Null);
+                .unwrap_or_else(|| defaults.get(&col.name).cloned().unwrap_or(Value::Null));
             check_value(&self.name, col, &v)?;
             values.push(v);
         }
@@ -610,6 +611,20 @@ const FK_TABLE: &str = "mitrdb_fk";
 /// Serializes FK check + write (child insert/update, parent delete) within this process.
 static FK_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+thread_local! {
+    static FK_HELD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Reentrant (per thread) wrapper, so cascade deletes can recurse without deadlock.
+struct FkGuard(Option<std::sync::MutexGuard<'static, ()>>);
+impl Drop for FkGuard {
+    fn drop(&mut self) {
+        if self.0.is_some() {
+            FK_HELD.with(|h| h.set(false));
+        }
+    }
+}
+
 fn txt(v: &Value) -> String {
     match v {
         Value::Text(s) => s.clone(),
@@ -625,6 +640,17 @@ impl Table<'_> {
         child_col: &str,
         parent_tbl: &str,
         parent_col: &str,
+    ) -> Result<()> {
+        self.add_foreign_key_on(child_col, parent_tbl, parent_col, false)
+    }
+
+    /// Like `add_foreign_key`; `cascade = true` deletes child rows when the parent row is deleted.
+    pub fn add_foreign_key_on(
+        &self,
+        child_col: &str,
+        parent_tbl: &str,
+        parent_col: &str,
+        cascade: bool,
     ) -> Result<()> {
         self.check_name()?;
         if !valid_ident(child_col) || !valid_ident(parent_tbl) || !valid_ident(parent_col) {
@@ -664,8 +690,19 @@ impl Table<'_> {
         ensure_internal(
             self.server,
             FK_TABLE,
-            "id int primary key, child_tbl text not null, child_col text not null, parent_tbl text not null, parent_col text not null",
+            "id int primary key, child_tbl text not null, child_col text not null, parent_tbl text not null, parent_col text not null, on_delete text",
         )?;
+        let has_od = self
+            .server
+            .get_table_schema(FK_TABLE)?
+            .is_some_and(|sc| sc.columns.iter().any(|c| c.name == "on_delete"));
+        if !has_od {
+            match self.server.table(FK_TABLE).sync("id int primary key, child_tbl text not null, child_col text not null, parent_tbl text not null, parent_col text not null, on_delete text") {
+                Ok(_) => {}
+                Err(e) if e.to_string().contains("already exists") => {}
+                Err(e) => return Err(e),
+            }
+        }
         let fk = self.server.table(FK_TABLE);
         let t = |x: &str| Value::Text(x.to_string());
         let exists = fk
@@ -677,7 +714,11 @@ impl Table<'_> {
             .filter("parent_col", "=", t(parent_col))
             .limit(1)
             .run()?;
-        if !exists.rows.is_empty() {
+        if let Some(row) = exists.rows.first() {
+            fk.update()
+                .set("on_delete", t(if cascade { "cascade" } else { "restrict" }))
+                .filter("id", "=", row[0].clone())
+                .run()?;
             return Ok(());
         }
         fk.insert_auto(
@@ -687,13 +728,14 @@ impl Table<'_> {
                 ("child_col", t(child_col)),
                 ("parent_tbl", t(parent_tbl)),
                 ("parent_col", t(parent_col)),
+                ("on_delete", t(if cascade { "cascade" } else { "restrict" })),
             ],
         )?;
         Ok(())
     }
 
     /// Lock held across FK check + write. None when this table has no FK role (no cost).
-    fn fk_guard(&self, as_parent: bool) -> Result<Option<std::sync::MutexGuard<'static, ()>>> {
+    fn fk_guard(&self, as_parent: bool) -> Result<Option<FkGuard>> {
         let involved = if as_parent {
             !self.fks_of_parent()?.is_empty()
         } else {
@@ -702,7 +744,12 @@ impl Table<'_> {
         if !involved {
             return Ok(None);
         }
-        Ok(Some(FK_LOCK.lock().unwrap_or_else(|e| e.into_inner())))
+        if FK_HELD.with(|h| h.get()) {
+            return Ok(None);
+        }
+        let g = FK_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        FK_HELD.with(|h| h.set(true));
+        Ok(Some(FkGuard(Some(g))))
     }
 
     fn fk_rows(&self, by: &str, outs: &[&str]) -> Result<Vec<(String, String, String)>> {
@@ -892,6 +939,104 @@ impl Table<'_> {
             cols.join(", ")
         );
         self.server.execute_sql(&sql).map(|_| ())
+    }
+}
+
+const DEFAULT_TABLE: &str = "mitrdb_default";
+
+impl Table<'_> {
+    fn fk_is_cascade(&self, child_tbl: &str, child_col: &str, parent_col: &str) -> Result<bool> {
+        if self.server.get_table_schema(FK_TABLE)?.is_none() {
+            return Ok(false);
+        }
+        let t = |x: &str| Value::Text(x.to_string());
+        let r = self
+            .server
+            .table(FK_TABLE)
+            .find()
+            .columns(&["on_delete"])
+            .filter("parent_tbl", "=", t(&self.name))
+            .filter("child_tbl", "=", t(child_tbl))
+            .filter("child_col", "=", t(child_col))
+            .filter("parent_col", "=", t(parent_col))
+            .limit(1)
+            .run()?;
+        Ok(matches!(r.rows.first().and_then(|x| x.first()), Some(Value::Text(m)) if m == "cascade"))
+    }
+
+    /// Default for `col` (Int64/Timestamp, Text or Bool). Used by `insert` when the column is not given.
+    /// Table/ORM API only; raw SQL ignores it. Safe to call again (replaces the old default).
+    pub fn set_default(&self, col: &str, value: Value) -> Result<()> {
+        self.check_name()?;
+        let schema = self
+            .server
+            .get_table_schema(&self.name)?
+            .ok_or_else(|| bad(format!("table '{}' not found", self.name)))?;
+        let c = schema
+            .columns
+            .iter()
+            .find(|c| c.name == col && !c.is_dropped())
+            .ok_or_else(|| bad(format!("unknown column '{}'", col)))?;
+        let (iv, tv, bv) = match (&value, c.data_type) {
+            (Value::Int64(n), DataType::Int64 | DataType::Timestamp) => {
+                (Value::Int64(*n), Value::Null, Value::Null)
+            }
+            (Value::Text(x), DataType::Text) => (Value::Null, Value::Text(x.clone()), Value::Null),
+            (Value::Bool(b), DataType::Bool) => (Value::Null, Value::Null, Value::Bool(*b)),
+            _ => {
+                return Err(bad(
+                    "default must be int, text or bool and match the column type",
+                ));
+            }
+        };
+        ensure_internal(
+            self.server,
+            DEFAULT_TABLE,
+            "id int primary key, tbl text not null, col text not null, int_val int, text_val text, bool_val bool",
+        )?;
+        let d = self.server.table(DEFAULT_TABLE);
+        let t = |x: &str| Value::Text(x.to_string());
+        d.delete()
+            .filter("tbl", "=", t(&self.name))
+            .filter("col", "=", t(col))
+            .run()?;
+        d.insert_auto(
+            "id",
+            &[
+                ("tbl", t(&self.name)),
+                ("col", t(col)),
+                ("int_val", iv),
+                ("text_val", tv),
+                ("bool_val", bv),
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn load_defaults(&self) -> Result<std::collections::HashMap<String, Value>> {
+        let mut m = std::collections::HashMap::new();
+        if self.name.starts_with("mitrdb_")
+            || self.server.get_table_schema(DEFAULT_TABLE)?.is_none()
+        {
+            return Ok(m);
+        }
+        let r = self
+            .server
+            .table(DEFAULT_TABLE)
+            .find()
+            .columns(&["col", "int_val", "text_val", "bool_val"])
+            .filter("tbl", "=", Value::Text(self.name.clone()))
+            .run()?;
+        for row in r.rows {
+            let v = match (&row[1], &row[2], &row[3]) {
+                (Value::Int64(n), _, _) => Value::Int64(*n),
+                (_, Value::Text(x), _) => Value::Text(x.clone()),
+                (_, _, Value::Bool(b)) => Value::Bool(*b),
+                _ => continue,
+            };
+            m.insert(txt(&row[0]), v);
+        }
+        Ok(m)
     }
 }
 
@@ -1211,6 +1356,14 @@ impl Delete<'_> {
                 for row in q.run()?.rows {
                     let v = row[0].clone();
                     if matches!(v, Value::Null) {
+                        continue;
+                    }
+                    if t.fk_is_cascade(&ctbl, &ccol, &pcol)? {
+                        self.server
+                            .table(&ctbl)
+                            .delete()
+                            .filter(&ccol, "=", v.clone())
+                            .run()?;
                         continue;
                     }
                     let used = self

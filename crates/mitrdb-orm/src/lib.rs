@@ -187,6 +187,8 @@ pub struct ColumnMeta {
     pub auto: bool,
     pub references: Option<&'static str>,
     pub check: Option<&'static str>,
+    pub cascade: bool,
+    pub default: Option<&'static str>,
 }
 
 impl ColumnMeta {
@@ -201,6 +203,8 @@ impl ColumnMeta {
             auto: false,
             references: None,
             check: None,
+            cascade: false,
+            default: None,
         }
     }
     pub const fn primary_key(mut self) -> Self {
@@ -223,6 +227,15 @@ impl ColumnMeta {
     /// CHECK conditions joined by `;`, e.g. `">= 0"` or `"like 'A%'"`.
     pub const fn check(mut self, c: &'static str) -> Self {
         self.check = Some(c);
+        self
+    }
+    pub const fn cascade(mut self) -> Self {
+        self.cascade = true;
+        self
+    }
+    /// Default literal: `'text'`, `0`, `true`. Applied when an Option field is None.
+    pub const fn default_value(mut self, d: &'static str) -> Self {
+        self.default = Some(d);
         self
     }
     pub const fn auto(mut self) -> Self {
@@ -420,7 +433,16 @@ impl Orm for Server {
                 let (pt, pc) = r
                     .split_once('.')
                     .ok_or_else(|| err("references must look like \"table.column\""))?;
-                self.table(M::TABLE).add_foreign_key(c.name, pt, pc)?;
+                self.table(M::TABLE)
+                    .add_foreign_key_on(c.name, pt, pc, c.cascade)?;
+            }
+            if let Some(d) = c.default {
+                let v = match d.trim() {
+                    "true" => Value::Bool(true),
+                    "false" => Value::Bool(false),
+                    x => parse_check(&format!("= {x}"))?.1,
+                };
+                self.table(M::TABLE).set_default(c.name, v)?;
             }
             if let Some(ck) = c.check {
                 for part in ck.split(';') {
@@ -443,16 +465,22 @@ impl Orm for Server {
     }
     fn insert<M: Model>(&self, m: &M) -> Result<usize> {
         match M::AUTO_PK {
-            None => self.table(M::TABLE).insert(&stamped(m)),
+            None => self.table(M::TABLE).insert(&with_defaults::<M>(stamped(m))),
             Some(pk) => {
-                let row: Vec<_> = stamped(m).into_iter().filter(|(n, _)| *n != pk).collect();
+                let row: Vec<_> = with_defaults::<M>(stamped(m))
+                    .into_iter()
+                    .filter(|(n, _)| *n != pk)
+                    .collect();
                 self.table(M::TABLE).insert_auto(pk, &row).map(|(_, n)| n)
             }
         }
     }
     fn insert_get_id<M: Model>(&self, m: &M) -> Result<i64> {
         let pk = M::AUTO_PK.ok_or_else(|| err("model has no #[col(auto)] column"))?;
-        let row: Vec<_> = stamped(m).into_iter().filter(|(n, _)| *n != pk).collect();
+        let row: Vec<_> = with_defaults::<M>(stamped(m))
+            .into_iter()
+            .filter(|(n, _)| *n != pk)
+            .collect();
         self.table(M::TABLE).insert_auto(pk, &row).map(|(id, _)| id)
     }
     fn find<M: Model>(&self, cond: Cond<M>) -> ModelQuery<'_, M> {
@@ -619,4 +647,16 @@ fn parse_check(part: &str) -> Result<(&'static str, Value)> {
         )
     };
     Ok((op, v))
+}
+
+/// Option fields that are None and have a `default` are left out, so the default applies.
+fn with_defaults<M: Model>(row: Vec<(&'static str, Value)>) -> Vec<(&'static str, Value)> {
+    row.into_iter()
+        .filter(|(n, v)| {
+            !(matches!(v, Value::Null)
+                && M::COLUMNS
+                    .iter()
+                    .any(|c| c.name == *n && c.default.is_some()))
+        })
+        .collect()
 }

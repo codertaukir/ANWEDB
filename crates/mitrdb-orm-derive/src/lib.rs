@@ -82,6 +82,8 @@ fn expand(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
             (false, false, false, false, false, false);
         let mut rf: Option<String> = None;
         let mut ck: Vec<String> = Vec::new();
+        let mut cs = false;
+        let mut df: Option<String> = None;
         for attr in &f.attrs {
             if attr.path().is_ident("col") {
                 attr.parse_nested_meta(|m| {
@@ -99,6 +101,16 @@ fn expand(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
                     } else if m.path.is_ident("check") {
                         let v: LitStr = m.value()?.parse()?;
                         ck.push(v.value());
+                    } else if m.path.is_ident("on_delete") {
+                        let v: LitStr = m.value()?.parse()?;
+                        match v.value().as_str() {
+                            "cascade" => cs = true,
+                            "restrict" => {}
+                            _ => return Err(m.error("on_delete must be \"cascade\" or \"restrict\"")),
+                        }
+                    } else if m.path.is_ident("default") {
+                        let v: LitStr = m.value()?.parse()?;
+                        df = Some(v.value());
                     } else if m.path.is_ident("created_at") {
                         cr = true;
                     } else if m.path.is_ident("updated_at") {
@@ -152,6 +164,12 @@ fn expand(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
         if !ck.is_empty() {
             let j = ck.join(";");
             meta = quote!(#meta.check(#j));
+        }
+        if cs {
+            meta = quote!(#meta.cascade());
+        }
+        if let Some(d) = &df {
+            meta = quote!(#meta.default_value(#d));
         }
         metas.push(meta);
         to_row.push(quote!((#fname, ::mitrdb_orm::Field::to_value(&self.#ident))));
