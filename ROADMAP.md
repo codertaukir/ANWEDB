@@ -84,6 +84,7 @@ Status tracker. `[x]` = done and measured/tested, `[ ]` = pending.
 - [x] Chat app end-to-end test (6efc3e5)
 - [x] Planner: composite index leftmost-prefix equality (a4ef1a6)
 - [x] Insert cost measure: plain 120us vs FK+CHECK 159us (+32%), cache zaroori nahi, mat banao
+- [x] Delete/update guard ab OR groups ginta hai: `filter_any(...)` akela ab refuse nahi hota (pehle `or_in_between_null` fail tha), khali OR group (`in_list([])`) ab bhi filter nahi ginta, poori table safe. empty_group_guard test + or_in green (63166bf)
 
 ## Baaki (is order mein karo, har step ke baad sirf cargo check; full test last mein)
 - [x] 1. MIN/MAX Timestamp+Float, ORM sum/avg/min/max (69396e6)
@@ -148,12 +149,14 @@ Status tracker. `[x]` = done and measured/tested, `[ ]` = pending.
 
 ### Performance numbers (relative only, machine load changes absolutes)
 - [verified] Batch insert about 50k rows/s (explicit txn, tmpfs, 4 cores). Autocommit insert in-process 95 us per statement (small sample).
-- [verified] Perf A/B after native types / composite / DEFAULT / cascade was NOT run yet (Final gate F3).
+- [verified] Perf A/B after native types / composite / DEFAULT / cascade (OLD 2cf6b66 vs 63166bf, 12 rounds, alternating order): perf_bench batch median 75668 vs 75644 rows/s (-0.03%), flat. write_mark_real 4T is inconclusive (median -12.6%, but spread 54k-444k ops/s is larger than the difference).
 
 ## Final gate (sabse last, is order mein)
-- [ ] F1. cargo test --workspace --release (pehle 348+, ab zyada) 0 failed
-- [ ] F2. fault-injection loop (handoff wali for c in mitrdb-storage mitrdb-txn mitrdb-server ...)
-- [ ] F3. perf A/B: write_mark_real 4T aur perf_bench batch, OLD 2cf6b66 vs NEW, 12 round
+- [x] F1. cargo test --workspace --release --no-fail-fast: 366 passed, 0 failed, 17 ignored (measured, 63166bf)
+- [x] F2. fault-injection loop (mitrdb-storage, mitrdb-txn, mitrdb-server, har test file alag, timeout 120s): 0 failures (measured)
+- [ ] F3. perf A/B: write_mark_real 4T aur perf_bench batch, OLD 2cf6b66 vs NEW, 12 round, alternate order, taskset 0-3, sha256 alag (63166bf)
+  - perf_bench batch (measured): median OLD 75668 vs NEW 75644 rows/s (-0.03%), spread 71.5k-76.2k. Flat.
+  - write_mark_real 4T (measured): median OLD 148763 vs NEW 129950 ops/s (-12.6%), par spread OLD 79k-201k, NEW 54k-444k. Inconclusive (noise), regression nahi maana. Andaza: WAL lock contention se variance. Tight number ke liye T=1/T=2 + 30 round baaki.
 - [ ] F4. clippy clean: cargo clippy --workspace --release
 - [ ] F5. (copy the 'Limits and numbers' section above into README + docs/LIMITATIONS.md first; drop the [verified]/[unverified] tags only after checking the unverified lines) (LIMITATIONS.md stale lines 7, 12, 23: DEFAULT, cascade, mitrdb_default reserved) Docs update: README Limits (Timestamp/Float native, DEFAULT, LIKE, composite), docs/ORM.md (types, default, on_delete, unique_together, OR/IN, aggregates), docs/LIMITATIONS.md (purani lines hatao)
 - [ ] F6. ROADMAP [x] + git push origin anwedb-clean
