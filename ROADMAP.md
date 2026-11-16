@@ -73,3 +73,41 @@ Status tracker. `[x]` = done and measured/tested, `[ ]` = pending.
 - [x] Concurrency bugs mile aur fix hue: internal table create race (mitrdb_seq/fk/check "already exists"), FK check+write race (1500 rounds mein 21 orphans -> 0, process-wide FK lock). Limit: lock sirf ek process ke andar, raw SQL bypass (4859919 aur ye commit)
 - [x] Docs: README ORM section, docs/ORM.md, docs/LIMITATIONS.md, orm quickstart example (03d6af8, 2bb3f9b)
 - [ ] Baaki (optional): native Timestamp/Float DataType, DEFAULT in schema, FK cascade, engine-level FK/CHECK (raw SQL enforce), cross-process FK safety
+
+## Session 2: done (local commits, push baaki ho to pehle push karo)
+- [x] Native TIMESTAMP (tag 5, int micros) (d4e3501)
+- [x] Native FLOAT (tag 6, order-preserving key, NaN reject), ORM f64 native (5ce9153)
+- [x] Composite (multi-column) index, unique + non-unique, max 4 cols (5579daa)
+- [x] ORM unique_together / index (5611b94)
+- [x] DEFAULT (mitrdb_default) + FK ON DELETE CASCADE (0815634)
+- [x] ORM OR groups, in_list, between, is_null (e78b52b)
+- [x] Chat app end-to-end test (6efc3e5)
+- [x] Planner: composite index leftmost-prefix equality (a4ef1a6)
+- [x] Insert cost measure: plain 120us vs FK+CHECK 159us (+32%), cache zaroori nahi, mat banao
+
+## Baaki (is order mein karo, har step ke baad sirf cargo check; full test last mein)
+- [ ] 1. MIN/MAX Timestamp+Float, ORM sum/avg/min/max (patch_agg.py + tests/agg.rs, commit baaki)
+- [ ] 2. Float SUM/AVG (compute_aggregates + AccumulatorSum ke Float arm; output type DataType::Float)
+- [ ] 3. ORM group_count / GROUP BY helper
+- [ ] 4. LIMIT $n / OFFSET $n parameter
+- [ ] 5. Cursor pagination + polling helper (id > last_seen, id < before)
+- [ ] 6. ORM relations / joins (post.author, user.posts)
+- [ ] 7. TCP path se FK / auto-id / cascade test (network.rs, multi-client)
+- [ ] 8. Purane int-encoded Timestamp/f64 ORM tables ka migration (sync_allow_type_change ya naya column)
+- [ ] 9. Optional: engine-level FK/CHECK/DEFAULT (raw SQL par bhi enforce, catalog format badlega, sabse risky)
+- [ ] 10. Optional: LIKE ke liye index prefix scan (abhi full scan)
+- [ ] 11. Value limit ~3900 bytes: lambi post/message ke liye FileStore ya chunk helper
+
+## Final gate (sabse last, is order mein)
+- [ ] F1. cargo test --workspace --release (pehle 348+, ab zyada) 0 failed
+- [ ] F2. fault-injection loop (handoff wali for c in mitrdb-storage mitrdb-txn mitrdb-server ...)
+- [ ] F3. perf A/B: write_mark_real 4T aur perf_bench batch, OLD 2cf6b66 vs NEW, 12 round
+- [ ] F4. clippy clean: cargo clippy --workspace --release
+- [ ] F5. Docs update: README Limits (Timestamp/Float native, DEFAULT, LIKE, composite), docs/ORM.md (types, default, on_delete, unique_together, OR/IN, aggregates), docs/LIMITATIONS.md (purani lines hatao)
+- [ ] F6. ROADMAP [x] + git push origin anwedb-clean
+
+## Known limits (jaan-boojhkar)
+- FK/CHECK/DEFAULT sirf Table/ORM API se, raw SQL bypass
+- FK lock sirf ek process ke andar; cascade atomic nahi
+- AVG integer truncate; f64 par CHECK mat lagao
+- App layer ka kaam: password hashing, sessions, WebSocket real-time
