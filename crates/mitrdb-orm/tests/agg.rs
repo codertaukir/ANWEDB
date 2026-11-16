@@ -51,5 +51,14 @@ fn aggregates() {
         Some("c".to_string())
     );
     assert_eq!(db.find(Ord1::shop.eq(99)).sum(Ord1::qty).unwrap(), None);
-    assert!(db.all::<Ord1>().sum(Ord1::price).is_err()); // float SUM not supported yet
+    assert_eq!(db.all::<Ord1>().sum(Ord1::price).unwrap(), Some(10.0));
+    let a = db.all::<Ord1>().avg(Ord1::price).unwrap().unwrap();
+    assert!((a - 10.0 / 3.0).abs() < 1e-9);
+    assert_eq!(db.find(Ord1::shop.eq(99)).avg(Ord1::price).unwrap(), None);
+    let g = format!(
+        "{:?}",
+        db.execute_sql("SELECT shop, SUM(price) FROM ord1s GROUP BY shop")
+            .unwrap()
+    );
+    assert!(g.contains("F64(1.0)") && g.contains("F64(9.0)"), "{g}");
 }

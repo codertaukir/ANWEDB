@@ -301,6 +301,8 @@ pub enum AggregateFunc {
     Min,
     Max,
     Avg,
+    SumF,
+    AvgF,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2980,6 +2982,7 @@ impl QueryEngine {
                 | AggregateFunc::Count
                 | AggregateFunc::Sum
                 | AggregateFunc::Avg => DataType::Int64,
+                AggregateFunc::SumF | AggregateFunc::AvgF => DataType::Float,
                 AggregateFunc::Min | AggregateFunc::Max => {
                     let col_idx = agg.column_idx.unwrap();
                     schema.columns[col_idx].data_type
@@ -3089,14 +3092,18 @@ impl QueryEngine {
                 }
                 let col_idx = Self::resolve_column_index(schema, arg_str)?;
                 let dtype = schema.columns[col_idx].data_type;
-                if dtype != DataType::Int64 {
+                if !matches!(dtype, DataType::Int64 | DataType::Float) {
                     return Err(Error::TransactionError(format!(
                         "SUM requires numeric INT64 column, found {:?} on '{}'",
                         dtype, schema.columns[col_idx].name
                     )));
                 }
                 Ok(BoundAggregate {
-                    func: AggregateFunc::Sum,
+                    func: if dtype == DataType::Float {
+                        AggregateFunc::SumF
+                    } else {
+                        AggregateFunc::Sum
+                    },
                     column_idx: Some(col_idx),
                     output_name: format!("SUM({})", schema.columns[col_idx].name),
                 })
@@ -3109,14 +3116,18 @@ impl QueryEngine {
                 }
                 let col_idx = Self::resolve_column_index(schema, arg_str)?;
                 let dtype = schema.columns[col_idx].data_type;
-                if dtype != DataType::Int64 {
+                if !matches!(dtype, DataType::Int64 | DataType::Float) {
                     return Err(Error::TransactionError(format!(
                         "AVG requires numeric INT64 column, found {:?} on '{}'",
                         dtype, schema.columns[col_idx].name
                     )));
                 }
                 Ok(BoundAggregate {
-                    func: AggregateFunc::Avg,
+                    func: if dtype == DataType::Float {
+                        AggregateFunc::AvgF
+                    } else {
+                        AggregateFunc::Avg
+                    },
                     column_idx: Some(col_idx),
                     output_name: format!("AVG({})", schema.columns[col_idx].name),
                 })

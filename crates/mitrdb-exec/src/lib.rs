@@ -137,6 +137,15 @@ enum AggAccumulator {
         sum: i128,
         count: i128,
     },
+    SumF {
+        col_idx: usize,
+        sum: Option<f64>,
+    },
+    AvgF {
+        col_idx: usize,
+        sum: f64,
+        count: i64,
+    },
     Min {
         col_idx: usize,
         val: Option<Value>,
@@ -145,6 +154,17 @@ enum AggAccumulator {
         col_idx: usize,
         val: Option<Value>,
     },
+}
+
+/// Float aggregate result; inf/NaN (overflow) is an error.
+fn agg_float(f: f64) -> Result<Value> {
+    if f.is_finite() {
+        Ok(Value::Float(mitrdb_query::F64::new(f)))
+    } else {
+        Err(Error::TransactionError(
+            "Float overflow in aggregation".to_string(),
+        ))
+    }
 }
 
 impl AggAccumulator {
@@ -162,6 +182,15 @@ impl AggAccumulator {
             AggregateFunc::Avg => AggAccumulator::Avg {
                 col_idx: agg.column_idx.unwrap(),
                 sum: 0,
+                count: 0,
+            },
+            AggregateFunc::SumF => AggAccumulator::SumF {
+                col_idx: agg.column_idx.unwrap(),
+                sum: None,
+            },
+            AggregateFunc::AvgF => AggAccumulator::AvgF {
+                col_idx: agg.column_idx.unwrap(),
+                sum: 0.0,
                 count: 0,
             },
             AggregateFunc::Min => AggAccumulator::Min {
@@ -221,6 +250,33 @@ impl AggAccumulator {
                     )));
                 }
             },
+            AggAccumulator::SumF { col_idx, sum } => match &row[*col_idx] {
+                Value::Null => {}
+                Value::Float(f) => *sum = Some(sum.unwrap_or(0.0) + f.0),
+                other => {
+                    return Err(Error::TransactionError(format!(
+                        "Invalid non-float value {:?} in SUM aggregation",
+                        other
+                    )));
+                }
+            },
+            AggAccumulator::AvgF {
+                col_idx,
+                sum,
+                count,
+            } => match &row[*col_idx] {
+                Value::Null => {}
+                Value::Float(f) => {
+                    *sum += f.0;
+                    *count += 1;
+                }
+                other => {
+                    return Err(Error::TransactionError(format!(
+                        "Invalid non-float value {:?} in AVG aggregation",
+                        other
+                    )));
+                }
+            },
             AggAccumulator::Min { col_idx, val } => {
                 let v = &row[*col_idx];
                 if !matches!(v, Value::Null) {
@@ -260,6 +316,17 @@ impl AggAccumulator {
             AggAccumulator::CountStar(c) => Value::Int64(c),
             AggAccumulator::Count { count, .. } => Value::Int64(count),
             AggAccumulator::Sum { sum, .. } => sum.map_or(Value::Null, Value::Int64),
+            AggAccumulator::SumF { sum, .. } => match sum {
+                None => Value::Null,
+                Some(f) => agg_float(f)?,
+            },
+            AggAccumulator::AvgF { sum, count, .. } => {
+                if count == 0 {
+                    Value::Null
+                } else {
+                    agg_float(sum / count as f64)?
+                }
+            }
             AggAccumulator::Avg { sum, count, .. } => {
                 if count == 0 {
                     Value::Null
@@ -2147,6 +2214,32 @@ impl Executor {
                         Error::TransactionError("Integer overflow in AVG aggregation".to_string())
                     })?;
                     Value::Int64(avg_i64)
+                }
+            }
+            AggregateFunc::SumF | AggregateFunc::AvgF => {
+                let col_idx = agg.column_idx.unwrap();
+                let (mut sum, mut count) = (0.0f64, 0i64);
+                for r in rows {
+                    match &r[col_idx] {
+                        Value::Null => {}
+                        Value::Float(f) => {
+                            sum += f.0;
+                            count += 1;
+                        }
+                        other => {
+                            return Err(Error::TransactionError(format!(
+                                "Invalid non-float value {:?} in aggregation",
+                                other
+                            )));
+                        }
+                    }
+                }
+                if count == 0 {
+                    Value::Null
+                } else if agg.func == AggregateFunc::SumF {
+                    agg_float(sum)?
+                } else {
+                    agg_float(sum / count as f64)?
                 }
             }
             AggregateFunc::Min => {
