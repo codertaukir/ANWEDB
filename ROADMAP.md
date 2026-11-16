@@ -98,12 +98,64 @@ Status tracker. `[x]` = done and measured/tested, `[ ]` = pending.
 - [ ] 10. Optional: LIKE ke liye index prefix scan (abhi full scan)
 - [ ] 11. Value limit: MEASURED (value_limit_probe.rs) per-ROW ~4000 bytes total (1 col 4000 ok / 4050 fail; 3 cols total 3900 ok / 4500 fail), PAGE_SIZE 4096. FileStore: koi size limit nahi (1MB = CHUNK_BYTES buffer), sirf in-process, TCP upload path nahi. Plan: TextStore helper (body_ref = file name). F5: LIMITATIONS 'value limit' per-row likho
 
+## Limits and numbers (source for README + docs/LIMITATIONS.md, English)
+[verified] = read in code or measured by a test. [unverified] = reasoning only, check before publishing.
+
+### Size limits
+- [verified] A row must fit in one page: PAGE_SIZE = 4096. Measured (value_limit_probe.rs): one text column 4000 bytes ok, 4050 fails; three columns 3900 bytes total ok, 4500 total fails. The limit is per ROW (all columns added up), not per value. The exact threshold between those points is not pinned.
+- [verified] Larger values are refused with an error, nothing half-written is left (big_value.rs: 8 KB, 100 KB, 1 MB, 10 MB).
+- [unverified] The limit counts bytes, not characters. Non-ASCII text uses more bytes per character (Hindi is 3 bytes per character in UTF-8), so fewer characters fit. The probe used ASCII only.
+- [unverified] The error text for an oversized row was not captured (probe printed ok=false only).
+- [verified] FileStore (files.rs) has no size limit: files are streamed in 1 MB chunks (CHUNK_BYTES is a buffer size, not a cap). Files are stored on disk (dir mode 0700, file mode 0600, random 32-hex names), outside the database, WAL and transactions. Saving a file and inserting its row are NOT atomic: save the file first, insert the row second, delete the file if the insert fails. Orphan files after a crash are not swept yet (only `cleanup_tmp` removes old `.tmp` files).
+- [verified] FileStore is in-process only. There is no file upload or download over TCP.
+- [verified] TCP: one frame is at most 1 MB by default (`max_frame_bytes`), for requests and responses.
+
+### TCP / network
+- [verified] Protocol: 4-byte big-endian length + payload. First frame `MITRDB/1`, then optional `AUTH <token>` (token + TLS are optional), then plain SQL text. Errors reply with `"status":"error"`.
+- [verified] Auth failures are rate limited: 5 failures per 60 s per IP.
+- [verified] Raw SQL sent over TCP bypasses FK / CHECK / DEFAULT (pinned by crates/mitrdb-orm/tests/tcp_fk.rs).
+- [verified] Clients must set TCP_NODELAY and send length + payload in ONE write. A client without nodelay and with two writes measured 41163 us per statement, with nodelay 431 us, in-process execute_sql 95 us (tcp_latency.rs, 300 autocommit inserts, one connection). Small sample; whether /tmp was tmpfs was not checked.
+- [verified] Multi-client raw writes are exact (4 clients x 250 INSERT + UPDATE over TCP, tcp_fk.rs).
+
+### Query limits
+- [verified] WHERE nesting depth is at most 128 (`MAX_WHERE_DEPTH`). `in_list` builds an OR chain, so `load_many` uses chunks of 50 ids.
+- [verified] LIKE: `%` and `_`, case-sensitive, text only, full table scan (no index).
+- [verified] `LIMIT $n` / `OFFSET $n` are not supported in SQL (ORM limit/offset are usize values).
+- [verified] Composite index: at most 4 columns. It helps unique constraints and leftmost-prefix equality only (no range or ORDER BY on a prefix).
+- [verified] DDL is not allowed inside a transaction.
+- [verified] Integer AVG truncates; float SUM/AVG are real f64.
+- [unverified] `page_after` / `page_before` on a non-unique column (for example a timestamp) can skip rows that share the same value. Cursor on the primary key is safe (page.rs tests only the PK).
+
+### Constraints and integrity
+- [verified] FK, CHECK and DEFAULT are enforced by the Table/ORM API only. Raw `execute_sql` and TCP bypass them.
+- [verified] The FK lock works inside one process only. Cascade delete is not atomic.
+- [verified] FK: RESTRICT or ON DELETE CASCADE. The parent column must be a primary key of the same type.
+- [verified] CHECK: `column op literal` (int or text), NULL passes, existing rows are not verified when a check is added.
+- [verified] ORM `Default` applies only when an Option field is None. Schema DEFAULT exists through `set_default` / `#[col(default = ..)]`.
+- [verified] Float: NaN is rejected, -0.0 is stored as 0.0.
+- [verified] Auto id is never reused (`mitrdb_seq` counter table, compare-and-swap). The `mitrdb_` table prefix is reserved (mitrdb_seq, mitrdb_fk, mitrdb_check, mitrdb_default).
+
+### Schema changes
+- [verified] `sync()` refuses a changed column type. `sync_allow_type_change` applies it through a shadow column with strict casts (first bad row aborts), refuses primary key and indexed columns, and is not safe against concurrent writers.
+- [verified] Engine ALTER TYPE: int, text, bool, bytes, and int to timestamp work. int to float is refused.
+- [verified] ORM tables created before native TIMESTAMP / FLOAT (commit aa65c8a) stored them in an `int` column and now read wrong. There is no migration system by design: drop the table and `sync()` again. If data must be kept, legacy_migrate_probe.rs has a tested recipe (add shadow column, decode with the old formula, drop, rename).
+
+### Relations
+- [verified] `belongs_to`, `has_many`, `load_many` are plain queries (no JOIN eager loading). Separate calls are not one snapshot unless wrapped in an explicit transaction.
+
+### Not the database's job
+- Password hashing, sessions and WebSocket real-time belong to the app layer.
+
+### Performance numbers (relative only, machine load changes absolutes)
+- [verified] Batch insert about 50k rows/s (explicit txn, tmpfs, 4 cores). Autocommit insert in-process 95 us per statement (small sample).
+- [verified] Perf A/B after native types / composite / DEFAULT / cascade was NOT run yet (Final gate F3).
+
 ## Final gate (sabse last, is order mein)
 - [ ] F1. cargo test --workspace --release (pehle 348+, ab zyada) 0 failed
 - [ ] F2. fault-injection loop (handoff wali for c in mitrdb-storage mitrdb-txn mitrdb-server ...)
 - [ ] F3. perf A/B: write_mark_real 4T aur perf_bench batch, OLD 2cf6b66 vs NEW, 12 round
 - [ ] F4. clippy clean: cargo clippy --workspace --release
-- [ ] F5. (LIMITATIONS.md stale lines 7, 12, 23: DEFAULT, cascade, mitrdb_default reserved) Docs update: README Limits (Timestamp/Float native, DEFAULT, LIKE, composite), docs/ORM.md (types, default, on_delete, unique_together, OR/IN, aggregates), docs/LIMITATIONS.md (purani lines hatao)
+- [ ] F5. (copy the 'Limits and numbers' section above into README + docs/LIMITATIONS.md first; drop the [verified]/[unverified] tags only after checking the unverified lines) (LIMITATIONS.md stale lines 7, 12, 23: DEFAULT, cascade, mitrdb_default reserved) Docs update: README Limits (Timestamp/Float native, DEFAULT, LIKE, composite), docs/ORM.md (types, default, on_delete, unique_together, OR/IN, aggregates), docs/LIMITATIONS.md (purani lines hatao)
 - [ ] F6. ROADMAP [x] + git push origin anwedb-clean
 
 ## Known limits (jaan-boojhkar)
