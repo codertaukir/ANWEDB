@@ -103,10 +103,10 @@ Status tracker. `[x]` = done and measured/tested, `[ ]` = pending.
 [verified] = read in code or measured by a test. [unverified] = reasoning only, check before publishing.
 
 ### Size limits
-- [verified] A row must fit in one page: PAGE_SIZE = 4096. Measured (value_limit_probe.rs): one text column 4000 bytes ok, 4050 fails; three columns 3900 bytes total ok, 4500 total fails. The limit is per ROW (all columns added up), not per value. The exact threshold between those points is not pinned.
+- [verified] A row must fit in one page: PAGE_SIZE = 4096. Measured (value_limit_probe.rs): one text column 4000 bytes ok, 4050 fails; three columns 3900 bytes total ok, 4500 total fails. The limit is per ROW (all columns added up), not per value. Exact threshold (table `id int primary key` + one text column, value_limit_probe2.rs): 4019 bytes ok, 4020 fails. The three-column exact threshold is not pinned.
 - [verified] Larger values are refused with an error, nothing half-written is left (big_value.rs: 8 KB, 100 KB, 1 MB, 10 MB).
-- [unverified] The limit counts bytes, not characters. Non-ASCII text uses more bytes per character (Hindi is 3 bytes per character in UTF-8), so fewer characters fit. The probe used ASCII only.
-- [unverified] The error text for an oversized row was not captured (probe printed ok=false only).
+- [verified] The limit counts bytes, not characters (value_limit_probe2.rs, Hindi 3 bytes per character in UTF-8): 1339 Hindi characters (4017 bytes) ok, 1340 (4020 bytes) fails. Same table as above, so about 1339 Hindi characters fit in one column.
+- [verified] An oversized row is refused by `Table::insert` with `Error::OutOfSpace` (Display `OUT_OF_SPACE`), same for 4100, 5000 and 100000 bytes. The table stays usable after the failure. How the error looks over raw SQL / TCP was not checked.
 - [verified] FileStore (files.rs) has no size limit: files are streamed in 1 MB chunks (CHUNK_BYTES is a buffer size, not a cap). Files are stored on disk (dir mode 0700, file mode 0600, random 32-hex names), outside the database, WAL and transactions. Saving a file and inserting its row are NOT atomic: save the file first, insert the row second, delete the file if the insert fails. Orphan files after a crash are not swept yet (only `cleanup_tmp` removes old `.tmp` files).
 - [verified] FileStore is in-process only. There is no file upload or download over TCP.
 - [verified] TCP: one frame is at most 1 MB by default (`max_frame_bytes`), for requests and responses.
@@ -125,7 +125,7 @@ Status tracker. `[x]` = done and measured/tested, `[ ]` = pending.
 - [verified] Composite index: at most 4 columns. It helps unique constraints and leftmost-prefix equality only (no range or ORDER BY on a prefix).
 - [verified] DDL is not allowed inside a transaction.
 - [verified] Integer AVG truncates; float SUM/AVG are real f64.
-- [unverified] `page_after` / `page_before` on a non-unique column (for example a timestamp) can skip rows that share the same value. Cursor on the primary key is safe (page.rs tests only the PK).
+- [verified] `page_after` / `page_before` on a NON-UNIQUE column skip rows (page_nonunique.rs: 50 rows, 10 distinct values x 5 rows, page size 7, cursor = last row's value: only 35 of 50 rows seen, forward and backward). The rest of the rows that share the cursor value are skipped. Cursor on the primary key (or any unique column) is safe: 50 of 50, also with a filter.
 
 ### Constraints and integrity
 - [verified] FK, CHECK and DEFAULT are enforced by the Table/ORM API only. Raw `execute_sql` and TCP bypass them.
@@ -158,7 +158,7 @@ Status tracker. `[x]` = done and measured/tested, `[ ]` = pending.
   - perf_bench batch (measured): median OLD 75668 vs NEW 75644 rows/s (-0.03%), spread 71.5k-76.2k. Flat.
   - write_mark_real 4T (measured): median OLD 148763 vs NEW 129950 ops/s (-12.6%), par spread OLD 79k-201k, NEW 54k-444k. Inconclusive (noise), regression nahi maana. Andaza: WAL lock contention se variance. Tight number ke liye T=1/T=2 + 30 round baaki.
 - [x] F4. clippy clean: cargo clippy --workspace --release: 7 warnings (6 needless_borrow in exec, 1 bool_comparison in query) fixed, now 0 warnings (measured)
-- [ ] F5. (copy the 'Limits and numbers' section above into README + docs/LIMITATIONS.md first; drop the [verified]/[unverified] tags only after checking the unverified lines) (LIMITATIONS.md stale lines 7, 12, 23: DEFAULT, cascade, mitrdb_default reserved) Docs update: README Limits (Timestamp/Float native, DEFAULT, LIKE, composite), docs/ORM.md (types, default, on_delete, unique_together, OR/IN, aggregates), docs/LIMITATIONS.md (purani lines hatao)
+- [x] F5. DONE (docs updated, 3 unverified lines pinned by value_limit_probe2.rs + page_nonunique.rs; old note: copy the 'Limits and numbers' section above into README + docs/LIMITATIONS.md first; drop the [verified]/[unverified] tags only after checking the unverified lines) (LIMITATIONS.md stale lines 7, 12, 23: DEFAULT, cascade, mitrdb_default reserved) Docs update: README Limits (Timestamp/Float native, DEFAULT, LIKE, composite), docs/ORM.md (types, default, on_delete, unique_together, OR/IN, aggregates), docs/LIMITATIONS.md (purani lines hatao)
 - [ ] F6. ROADMAP [x] + git push origin anwedb-clean
 
 ## Known limits (jaan-boojhkar)

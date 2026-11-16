@@ -140,7 +140,7 @@ Placeholders work for values in INSERT, UPDATE (`SET col = $n`, `col = col +/- $
 
 ### Big files
 
-A DB value holds up to about 3900 bytes. Bigger data (photos, videos) goes to disk with `FileStore`; the DB keeps only the file name in a normal `text` column.
+A whole row (all columns added up) must fit in about 4000 bytes (counted in bytes, not characters). Bigger data (photos, videos) goes to disk with `FileStore`; the DB keeps only the file name in a normal `text` column.
 
 ```rust
 let files = FileStore::open("data/files")?;
@@ -184,8 +184,8 @@ See [docs/ORM.md](docs/ORM.md), [docs/LIMITATIONS.md](docs/LIMITATIONS.md) and
 Know these before you use MITRDB.
 
 **Data**
-- Engine types: `INT`, `TEXT`, `BOOL`, `BYTES`. The ORM maps `Timestamp` and `f64` onto `INT` (see [docs/LIMITATIONS.md](docs/LIMITATIONS.md)).
-- A value can be about 3900 bytes. Bigger values give a clean `OUT_OF_SPACE` error. Store big files outside the database and keep only the path or name in a text column.
+- Engine types: `INT`, `TEXT`, `BOOL`, `BYTES`, `TIMESTAMP`, `FLOAT` (see [docs/LIMITATIONS.md](docs/LIMITATIONS.md)).
+- A row can be about 4000 bytes in total, all columns added up (4019 ASCII bytes or 1339 Hindi characters in a one-text-column table). A bigger row gives a clean `OUT_OF_SPACE` error. Store big files outside the database and keep only the path or name in a text column.
 - A `UNIQUE` column allows many `NULL` values; real duplicate values are rejected. All `NULL` rows share one index entry, so concurrent writes of `NULL` into the same unique column run one after another (from code reading, not measured).
 
 **SQL**
@@ -195,10 +195,10 @@ Know these before you use MITRDB.
 - Large deletes write a lot of WAL. One `DELETE FROM t WHERE id >= 0` over 10k, 20k and 40k rows (table with an INT primary key, an INT and a TEXT column, no secondary index) took about 157, 139 and 117 us per row, wrote about 6 KB of WAL per row, and raised the process peak memory by about 45, 59 and 82 MB (2-5 KB per row). Per-row time and memory fall as the row count grows, so do not extrapolate. Measured on a release build with the files on tmpfs, one run per size; real disks with slower fsync were not measured. Delete in batches (for example a few thousand rows per statement) for big tables. This is a known limitation, not yet optimized.
 - Indexes on columns with few distinct values (many rows per value) slow inserts: inserting 100k rows with 1000 distinct indexed values ran about 3x slower and wrote about 9x more WAL than the same insert without the index (measured, one machine).
 - A write that fills the WAL's disk fails with an error and the transaction is marked for recovery; nothing is silently lost. Keep enough free disk space for the WAL.
-- Not supported yet: `DEFAULT`, composite indexes, `LIMIT $n` / `OFFSET $n`.
+- Not supported yet: `LIMIT $n` / `OFFSET $n`. `DEFAULT` and composite indexes (max 4 columns, leftmost-prefix equality) are supported.
 - `LIKE` (`%`, `_`) works on text columns: case-sensitive, no escape, always a full scan plus filter.
 - `SAVEPOINT x`, `ROLLBACK TO x`, `RELEASE x` work inside `BEGIN ... COMMIT`.
-- Foreign keys (RESTRICT) and CHECK are enforced by the Table/ORM API only; raw SQL bypasses them. Details in [docs/LIMITATIONS.md](docs/LIMITATIONS.md).
+- Foreign keys (RESTRICT or ON DELETE CASCADE), CHECK and DEFAULT are enforced by the Table/ORM API only; raw SQL bypasses them. Details in [docs/LIMITATIONS.md](docs/LIMITATIONS.md).
 - One index value can match many rows (tested with thousands): the row list is stored in chunks. Updating or deleting one row of a very large group rewrites part of that group's list, so it gets slower as the group grows (not measured).
 - `ALTER TABLE t DROP [COLUMN] c` (and `table.drop_column("c")`) is a **logical drop**: the column is renamed internally to `__dropped_<pos>` and hidden from `SELECT *`, rows are not rewritten, so the data stays on disk and no space is reclaimed. You cannot drop a primary key column, an indexed column, or the last live column. Column names that start with `__dropped_` are reserved and rejected.
 - `INSERT` can write many rows: `INSERT INTO t VALUES (1,'a'), (2,'b')` (up to 1000 rows). With auto-commit it is all or nothing. Inside an explicit transaction, rows before a failing row stay in that transaction. `INSERT INTO t (b, a) VALUES (...)` also works; columns you leave out become NULL.
