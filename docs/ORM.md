@@ -85,7 +85,7 @@ A row must fit in one page (about 4000 bytes in total, counted in bytes). For lo
 
 ## TCP clients
 
-Set `TCP_NODELAY` (`set_nodelay(true)`) and send length + payload in one write (431 us vs 41 ms per statement measured). Raw SQL over TCP bypasses FK / CHECK / DEFAULT.
+Set `TCP_NODELAY` (`set_nodelay(true)`) and send length + payload in one write (431 us vs 41 ms per statement measured). Raw SQL INSERT/UPDATE/DELETE over TCP on tables with FK / CHECK / DEFAULT rules is refused; use the ORM.
 
 ## Transactions and savepoints
 

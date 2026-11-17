@@ -95,7 +95,7 @@ Status tracker. `[x]` = done and measured/tested, `[ ]` = pending.
 - [x] 6. ORM relations v1: belongs_to / has_many / load_many (do-query helpers, chunk 50 kyunki WHERE depth limit 128; real JOIN eager loading nahi, ek call ke queries ke beech snapshot consistent nahi) (b23e37a)
 - [x] 7. TCP path test (tcp_fk.rs): raw TCP INSERT FK bypass kar deta hai (limit test se pinned), 4 client x 250 raw INSERT/UPDATE exact. Latency probe (tcp_latency.rs, 300 stmts): client nodelay OFF 41ms/stmt (Nagle+delayed-ACK, client artifact), nodelay ON 431us, in-process 95us. TCP clients ko set_nodelay(true) + length+payload ek write mein chahiye
 - [x] 8. SKIPPED jaan-boojhkar: migration system nahi chahiye (design: sync(), no migration files). Purane int-encoded tables ko drop + sync() se dobara banao. Agar data bachana ho: legacy_migrate_probe.rs mein verified recipe hai (ADD COLUMN shadow, f64_dec, DROP, RENAME; ALTER TYPE timestamp seedha chalta hai)
-- [ ] 9. Optional: engine-level FK/CHECK/DEFAULT (raw SQL par bhi enforce, catalog format badlega, sabse risky)
+- [x] 9. SKIPPED jaan-boojhkar (engine-level enforce, catalog format badlega). Bypass reject se band: `guard_raw_dml` (server/table.rs), Table/ORM `*_internal` calls use karta hai. raw_guard.rs + tcp_fk.rs pinned
 - [x] 10. LIKE literal-prefix index range scan: `like_prefix_range` + Like arm in `extract_column_ranges` (query/lib.rs). Range is a superset, every caller re-applies the filter (verified in code: exec_index_range_scan, narrow_dml_entries via exec_update/exec_delete, IndexOrderedScan, PK path). like_prefix.rs 14 patterns (incl. Hindi) correct, like_explain.rs pins plans (`ab%`, `ab_c%` IndexRangeScan; `%bc`, `_bc`, unindexed SeqScan). Probe N=20000: prefix 131 us vs full scan 76733 us (different queries, order of magnitude only)
 - [x] 11. Value limit: row ~4000 bytes total (measured, value_limit_probe.rs). ORM TextStore (put/get/delete/put_and): long text in FileStore, row keeps body_ref; 140 KB Hindi round-trip, failed insert leaves no orphan file (9c9725a). Limit: not atomic with WAL, crash orphans not swept, in-process only
 
@@ -114,7 +114,7 @@ Status tracker. `[x]` = done and measured/tested, `[ ]` = pending.
 ### TCP / network
 - [verified] Protocol: 4-byte big-endian length + payload. First frame `MITRDB/1`, then optional `AUTH <token>` (token + TLS are optional), then plain SQL text. Errors reply with `"status":"error"`.
 - [verified] Auth failures are rate limited: 5 failures per 60 s per IP.
-- [verified] Raw SQL sent over TCP bypasses FK / CHECK / DEFAULT (pinned by crates/mitrdb-orm/tests/tcp_fk.rs).
+- [verified] Raw SQL INSERT/UPDATE/DELETE over TCP on a table with FK / CHECK / DEFAULT rules (or an FK parent) is refused (pinned by tcp_fk.rs, raw_guard.rs).
 - [verified] Clients must set TCP_NODELAY and send length + payload in ONE write. A client without nodelay and with two writes measured 41163 us per statement, with nodelay 431 us, in-process execute_sql 95 us (tcp_latency.rs, 300 autocommit inserts, one connection). Small sample; whether /tmp was tmpfs was not checked.
 - [verified] Multi-client raw writes are exact (4 clients x 250 INSERT + UPDATE over TCP, tcp_fk.rs).
 
@@ -128,7 +128,7 @@ Status tracker. `[x]` = done and measured/tested, `[ ]` = pending.
 - [verified] `page_after` / `page_before` on a NON-UNIQUE column skip rows (page_nonunique.rs: 50 rows, 10 distinct values x 5 rows, page size 7, cursor = last row's value: only 35 of 50 rows seen, forward and backward). The rest of the rows that share the cursor value are skipped. Cursor on the primary key (or any unique column) is safe: 50 of 50, also with a filter.
 
 ### Constraints and integrity
-- [verified] FK, CHECK and DEFAULT are enforced by the Table/ORM API only. Raw `execute_sql` and TCP bypass them.
+- [verified] FK, CHECK and DEFAULT are enforced by the Table/ORM API only. Raw SQL writes (INSERT/UPDATE/DELETE) through `execute_sql`, `execute_sql_params`, `execute_in_session`, `execute_plan*`, the CLI and TCP are REFUSED on a table that has FK, CHECK or DEFAULT rules, or that is the parent of an FK (error contains `refused`). Only the Table/ORM API may write to such tables. SELECT and DDL are not affected; tables without rules accept raw SQL as before. The guard checks INSERT/UPDATE/DELETE only.
 - [verified] The FK lock works inside one process only. Cascade delete is not atomic.
 - [verified] FK: RESTRICT or ON DELETE CASCADE. The parent column must be a primary key of the same type.
 - [verified] CHECK: `column op literal` (int or text), NULL passes, existing rows are not verified when a check is added.
@@ -162,7 +162,7 @@ Status tracker. `[x]` = done and measured/tested, `[ ]` = pending.
 - [x] F6. ROADMAP [x] + git push origin anwedb-clean
 
 ## Known limits (jaan-boojhkar)
-- FK/CHECK/DEFAULT sirf Table/ORM API se, raw SQL bypass
+- FK/CHECK/DEFAULT sirf Table/ORM API se; raw SQL DML un tables pe refused (bypass band)
 - FK lock sirf ek process ke andar; cascade atomic nahi
 - AVG integer truncate; f64 par CHECK mat lagao
 - App layer ka kaam: password hashing, sessions, WebSocket real-time

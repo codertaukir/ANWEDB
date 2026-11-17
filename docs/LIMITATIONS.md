@@ -13,7 +13,7 @@
 - Tables created before native TIMESTAMP / FLOAT (commit `aa65c8a`) stored them in an `int` column and now read wrong. There is no migration system by design: drop the table and `sync()` again. To keep data, `legacy_migrate_probe.rs` has a tested recipe (add shadow column, decode with the old formula, drop, rename).
 
 **Constraints**
-- FK, CHECK and DEFAULT are enforced by the Table/ORM API only. Raw `execute_sql` and raw SQL over TCP bypass them (pinned by `crates/mitrdb-orm/tests/tcp_fk.rs`).
+- FK, CHECK and DEFAULT are enforced by the Table/ORM API only. Raw SQL writes (INSERT/UPDATE/DELETE) through `execute_sql`, `execute_sql_params`, `execute_in_session`, `execute_plan*`, the CLI and TCP are REFUSED on a table that has FK, CHECK or DEFAULT rules, or that is the parent of an FK (error contains `refused`). Only the Table/ORM API may write to such tables. SELECT and DDL are not affected; tables without rules accept raw SQL as before. Pinned by `raw_guard.rs` and `tcp_fk.rs`.
 - The FK lock works inside one process only. Two processes on the same database cannot enforce FKs safely.
 - Foreign keys: RESTRICT or `ON DELETE CASCADE`. Cascade delete is not atomic. The parent column must be a primary key of the same type; `bytes` is not supported.
 - CHECK supports `column op literal` (int or text). NULL passes. Existing rows are not verified when a check is added.

@@ -303,7 +303,7 @@ impl Table<'_> {
         }
 
         for sql in &plan {
-            self.server.execute_sql(sql)?;
+            self.server.execute_sql_internal(sql)?;
         }
         Ok(plan)
     }
@@ -315,7 +315,7 @@ impl Table<'_> {
             return Err(bad("bad column name"));
         }
         self.server
-            .execute_sql(&format!("ALTER TABLE {} DROP COLUMN {}", self.name, name))
+            .execute_sql_internal(&format!("ALTER TABLE {} DROP COLUMN {}", self.name, name))
             .map(|_| ())
     }
 
@@ -326,7 +326,7 @@ impl Table<'_> {
             return Err(bad("bad column name"));
         }
         self.server
-            .execute_sql(&format!(
+            .execute_sql_internal(&format!(
                 "ALTER TABLE {} RENAME COLUMN {} TO {}",
                 self.name, old, new
             ))
@@ -340,7 +340,7 @@ impl Table<'_> {
             return Err(bad("bad column name"));
         }
         self.server
-            .execute_sql(&format!(
+            .execute_sql_internal(&format!(
                 "ALTER TABLE {} ALTER COLUMN {} DROP NOT NULL",
                 self.name, name
             ))
@@ -378,7 +378,7 @@ impl Table<'_> {
                 self.name, name
             ),
         };
-        self.server.execute_sql(&sql).map(|_| ())
+        self.server.execute_sql_internal(&sql).map(|_| ())
     }
 
     /// Change a column's type (`ty`: "int", "text", "bool", "bytes"), rewriting rows through a
@@ -394,7 +394,7 @@ impl Table<'_> {
             return Err(bad("bad type name"));
         }
         self.server
-            .execute_sql(&format!(
+            .execute_sql_internal(&format!(
                 "ALTER TABLE {} ALTER COLUMN {} TYPE {}",
                 self.name, name, ty
             ))
@@ -515,7 +515,7 @@ impl Table<'_> {
 
         match self
             .server
-            .execute_plan(PhysicalPlan::Insert { schema, values })?
+            .execute_plan_internal(PhysicalPlan::Insert { schema, values })?
         {
             ExecutionResult::Affected(n) => Ok(n),
             _ => Ok(1),
@@ -938,7 +938,7 @@ impl Table<'_> {
             self.name,
             cols.join(", ")
         );
-        self.server.execute_sql(&sql).map(|_| ())
+        self.server.execute_sql_internal(&sql).map(|_| ())
     }
 }
 
@@ -1188,7 +1188,7 @@ impl Query<'_> {
             sql.push_str(&format!(" OFFSET {}", n));
         }
 
-        match self.server.execute_sql_params(&sql, &params)? {
+        match self.server.execute_sql_params_internal(&sql, &params)? {
             ExecutionResult::Rows { columns, rows } => Ok(Rows { columns, rows }),
             other => Err(bad(format!("unexpected result: {other:?}"))),
         }
@@ -1361,7 +1361,7 @@ impl Update<'_> {
         }
         let wh = where_sql(&known, &self.conds, &self.anys, &mut params)?;
         let sql = format!("UPDATE {} SET {}{}", self.table, assigns.join(", "), wh);
-        match self.server.execute_sql_params(&sql, &params)? {
+        match self.server.execute_sql_params_internal(&sql, &params)? {
             ExecutionResult::Affected(n) => Ok(n),
             other => Err(bad(format!("unexpected result: {other:?}"))),
         }
@@ -1439,7 +1439,7 @@ impl Delete<'_> {
             }
         }
         let sql = format!("DELETE FROM {}{}", self.table, wh);
-        match self.server.execute_sql_params(&sql, &params)? {
+        match self.server.execute_sql_params_internal(&sql, &params)? {
             ExecutionResult::Affected(n) => Ok(n),
             other => Err(bad(format!("unexpected result: {other:?}"))),
         }
@@ -1463,7 +1463,7 @@ impl Query<'_> {
         let mut params: Vec<Value> = Vec::new();
         let wh = where_sql(&known, &self.conds, &self.anys, &mut params)?;
         let sql = format!("SELECT COUNT(*) FROM {}{}", self.table, wh);
-        match self.server.execute_sql_params(&sql, &params)? {
+        match self.server.execute_sql_params_internal(&sql, &params)? {
             ExecutionResult::Rows { rows, .. } => match rows.first().and_then(|r| r.first()) {
                 Some(Value::Int64(n)) if *n >= 0 => Ok(*n as usize),
                 other => Err(bad(format!("unexpected COUNT result: {other:?}"))),
@@ -1496,7 +1496,7 @@ impl Query<'_> {
         let mut params: Vec<Value> = Vec::new();
         let wh = where_sql(&known, &self.conds, &self.anys, &mut params)?;
         let sql = format!("SELECT {}({}) FROM {}{}", f, col, self.table, wh);
-        match self.server.execute_sql_params(&sql, &params)? {
+        match self.server.execute_sql_params_internal(&sql, &params)? {
             ExecutionResult::Rows { rows, .. } => rows
                 .first()
                 .and_then(|r| r.first())
@@ -1544,7 +1544,7 @@ impl Query<'_> {
         if let Some(n) = top {
             sql.push_str(&format!(" LIMIT {}", n));
         }
-        match self.server.execute_sql_params(&sql, &params)? {
+        match self.server.execute_sql_params_internal(&sql, &params)? {
             ExecutionResult::Rows { rows, .. } => rows
                 .into_iter()
                 .map(|r| match (r.first(), r.get(1)) {
@@ -1566,5 +1566,53 @@ impl Table<'_> {
     /// Number of rows in the table.
     pub fn count(&self) -> Result<usize> {
         self.find().count()
+    }
+}
+
+impl Server {
+    /// Raw SQL / TCP / CLI path: refuse INSERT/UPDATE/DELETE on tables that have FK / CHECK /
+    /// DEFAULT rules (only the Table/ORM API enforces them). Table/ORM uses the *_internal calls.
+    pub(crate) fn guard_raw_dml(&self, plan: &PhysicalPlan) -> Result<()> {
+        let name = match plan {
+            PhysicalPlan::Insert { schema, .. }
+            | PhysicalPlan::InsertMany { schema, .. }
+            | PhysicalPlan::Update { schema, .. }
+            | PhysicalPlan::Delete { schema, .. } => &schema.name,
+            _ => return Ok(()),
+        };
+        if name.starts_with("mitrdb_") {
+            return Ok(());
+        }
+        let t = self.table(name);
+        let why = if !t.fks_of_child()?.is_empty() {
+            "foreign key"
+        } else if !t.fks_of_parent()?.is_empty() {
+            "foreign key (referenced as parent)"
+        } else if self.def_rows_exist(CHECK_TABLE, name)? {
+            "CHECK"
+        } else if self.def_rows_exist(DEFAULT_TABLE, name)? {
+            "DEFAULT"
+        } else {
+            return Ok(());
+        };
+        Err(bad(format!(
+            "raw SQL write refused on table '{}': it has {} rules that only the Table/ORM API enforces",
+            name, why
+        )))
+    }
+
+    fn def_rows_exist(&self, def_table: &str, name: &str) -> Result<bool> {
+        if self.get_table_schema(def_table)?.is_none() {
+            return Ok(false);
+        }
+        Ok(!self
+            .table(def_table)
+            .find()
+            .columns(&["tbl"])
+            .filter("tbl", "=", Value::Text(name.to_string()))
+            .limit(1)
+            .run()?
+            .rows
+            .is_empty())
     }
 }

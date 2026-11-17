@@ -250,6 +250,13 @@ impl Server {
     }
 
     pub fn execute_sql(&self, sql: &str) -> Result<ExecutionResult> {
+        GLOBAL_METRICS.record_query();
+        let plan = self.query_engine.parse_and_plan(sql)?;
+        self.guard_raw_dml(&plan)?;
+        self.execute_plan_internal(plan)
+    }
+
+    pub(crate) fn execute_sql_internal(&self, sql: &str) -> Result<ExecutionResult> {
         let isolation = *self.default_session.isolation.lock().unwrap();
         let mut active_txn = self.default_session.active_txn.lock().unwrap();
         self.execute_with_txn_slot(sql, &mut active_txn, isolation)
@@ -257,6 +264,17 @@ impl Server {
 
     /// SQL with `$1, $2, ...` placeholders; values are bound, never spliced into the text.
     pub fn execute_sql_params(
+        &self,
+        sql: &str,
+        params: &[mitrdb_query::Value],
+    ) -> Result<ExecutionResult> {
+        GLOBAL_METRICS.record_query();
+        let plan = self.query_engine.parse_and_plan_params(sql, params)?;
+        self.guard_raw_dml(&plan)?;
+        self.execute_plan_internal(plan)
+    }
+
+    pub(crate) fn execute_sql_params_internal(
         &self,
         sql: &str,
         params: &[mitrdb_query::Value],
@@ -269,25 +287,33 @@ impl Server {
     }
 
     pub fn execute_in_session(&self, session_id: SessionId, sql: &str) -> Result<ExecutionResult> {
-        let session = self
-            .sessions
-            .lock()
-            .unwrap()
-            .get(&session_id)
-            .cloned()
-            .ok_or_else(|| Error::TransactionError(format!("Unknown session {}", session_id)))?;
-        let isolation = *session.isolation.lock().unwrap();
-        let mut active_txn = session.active_txn.lock().unwrap();
-        self.execute_with_txn_slot(sql, &mut active_txn, isolation)
+        GLOBAL_METRICS.record_query();
+        let plan = self.query_engine.parse_and_plan(sql)?;
+        self.guard_raw_dml(&plan)?;
+        self.execute_plan_in_session_internal(session_id, plan)
     }
 
     pub fn execute_plan(&self, plan: PhysicalPlan) -> Result<ExecutionResult> {
+        self.guard_raw_dml(&plan)?;
+        self.execute_plan_internal(plan)
+    }
+
+    pub(crate) fn execute_plan_internal(&self, plan: PhysicalPlan) -> Result<ExecutionResult> {
         let isolation = *self.default_session.isolation.lock().unwrap();
         let mut active_txn = self.default_session.active_txn.lock().unwrap();
         self.execute_plan_with_txn_slot(plan, &mut active_txn, isolation)
     }
 
     pub fn execute_plan_in_session(
+        &self,
+        session_id: SessionId,
+        plan: PhysicalPlan,
+    ) -> Result<ExecutionResult> {
+        self.guard_raw_dml(&plan)?;
+        self.execute_plan_in_session_internal(session_id, plan)
+    }
+
+    pub(crate) fn execute_plan_in_session_internal(
         &self,
         session_id: SessionId,
         plan: PhysicalPlan,

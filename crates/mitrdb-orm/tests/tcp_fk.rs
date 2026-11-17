@@ -88,17 +88,15 @@ fn raw_tcp_insert_bypasses_fk() {
         .is_err()
     );
     assert_eq!(db.all::<TChild>().run().unwrap().len(), 0);
-    // TCP raw path: orphan goes in (documented limit, pinned here)
+    // TCP raw path: refused (FK table, only Table/ORM API may write)
     let mut c = client(h.local_addr());
     let r = sql(&mut c, "INSERT INTO tcp_child VALUES (2, 99)");
-    assert!(!r.contains("\"status\":\"error\""), "reply: {r}");
-    let kids = db.all::<TChild>().run().unwrap();
-    assert_eq!(
-        kids.len(),
-        1,
-        "if this fails, FK got enforced on TCP: update docs/LIMITATIONS.md"
+    assert!(
+        r.contains("\"status\":\"error\"") && r.contains("refused"),
+        "reply: {r}"
     );
-    assert_eq!(kids[0].parent_id, 99);
+    let kids = db.all::<TChild>().run().unwrap();
+    assert_eq!(kids.len(), 0, "raw TCP insert must not reach an FK table");
     h.shutdown().unwrap();
 }
 
