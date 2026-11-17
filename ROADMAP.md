@@ -91,8 +91,15 @@ Status tracker. `[x]` = done and measured/tested, `[ ]` = pending.
 - [x] F3 closed as inconclusive (noise), F1-F6 all done (a1c3b17, 309baea)
 - [x] Step 10: LIKE literal-prefix index range scan (3777be7): `like_prefix_range` + Like arm in `extract_column_ranges` (query/lib.rs). Range is a superset, every caller re-applies the filter (verified in code). like_prefix.rs 14 patterns (incl. Hindi), like_explain.rs pins plans (`ab%`, `ab_c%` IndexRangeScan; `%bc`, `_bc`, unindexed column SeqScan). Probe N=20000: prefix 131 us vs full scan 76733 us (different queries, order of magnitude only)
 - [x] Raw SQL bypass closed (76e068d): `guard_raw_dml` (server/table.rs) refuses raw INSERT/UPDATE/DELETE on tables with FK / CHECK / DEFAULT rules and on FK parents. Public entry points guarded: execute_sql, execute_sql_params, execute_in_session, execute_plan, execute_plan_in_session (also CLI and TCP). Table/ORM use `*_internal` calls. raw_guard.rs + tcp_fk.rs (now asserts rejection). Gate: clippy 0, 372 passed / 0 failed / 17 ignored
-- [ ] Open (not measured): per-statement guard lookup cost on raw DML (reads `mitrdb_*` tables, also on tables without rules); insert A/B after LIKE + guard changes
+- [x] Guard cost + insert A/B measured (Session 4): see below. Result: noise
 - [ ] Open (not checked): guard covers public Server entry points only; any internal path calling the executor directly would skip it
+
+## Session 4: production checks (measured, real disk btrfs, not tmpfs)
+- [x] Raw insert A/B, pre-guard 3777be7 vs HEAD, 12 rounds alternating, taskset 0-3, TMPDIR on /home (btrfs): batch median 54688 vs 55226 rows/s (+1.0%), spread 47.4k-59.9k vs 49.1k-58.6k; autocommit median 13045 vs 13145 us (+0.8%), spread 12.0k-15.7k vs 12.3k-14.6k. Difference is far smaller than spread = noise, no guard cost visible. Autocommit ~13 ms/stmt on real disk (fsync), vs 95 us on tmpfs
+- [x] Soak v2 (examples/soak.rs): 30 cycles of kill -9, 4 threads raw INSERT/UPDATE/DELETE, intent+ack log, real disk. Every cycle lost=0 phantom=0, rows grew to 34210, stderr empty. Scope: process crash only, NOT power loss / fsync lie. (Soak v1 showed 29 failures: harness bug, ack written after SQL, kill -9 between them. Not an engine bug, replaced by v2)
+- [x] Backup/restore drill (examples/backup_drill.rs, restore_drill.rs): backup of 1000 rows -> Server::restore into new dir -> rows=1000 content_ok=true; restore into an existing dir refused; backup with 1 flipped byte in t.db: validate and restore both fail with `Database file CRC mismatch` (corruption detected)
+- [ ] Open: soak did not cover power loss, disk full, FK/CHECK tables via ORM under kill -9, TCP path under kill -9, or runs longer than 30 min
+- [ ] Open: backup drill was a small DB (1000 rows, no concurrent writers during backup)
 
 ## Baaki (is order mein karo, har step ke baad sirf cargo check; full test last mein)
 - [x] 1. MIN/MAX Timestamp+Float, ORM sum/avg/min/max (69396e6)
