@@ -64,15 +64,15 @@ Status tracker. `[x]` = done and measured/tested, `[ ]` = pending.
 - [x] SQL `LIKE` (`%`, `_`, case-sensitive, text only, full scan + filter) (d6263f8); ORM `Col::like` (38e317a)
 - [x] Auto id kabhi reuse nahi hoti: `mitrdb_seq` counter table, CAS update (52d3cab)
 - [x] Perf A/B (write_mark_real 4T, 10 round): OLD 2cf6b66 248.5k vs NEW 245.0k ops/s (-1.4%, noise). Purana 73k vs 368k fark = noisy machine, engine regression nahi
-- [ ] Baaki: default values (Rust `Default` se kaam chalta hai), foreign key, CHECK, savepoints, native Timestamp/Float DataType, non-hint path A/B
+- [x] Baaki (closed): default values, foreign key, CHECK, savepoints, native Timestamp/Float, non-hint path A/B: sab ho chuka (Session 2 aur Session 3 dekho)
 - [x] SAVEPOINT / ROLLBACK TO / RELEASE: `TransactionContext.savepoints`, `write_mark` + `rollback_to_mark` par based, COMMIT/ROLLBACK par khud saaf (c36e383)
-- [x] Foreign key (RESTRICT): `#[col(references = "table.col")]`, `Table::add_foreign_key`, defs `mitrdb_fk` mein, catalog format untouched. Limit: sirf Table/ORM API enforce karta hai, raw SQL bypass, check+write atomic nahi (353fbac)
+- [x] Foreign key (RESTRICT): `#[col(references = "table.col")]`, `Table::add_foreign_key`, defs `mitrdb_fk` mein, catalog format untouched. Limit: sirf Table/ORM API enforce karta hai, raw SQL bypass, check+write atomic nahi (353fbac) [UPDATE Session 3: raw SQL bypass ab band, raw DML refused]
 - [x] CHECK: `#[col(check = ">= 0")]`, `Table::add_check`, defs `mitrdb_check` mein, insert/update par, NULL pass, purani rows verify nahi. f64 column par mat lagao (55b1a5f)
 - [x] Perf A/B #2 (write_mark_real 4T, 12 round): OLD 2cf6b66 82.1k vs NEW 83.9k ops/s (+2.2%, noise). Absolute numbers machine load se badalte hain, sirf relative dekho
 - [x] Non-hint path A/B (perf_bench batch 20000 rows, 12 round): OLD 78.5k vs NEW 78.3k rows/s (-0.2%, noise)
-- [x] Concurrency bugs mile aur fix hue: internal table create race (mitrdb_seq/fk/check "already exists"), FK check+write race (1500 rounds mein 21 orphans -> 0, process-wide FK lock). Limit: lock sirf ek process ke andar, raw SQL bypass (4859919 aur ye commit)
+- [x] Concurrency bugs mile aur fix hue: internal table create race (mitrdb_seq/fk/check "already exists"), FK check+write race (1500 rounds mein 21 orphans -> 0, process-wide FK lock). Limit: lock sirf ek process ke andar, raw SQL bypass (4859919 aur ye commit) [UPDATE: raw SQL bypass ab band, Session 3]
 - [x] Docs: README ORM section, docs/ORM.md, docs/LIMITATIONS.md, orm quickstart example (03d6af8, 2bb3f9b)
-- [ ] Baaki (optional): native Timestamp/Float DataType, DEFAULT in schema, FK cascade, engine-level FK/CHECK (raw SQL enforce), cross-process FK safety
+- [x] Baaki (closed): native Timestamp/Float, DEFAULT, FK cascade done (Session 2). Engine-level FK/CHECK skipped (step 9), raw SQL DML reject se band (Session 3). Cross-process FK safety khula: Known limits
 
 ## Session 2: done (local commits, push baaki ho to pehle push karo)
 - [x] Native TIMESTAMP (tag 5, int micros) (d4e3501)
@@ -86,6 +86,14 @@ Status tracker. `[x]` = done and measured/tested, `[ ]` = pending.
 - [x] Insert cost measure: plain 120us vs FK+CHECK 159us (+32%), cache zaroori nahi, mat banao
 - [x] Delete/update guard ab OR groups ginta hai: `filter_any(...)` akela ab refuse nahi hota (pehle `or_in_between_null` fail tha), khali OR group (`in_list([])`) ab bhi filter nahi ginta, poori table safe. empty_group_guard test + or_in green (63166bf)
 
+## Session 3: done (origin 76e068d)
+- [x] F5 docs: README, docs/LIMITATIONS.md, docs/ORM.md refreshed; 3 unverified lines pinned: row limit in bytes (4019 ASCII bytes / 1339 Hindi chars, value_limit_probe2.rs), oversize error `OUT_OF_SPACE` (Table::insert), `page_after`/`page_before` on non-unique column skips rows (35 of 50, page_nonunique.rs)
+- [x] F3 closed as inconclusive (noise), F1-F6 all done (a1c3b17, 309baea)
+- [x] Step 10: LIKE literal-prefix index range scan (3777be7): `like_prefix_range` + Like arm in `extract_column_ranges` (query/lib.rs). Range is a superset, every caller re-applies the filter (verified in code). like_prefix.rs 14 patterns (incl. Hindi), like_explain.rs pins plans (`ab%`, `ab_c%` IndexRangeScan; `%bc`, `_bc`, unindexed column SeqScan). Probe N=20000: prefix 131 us vs full scan 76733 us (different queries, order of magnitude only)
+- [x] Raw SQL bypass closed (76e068d): `guard_raw_dml` (server/table.rs) refuses raw INSERT/UPDATE/DELETE on tables with FK / CHECK / DEFAULT rules and on FK parents. Public entry points guarded: execute_sql, execute_sql_params, execute_in_session, execute_plan, execute_plan_in_session (also CLI and TCP). Table/ORM use `*_internal` calls. raw_guard.rs + tcp_fk.rs (now asserts rejection). Gate: clippy 0, 372 passed / 0 failed / 17 ignored
+- [ ] Open (not measured): per-statement guard lookup cost on raw DML (reads `mitrdb_*` tables, also on tables without rules); insert A/B after LIKE + guard changes
+- [ ] Open (not checked): guard covers public Server entry points only; any internal path calling the executor directly would skip it
+
 ## Baaki (is order mein karo, har step ke baad sirf cargo check; full test last mein)
 - [x] 1. MIN/MAX Timestamp+Float, ORM sum/avg/min/max (69396e6)
 - [x] 2. Float SUM/AVG, plain + GROUP BY (25ed178)
@@ -93,7 +101,7 @@ Status tracker. `[x]` = done and measured/tested, `[ ]` = pending.
 - [x] 4. LIMIT $n / OFFSET $n: SKIPPED jaan-boojhkar (ORM limit/offset usize hain, injection nahi; raw SQL ke liye Select ka type badalna padta, risk zyada)
 - [x] 5. Cursor pagination: ORM page_after / page_before (52ff9d8)
 - [x] 6. ORM relations v1: belongs_to / has_many / load_many (do-query helpers, chunk 50 kyunki WHERE depth limit 128; real JOIN eager loading nahi, ek call ke queries ke beech snapshot consistent nahi) (b23e37a)
-- [x] 7. TCP path test (tcp_fk.rs): raw TCP INSERT FK bypass kar deta hai (limit test se pinned), 4 client x 250 raw INSERT/UPDATE exact. Latency probe (tcp_latency.rs, 300 stmts): client nodelay OFF 41ms/stmt (Nagle+delayed-ACK, client artifact), nodelay ON 431us, in-process 95us. TCP clients ko set_nodelay(true) + length+payload ek write mein chahiye
+- [x] 7. TCP path test (tcp_fk.rs): raw TCP INSERT FK bypass kar deta hai (limit test se pinned), 4 client x 250 raw INSERT/UPDATE exact. Latency probe (tcp_latency.rs, 300 stmts): client nodelay OFF 41ms/stmt (Nagle+delayed-ACK, client artifact), nodelay ON 431us, in-process 95us. TCP clients ko set_nodelay(true) + length+payload ek write mein chahiye [UPDATE Session 3: ye bypass ab band, raw TCP INSERT FK table pe refused, tcp_fk.rs rejection assert karta hai]
 - [x] 8. SKIPPED jaan-boojhkar: migration system nahi chahiye (design: sync(), no migration files). Purane int-encoded tables ko drop + sync() se dobara banao. Agar data bachana ho: legacy_migrate_probe.rs mein verified recipe hai (ADD COLUMN shadow, f64_dec, DROP, RENAME; ALTER TYPE timestamp seedha chalta hai)
 - [x] 9. SKIPPED jaan-boojhkar (engine-level enforce, catalog format badlega). Bypass reject se band: `guard_raw_dml` (server/table.rs), Table/ORM `*_internal` calls use karta hai. raw_guard.rs + tcp_fk.rs pinned
 - [x] 10. LIKE literal-prefix index range scan: `like_prefix_range` + Like arm in `extract_column_ranges` (query/lib.rs). Range is a superset, every caller re-applies the filter (verified in code: exec_index_range_scan, narrow_dml_entries via exec_update/exec_delete, IndexOrderedScan, PK path). like_prefix.rs 14 patterns (incl. Hindi) correct, like_explain.rs pins plans (`ab%`, `ab_c%` IndexRangeScan; `%bc`, `_bc`, unindexed SeqScan). Probe N=20000: prefix 131 us vs full scan 76733 us (different queries, order of magnitude only)
@@ -152,7 +160,7 @@ Status tracker. `[x]` = done and measured/tested, `[ ]` = pending.
 - [verified] Perf A/B after native types / composite / DEFAULT / cascade (OLD 2cf6b66 vs 63166bf, 12 rounds, alternating order): perf_bench batch median 75668 vs 75644 rows/s (-0.03%), flat. write_mark_real 4T is inconclusive (median -12.6%, but spread 54k-444k ops/s is larger than the difference).
 
 ## Final gate (sabse last, is order mein)
-- [x] F1. cargo test --workspace --release --no-fail-fast: 366 passed, 0 failed, 17 ignored (measured, 63166bf)
+- [x] F1. cargo test --workspace --release --no-fail-fast: 372 passed, 0 failed, 17 ignored (measured, gate before 76e068d; pehle 366 @63166bf, 368 @a1c3b17, 371 @3777be7)
 - [x] F2. fault-injection loop (mitrdb-storage, mitrdb-txn, mitrdb-server, har test file alag, timeout 120s): 0 failures (measured)
 - [x] F3. DONE: inconclusive (noise), regression nahi maana. perf A/B: write_mark_real 4T aur perf_bench batch, OLD 2cf6b66 vs NEW, 12 round, alternate order, taskset 0-3, sha256 alag (63166bf)
   - perf_bench batch (measured): median OLD 75668 vs NEW 75644 rows/s (-0.03%), spread 71.5k-76.2k. Flat.
@@ -166,3 +174,5 @@ Status tracker. `[x]` = done and measured/tested, `[ ]` = pending.
 - FK lock sirf ek process ke andar; cascade atomic nahi
 - AVG integer truncate; f64 par CHECK mat lagao
 - App layer ka kaam: password hashing, sessions, WebSocket real-time
+- Raw SQL guard: sirf INSERT/UPDATE/DELETE check hota hai (SELECT/DDL nahi); lookup cost measure nahi hua
+- Step 9 (engine-level FK/CHECK/DEFAULT) skipped: raw SQL enforce nahi hota, sirf reject

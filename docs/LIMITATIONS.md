@@ -17,6 +17,7 @@
 - The FK lock works inside one process only. Two processes on the same database cannot enforce FKs safely.
 - Foreign keys: RESTRICT or `ON DELETE CASCADE`. Cascade delete is not atomic. The parent column must be a primary key of the same type; `bytes` is not supported.
 - CHECK supports `column op literal` (int or text). NULL passes. Existing rows are not verified when a check is added.
+- The raw SQL guard only checks INSERT/UPDATE/DELETE and reads the rule tables (`mitrdb_fk`, `mitrdb_check`, `mitrdb_default`) per statement; its cost is not measured. To write to a table with rules from SQL, use the Table/ORM API. Engine-level enforcement of these rules is not implemented.
 - Update/delete through the ORM needs a `filter` or `filter_any`. An empty OR group (`in_list([])`) does not count as a filter, so the whole table is protected.
 
 **Queries**
