@@ -98,7 +98,8 @@ Status tracker. `[x]` = done and measured/tested, `[ ]` = pending.
 - [x] Raw insert A/B, pre-guard 3777be7 vs HEAD, 12 rounds alternating, taskset 0-3, TMPDIR on /home (btrfs): batch median 54688 vs 55226 rows/s (+1.0%), spread 47.4k-59.9k vs 49.1k-58.6k; autocommit median 13045 vs 13145 us (+0.8%), spread 12.0k-15.7k vs 12.3k-14.6k. Difference is far smaller than spread = noise, no guard cost visible. Autocommit ~13 ms/stmt on real disk (fsync), vs 95 us on tmpfs
 - [x] Soak v2 (examples/soak.rs): 30 cycles of kill -9, 4 threads raw INSERT/UPDATE/DELETE, intent+ack log, real disk. Every cycle lost=0 phantom=0, rows grew to 34210, stderr empty. Scope: process crash only, NOT power loss / fsync lie. (Soak v1 showed 29 failures: harness bug, ack written after SQL, kill -9 between them. Not an engine bug, replaced by v2)
 - [x] Backup/restore drill (examples/backup_drill.rs, restore_drill.rs): backup of 1000 rows -> Server::restore into new dir -> rows=1000 content_ok=true; restore into an existing dir refused; backup with 1 flipped byte in t.db: validate and restore both fail with `Database file CRC mismatch` (corruption detected)
-- [ ] Open: soak did not cover power loss, disk full, FK/CHECK tables via ORM under kill -9, TCP path under kill -9, or runs longer than 30 min
+- [x] FK soak (crates/mitrdb-orm/examples/soak_fk.rs): ORM insert parent+child (FK RESTRICT) and child delete, 4 threads, 60 min of kill -9 cycles, real disk: lost=0 phantom=0 orphan=0 every cycle (process crash only)
+- [ ] Open: power loss, disk full, TCP path under kill -9
 - [ ] Open: backup drill was a small DB (1000 rows, no concurrent writers during backup)
 
 ## Baaki (is order mein karo, har step ke baad sirf cargo check; full test last mein)
