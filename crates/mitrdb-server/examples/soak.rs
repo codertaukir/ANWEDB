@@ -80,7 +80,7 @@ fn main() {
             checked += 1;
             let acked = ev.iter().rev().find(|e| e.0 == 'A').map(|e| e.1);
             let mut allowed = vec![acked.map(|c| state(c, *id)).unwrap_or(None)];
-            if let Some(&(k, c)) = ev.last() { if k == 'P' { allowed.push(state(c, *id)); } }
+            if let Some(&(k, c)) = ev.last() && k == 'P' { allowed.push(state(c, *id)); }
             let got = tbl.get(id).copied();
             if !allowed.contains(&got) {
                 lost += 1;

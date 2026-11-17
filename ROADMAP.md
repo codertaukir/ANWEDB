@@ -187,3 +187,10 @@ Status tracker. `[x]` = done and measured/tested, `[ ]` = pending.
 - App layer ka kaam: password hashing, sessions, WebSocket real-time
 - Raw SQL guard: sirf INSERT/UPDATE/DELETE check hota hai (SELECT/DDL nahi); lookup cost measure nahi hua
 - Step 9 (engine-level FK/CHECK/DEFAULT) skipped: raw SQL enforce nahi hota, sirf reject
+
+## Session 5: default-session concurrency
+- [x] Default-session autocommit lock-free (`run_default_plan`, lib.rs): plain autocommit statement ab default_session mutex ke bina local txn slot pe chalta hai; BEGIN/COMMIT/ROLLBACK/SAVEPOINT/Checkpoint aur explicit txn purane path pe. default_session_concurrency 3 tests. Real disk btrfs, 4 cores, median: multi100 1/2/4/8 threads 5460/5400/5438/5171 -> 5511/7288/11940/14005 rows/s; single 79/74/77/74 -> 77/80/138/296 rows/s. Single-thread raw insert A/B 8 rounds alternating: batch 36160 vs 35277 rows/s, autocommit 12944 vs 13051 us = noise.
+- [x] insert_auto: WriteConflict ab CAS mismatch ki tarah retry hota hai (1000 attempts, yield + capped sleep backoff). auto_concurrent 30x loop: pass=30 fail=0. Claimed id burn ho sakti hai (gaps possible, reuse nahi).
+- [x] CI: clippy approx_constant (legacy_migrate_probe), collapsible_if (2 examples), deny.toml Unicode-3.0 allow. Gate: 376 passed, 0 failed, 17 ignored.
+- [ ] Open: insert_auto explicit txn ke andar WriteConflict pe retry nahi kar sakta (txn poisoned), test nahi hua.
+- [ ] Known limit: default session par ek thread ka BEGIN aur doosre thread ka concurrent autocommit statement alag txn slot pe chal sakte hain. Multi-thread explicit txn ke liye create_session use karo.

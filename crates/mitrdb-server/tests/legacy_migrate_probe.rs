@@ -26,7 +26,7 @@ fn legacy_int_to_native_float_timestamp() {
 
     s.execute_sql("CREATE TABLE lg (id INT PRIMARY KEY, f INT, ts INT)")
         .unwrap();
-    let vals = [-1e10, -2.5, 0.0, 1.5, 3.14159, 1e300];
+    let vals = [-1e10, -2.5, 0.0, 1.5, 3.25159, 1e300];
     for (i, v) in vals.iter().enumerate() {
         s.execute_sql(&format!(
             "INSERT INTO lg VALUES ({}, {}, {})",

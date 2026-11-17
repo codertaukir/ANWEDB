@@ -8,6 +8,7 @@ allow = [
     "Apache-2.0 WITH LLVM-exception",
     "ISC",
     "BSD-3-Clause",
+    "Unicode-3.0",
 ]
 
 [licenses.private]

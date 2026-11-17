@@ -257,9 +257,9 @@ impl Server {
     }
 
     pub(crate) fn execute_sql_internal(&self, sql: &str) -> Result<ExecutionResult> {
-        let isolation = *self.default_session.isolation.lock().unwrap();
-        let mut active_txn = self.default_session.active_txn.lock().unwrap();
-        self.execute_with_txn_slot(sql, &mut active_txn, isolation)
+        GLOBAL_METRICS.record_query();
+        let plan = self.query_engine.parse_and_plan(sql)?;
+        self.run_default_plan(plan)
     }
 
     /// SQL with `$1, $2, ...` placeholders; values are bound, never spliced into the text.
@@ -279,11 +279,9 @@ impl Server {
         sql: &str,
         params: &[mitrdb_query::Value],
     ) -> Result<ExecutionResult> {
-        let isolation = *self.default_session.isolation.lock().unwrap();
-        let mut active_txn = self.default_session.active_txn.lock().unwrap();
         GLOBAL_METRICS.record_query();
         let plan = self.query_engine.parse_and_plan_params(sql, params)?;
-        self.execute_plan_with_txn_slot(plan, &mut active_txn, isolation)
+        self.run_default_plan(plan)
     }
 
     pub fn execute_in_session(&self, session_id: SessionId, sql: &str) -> Result<ExecutionResult> {
@@ -299,7 +297,38 @@ impl Server {
     }
 
     pub(crate) fn execute_plan_internal(&self, plan: PhysicalPlan) -> Result<ExecutionResult> {
+        self.run_default_plan(plan)
+    }
+
+    /// Default-session execution. Txn-control plans and statements inside an explicit txn keep
+    /// the old path (default slot, mutex held for the whole statement). A plain autocommit
+    /// statement (no txn open in the default session) runs on a local slot without the mutex,
+    /// so threads using Table/ORM/execute_sql no longer serialize on it.
+    fn run_default_plan(&self, plan: PhysicalPlan) -> Result<ExecutionResult> {
         let isolation = *self.default_session.isolation.lock().unwrap();
+        let control = matches!(
+            plan,
+            PhysicalPlan::Begin
+                | PhysicalPlan::Commit
+                | PhysicalPlan::Rollback
+                | PhysicalPlan::Savepoint(_)
+                | PhysicalPlan::RollbackTo(_)
+                | PhysicalPlan::ReleaseSavepoint(_)
+                | PhysicalPlan::Checkpoint
+        );
+        let autocommit = !control
+            && match self.default_session.active_txn.try_lock() {
+                Ok(g) => g.is_none(),
+                Err(_) => false,
+            };
+        if autocommit {
+            let mut local: Option<TxnId> = None;
+            let r = self.execute_plan_with_txn_slot(plan, &mut local, isolation);
+            if let Some(t) = local.take() {
+                let _ = self.txn_mgr.abort(t);
+            }
+            return r;
+        }
         let mut active_txn = self.default_session.active_txn.lock().unwrap();
         self.execute_plan_with_txn_slot(plan, &mut active_txn, isolation)
     }
@@ -334,6 +363,7 @@ impl Server {
         self.catalog.get_table_schema(name)
     }
 
+    #[allow(dead_code)]
     fn execute_with_txn_slot(
         &self,
         sql: &str,

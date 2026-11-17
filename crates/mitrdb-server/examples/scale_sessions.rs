@@ -60,7 +60,7 @@ fn run(root: &str, threads: i64, mode: &str, round: i64) -> (f64, i64) {
 fn main() {
     let root = std::env::args().nth(1).unwrap();
     for mode in ["single", "multi100", "txn"] {
-        if let Some(m) = std::env::args().nth(2) { if m != mode { continue; } }
+        if let Some(m) = std::env::args().nth(2) && m != mode { continue; }
         for th in [1i64, 2, 4, 8] {
             let r: Vec<(f64, i64)> = (0..3).map(|i| run(&root, th, mode, i)).collect();
             let mut v: Vec<f64> = r.iter().map(|x| x.0).collect();

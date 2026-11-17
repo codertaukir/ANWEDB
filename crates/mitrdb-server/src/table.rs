@@ -536,7 +536,10 @@ impl Table<'_> {
         )?;
         let seq = self.server.table(SEQ);
         let key = Value::Text(self.name.clone());
-        for _ in 0..32 {
+        for attempt in 0..1000usize {
+            if attempt > 0 {
+                seq_conflict_backoff(attempt);
+            }
             let cur = seq
                 .find()
                 .columns(&["last_id"])
@@ -565,17 +568,27 @@ impl Table<'_> {
                 None => {
                     match seq.insert(&[("tbl", key.clone()), ("last_id", Value::Int64(next))]) {
                         Ok(_) => true,
-                        Err(e) if e.to_string().contains("Duplicate") => false,
+                        Err(e)
+                            if e.to_string().contains("Duplicate")
+                                || e.to_string().contains("WRITE_CONFLICT") =>
+                        {
+                            false
+                        }
                         Err(e) => return Err(e),
                     }
                 }
                 Some(p) => {
-                    seq.update()
+                    match seq
+                        .update()
                         .set("last_id", Value::Int64(next))
                         .filter("tbl", "=", key.clone())
                         .filter("last_id", "=", Value::Int64(p))
-                        .run()?
-                        == 1
+                        .run()
+                    {
+                        Ok(n) => n == 1,
+                        Err(e) if e.to_string().contains("WRITE_CONFLICT") => false,
+                        Err(e) => return Err(e),
+                    }
                 }
             };
             if !claimed {
@@ -586,11 +599,26 @@ impl Table<'_> {
             full.extend(row.iter().cloned());
             match self.insert(&full) {
                 Ok(n) => return Ok((next, n)),
-                Err(e) if e.to_string().contains("Duplicate primary key") => continue,
+                Err(e)
+                    if e.to_string().contains("Duplicate primary key")
+                        || e.to_string().contains("WRITE_CONFLICT") =>
+                {
+                    continue
+                }
                 Err(e) => return Err(e),
             }
         }
         Err(bad("auto id: too many conflicts"))
+    }
+}
+
+/// Small backoff for the hot auto-id counter row: yield first, then short capped sleeps.
+fn seq_conflict_backoff(attempt: usize) {
+    if attempt < 8 {
+        std::thread::yield_now();
+    } else {
+        let us = (attempt as u64 * 20).min(2000);
+        std::thread::sleep(std::time::Duration::from_micros(us));
     }
 }
 
