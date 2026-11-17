@@ -196,7 +196,7 @@ Know these before you use MITRDB.
 - Indexes on columns with few distinct values (many rows per value) slow inserts: inserting 100k rows with 1000 distinct indexed values ran about 3x slower and wrote about 9x more WAL than the same insert without the index (measured, one machine).
 - A write that fills the WAL's disk fails with an error and the transaction is marked for recovery; nothing is silently lost. Keep enough free disk space for the WAL.
 - Not supported yet: `LIMIT $n` / `OFFSET $n`. `DEFAULT` and composite indexes (max 4 columns, leftmost-prefix equality) are supported.
-- `LIKE` (`%`, `_`) works on text columns: case-sensitive, no escape, always a full scan plus filter.
+- `LIKE` (`%`, `_`) works on text columns: case-sensitive, no escape. A literal prefix (`'ab%'`) on an indexed column uses an index range scan; a leading `%` / `_` or an unindexed column does a full scan plus filter.
 - `SAVEPOINT x`, `ROLLBACK TO x`, `RELEASE x` work inside `BEGIN ... COMMIT`.
 - Foreign keys (RESTRICT or ON DELETE CASCADE), CHECK and DEFAULT are enforced by the Table/ORM API only; raw SQL bypasses them. Details in [docs/LIMITATIONS.md](docs/LIMITATIONS.md).
 - One index value can match many rows (tested with thousands): the row list is stored in chunks. Updating or deleting one row of a very large group rewrites part of that group's list, so it gets slower as the group grows (not measured).

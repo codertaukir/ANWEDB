@@ -96,7 +96,7 @@ Status tracker. `[x]` = done and measured/tested, `[ ]` = pending.
 - [x] 7. TCP path test (tcp_fk.rs): raw TCP INSERT FK bypass kar deta hai (limit test se pinned), 4 client x 250 raw INSERT/UPDATE exact. Latency probe (tcp_latency.rs, 300 stmts): client nodelay OFF 41ms/stmt (Nagle+delayed-ACK, client artifact), nodelay ON 431us, in-process 95us. TCP clients ko set_nodelay(true) + length+payload ek write mein chahiye
 - [x] 8. SKIPPED jaan-boojhkar: migration system nahi chahiye (design: sync(), no migration files). Purane int-encoded tables ko drop + sync() se dobara banao. Agar data bachana ho: legacy_migrate_probe.rs mein verified recipe hai (ADD COLUMN shadow, f64_dec, DROP, RENAME; ALTER TYPE timestamp seedha chalta hai)
 - [ ] 9. Optional: engine-level FK/CHECK/DEFAULT (raw SQL par bhi enforce, catalog format badlega, sabse risky)
-- [ ] 10. Optional: LIKE ke liye index prefix scan (abhi full scan)
+- [x] 10. LIKE literal-prefix index range scan: `like_prefix_range` + Like arm in `extract_column_ranges` (query/lib.rs). Range is a superset, every caller re-applies the filter (verified in code: exec_index_range_scan, narrow_dml_entries via exec_update/exec_delete, IndexOrderedScan, PK path). like_prefix.rs 14 patterns (incl. Hindi) correct, like_explain.rs pins plans (`ab%`, `ab_c%` IndexRangeScan; `%bc`, `_bc`, unindexed SeqScan). Probe N=20000: prefix 131 us vs full scan 76733 us (different queries, order of magnitude only)
 - [x] 11. Value limit: row ~4000 bytes total (measured, value_limit_probe.rs). ORM TextStore (put/get/delete/put_and): long text in FileStore, row keeps body_ref; 140 KB Hindi round-trip, failed insert leaves no orphan file (9c9725a). Limit: not atomic with WAL, crash orphans not swept, in-process only
 
 ## Limits and numbers (source for README + docs/LIMITATIONS.md, English)
@@ -120,7 +120,7 @@ Status tracker. `[x]` = done and measured/tested, `[ ]` = pending.
 
 ### Query limits
 - [verified] WHERE nesting depth is at most 128 (`MAX_WHERE_DEPTH`). `in_list` builds an OR chain, so `load_many` uses chunks of 50 ids.
-- [verified] LIKE: `%` and `_`, case-sensitive, text only, full table scan (no index).
+- [verified] LIKE `%` and `_`, case-sensitive, text only, no escape. A pattern with a literal prefix (`'ab%'`, `'ab_c%'`) on an indexed column uses an index range scan on that prefix; a pattern that starts with `%` or `_`, or a column without an index, does a full scan plus filter.
 - [verified] `LIMIT $n` / `OFFSET $n` are not supported in SQL (ORM limit/offset are usize values).
 - [verified] Composite index: at most 4 columns. It helps unique constraints and leftmost-prefix equality only (no range or ORDER BY on a prefix).
 - [verified] DDL is not allowed inside a transaction.

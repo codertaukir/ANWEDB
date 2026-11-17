@@ -2151,6 +2151,26 @@ impl QueryEngine {
         3
     }
 
+    /// Key range covering every text that starts with the literal prefix of a LIKE
+    /// pattern (chars before the first `%` or `_`). A superset of the real matches:
+    /// callers must still apply the LIKE filter. `None` when the prefix is empty.
+    pub fn like_prefix_range(pat: &str) -> Option<KeyRange> {
+        let prefix: String = pat.chars().take_while(|c| *c != '%' && *c != '_').collect();
+        if prefix.is_empty() {
+            return None;
+        }
+        let mut lo = vec![2u8];
+        lo.extend_from_slice(prefix.as_bytes());
+        let mut hi = lo.clone();
+        // UTF-8 never contains 0xFF, so the last byte can always be bumped.
+        let last = hi.len() - 1;
+        hi[last] += 1;
+        Some(KeyRange::new(
+            KeyBound::Included(lo),
+            KeyBound::Excluded(hi),
+        ))
+    }
+
     /// Extracts a sound set of B+Tree `KeyRange`s for `target_col` from `pred`,
     /// or returns `None` if `pred` does not bound `target_col` to a subset of the index.
     pub fn extract_column_ranges(
@@ -2177,7 +2197,10 @@ impl QueryEngine {
                     CompareOp::Lt => Some(vec![KeyRange::to_exclusive(key)]),
                     CompareOp::Le => Some(vec![KeyRange::to_inclusive(key)]),
                     CompareOp::Ne => None,
-                    CompareOp::Like => None,
+                    CompareOp::Like => match value {
+                        Value::Text(p) => Self::like_prefix_range(p).map(|r| vec![r]),
+                        _ => None,
+                    },
                 }
             }
             BoundPredicate::IsNull(column_idx) => {

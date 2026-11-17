@@ -20,7 +20,7 @@
 - Update/delete through the ORM needs a `filter` or `filter_any`. An empty OR group (`in_list([])`) does not count as a filter, so the whole table is protected.
 
 **Queries**
-- LIKE is case-sensitive, has no escape character, works on text only, and always does a full scan plus filter.
+- LIKE is case-sensitive, has no escape character and works on text only. A literal prefix (`'ab%'`, `'ab_c%'`) on an indexed column uses an index range scan; a pattern starting with `%` or `_`, or an unindexed column, does a full scan plus filter.
 - `LIMIT $n` / `OFFSET $n` are not supported in SQL (ORM `limit`/`offset` take `usize`).
 - Composite index: at most 4 columns; unique constraints and leftmost-prefix equality only (no range or ORDER BY on a prefix).
 - `WHERE` nesting depth is at most 128. `in_list` builds an OR chain, so `load_many` uses chunks of 50 ids.
