@@ -101,6 +101,9 @@ Status tracker. `[x]` = done and measured/tested, `[ ]` = pending.
 - [x] FK soak (crates/mitrdb-orm/examples/soak_fk.rs): ORM insert parent+child (FK RESTRICT) and child delete, 4 threads, 60 min of kill -9 cycles, real disk: lost=0 phantom=0 orphan=0 every cycle (process crash only)
 - [ ] Open: power loss, disk full, TCP path under kill -9
 - [ ] Open: backup drill was a small DB (1000 rows, no concurrent writers during backup)
+- [x] Thread scaling (examples/scale_sessions.rs, one session per thread, 4 cores, 3 rounds x 5 s, median): real disk btrfs autocommit 1 row/stmt 77/80/155/275 rows/s (1/2/4/8 threads, group commit works); autocommit 100 rows/stmt 5438/7320/12126/14106; explicit txn per thread 35132/29926/22628/21765. tmpfs (no fsync): single ~33-35k flat, multi100 61k to 47k, txn 45.9k/46.1k/39.7k/40.2k. errors=0 everywhere except one tmpfs run where /tmp (4 GB) filled up (cause: disk full, not an engine bug; exact error text not captured)
+- [x] Note: `execute_sql` and the Table/ORM API use one default session (one mutex): multi-threaded use of them is serialized. Real concurrency needs one session per thread (`create_session` / `execute_in_session`, what TCP does). Earlier 4-thread numbers on the default session were mutex-bound and fsync-noisy, not a regression (A/B 161b1d8 vs HEAD: no systematic gap)
+- [ ] Open: why tmpfs CPU scaling is flat (no profile done); disk-full behaviour (errors seen, data integrity after full disk not checked); TCP 100-1000 connections; datasets above ~50k rows (1M/10M rows not tested)
 
 ## Baaki (is order mein karo, har step ke baad sirf cargo check; full test last mein)
 - [x] 1. MIN/MAX Timestamp+Float, ORM sum/avg/min/max (69396e6)
