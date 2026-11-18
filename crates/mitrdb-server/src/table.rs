@@ -540,6 +540,7 @@ impl Table<'_> {
         drop(g0);
         let seq = self.server.table(SEQ);
         let key = Value::Text(self.name.clone());
+        let mut need_scan = false;
         for attempt in 0..1000usize {
             if attempt > 0 {
                 seq_conflict_backoff(attempt);
@@ -555,15 +556,21 @@ impl Table<'_> {
                 Some(Value::Int64(n)) => Some(*n),
                 _ => None,
             };
-            let top = self
-                .find()
-                .columns(&[pk])
-                .order_by_desc(pk)
-                .limit(1)
-                .run()?;
-            let max_pk = match top.rows.first().and_then(|r| r.first()) {
-                Some(Value::Int64(n)) => *n,
-                _ => 0,
+            // Full-table max(pk) scan only for the first claim, or after a duplicate pk
+            // (someone inserted an explicit id above the counter).
+            let max_pk = if prev.is_none() || need_scan {
+                let top = self
+                    .find()
+                    .columns(&[pk])
+                    .order_by_desc(pk)
+                    .limit(1)
+                    .run()?;
+                match top.rows.first().and_then(|r| r.first()) {
+                    Some(Value::Int64(n)) => *n,
+                    _ => 0,
+                }
+            } else {
+                0
             };
             let next = prev
                 .unwrap_or(0)
@@ -611,6 +618,7 @@ impl Table<'_> {
                     if e.to_string().contains("Duplicate primary key")
                         || seq_retryable(&e) =>
                 {
+                    need_scan = true;
                     continue
                 }
                 Err(e) => return Err(e),
