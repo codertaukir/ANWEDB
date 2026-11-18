@@ -217,3 +217,7 @@ Status tracker. `[x]` = done and measured/tested, `[ ]` = pending.
 - [ ] tmpfs CPU scaling flat kyun, perf record nahi hua
 - [ ] Delete 6 KB WAL per row; kam distinct values wale index pe 3x slow insert
 - [ ] 2 unused dependency warnings (mitrdb-catalog -> mitrdb-txn, mitrdb-observe -> mitrdb-common)
+- [x] CI debug build pe auto_concurrent fail (LockTimeout; local debug 2/5 aur 5/15 fail, release 30x ne cover nahi kiya). LOCK_TIMEOUT retry kaafi nahi tha (`too many conflicts`). Fix: insert_auto per-table in-process mutex (0854a4f). Release auto_scale_probe 1/2/4T = 759/1018/2347 us (pehle 605/1779/7536, ek run). CI se verify: <result yahan likh>
+- [ ] Shak: max_pk query (order_by_desc limit 1) full scan to nahi? insert_auto 1T 0.6-0.7 ms tmpfs pe zyada hai. Measure nahi hua
+- [ ] insert_auto explicit txn mein mutex + row lock stall (untested)
+- [ ] Benchmark A/B bace4d0 vs HEAD (ForceAutocommit thread-local), ab bhi baaki
