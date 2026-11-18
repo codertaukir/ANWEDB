@@ -202,8 +202,8 @@ Status tracker. `[x]` = done and measured/tested, `[ ]` = pending.
 - [x] insert_auto thread scaling (auto_scale_probe.rs, tmpfs, 500 inserts/thread, ek run): NEW 1/2/4T = 605/1779/7536 us per insert; OLD 41e53a0 = 597/1593/4028 us. Contention pehle se maujood tha (3 alag statements: counter read, max_pk, CAS update), mutex hatane se naya nahi bana. NEW 4T ka 1.9x gap ek run hai, noise ya regression pakka nahi. Backoff badalne se farak nahi (21.4 s vs 20.4 s), wapas liya
 - [ ] Insert_auto block reservation (ek claim mein 32 ids, per-table cache): 4T contention kam karne ke liye. Design change, alag commit, A/B ke saath. Tradeoff: crash/restart pe gap 32 tak, "kabhi reuse nahi" guarantee wahi
 - [ ] Benchmark A/B: HEAD bace4d0 vs working tree (ForceAutocommit ka thread-local read), 12 round alternating, tmpfs aur real disk. auto_scale_probe 4T 5 baar dono pe
-- [ ] Last batch: clippy --all-targets, auto_concurrent 30x, full gate, commit (auto_txn_rollback.rs + auto_scale_probe.rs `#[ignore]` ke saath), push, CI
-- [ ] docs/LIMITATIONS.md: (1) default-session BEGIN vs concurrent autocommit statement, (2) auto id rollback pe gap, reuse nahi, (3) hot counter pe multi-thread contention (1T 0.6 ms, 4T 4-7 ms)
+- [x] Last batch: clippy --all-targets, auto_concurrent 30x, full gate, commit (auto_txn_rollback.rs + auto_scale_probe.rs `#[ignore]` ke saath), push, CI
+- [x] docs/LIMITATIONS.md: (1) default-session BEGIN vs concurrent autocommit statement, (2) auto id rollback pe gap, reuse nahi, (3) hot counter pe multi-thread contention (1T 0.6 ms, 4T 4-7 ms)
 - [ ] README: roadmap stale (Prepared statements / `$n` binding abhi unchecked hai), benchmark mein tmpfs (~50k) aur real disk btrfs (~36k rows/s) alag likhna
 
 ### Open (production checks, kuch bhi measure nahi hua)

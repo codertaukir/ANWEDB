@@ -529,22 +529,26 @@ impl Table<'_> {
             return Err(bad(format!("column '{}' is auto, do not pass it", pk)));
         }
         const SEQ: &str = "mitrdb_seq";
+        let g0 = crate::ForceAutocommit::new();
         ensure_internal(
             self.server,
             SEQ,
             "tbl text primary key, last_id int not null",
         )?;
+        drop(g0);
         let seq = self.server.table(SEQ);
         let key = Value::Text(self.name.clone());
         for attempt in 0..1000usize {
             if attempt > 0 {
                 seq_conflict_backoff(attempt);
             }
+            let g = crate::ForceAutocommit::new();
             let cur = seq
                 .find()
                 .columns(&["last_id"])
                 .filter("tbl", "=", key.clone())
                 .run()?;
+            drop(g);
             let prev = match cur.rows.first().and_then(|r| r.first()) {
                 Some(Value::Int64(n)) => Some(*n),
                 _ => None,
@@ -564,6 +568,7 @@ impl Table<'_> {
                 .max(max_pk)
                 .checked_add(1)
                 .ok_or_else(|| bad("auto id overflow"))?;
+            let g = crate::ForceAutocommit::new();
             let claimed = match prev {
                 None => {
                     match seq.insert(&[("tbl", key.clone()), ("last_id", Value::Int64(next))]) {
@@ -591,6 +596,7 @@ impl Table<'_> {
                     }
                 }
             };
+            drop(g);
             if !claimed {
                 continue;
             }

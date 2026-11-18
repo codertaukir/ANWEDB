@@ -316,11 +316,13 @@ impl Server {
                 | PhysicalPlan::ReleaseSavepoint(_)
                 | PhysicalPlan::Checkpoint
         );
+        let forced = FORCE_AUTOCOMMIT.with(|c| c.get());
         let autocommit = !control
-            && match self.default_session.active_txn.try_lock() {
-                Ok(g) => g.is_none(),
-                Err(_) => false,
-            };
+            && (forced
+                || match self.default_session.active_txn.try_lock() {
+                    Ok(g) => g.is_none(),
+                    Err(_) => false,
+                });
         if autocommit {
             let mut local: Option<TxnId> = None;
             let r = self.execute_plan_with_txn_slot(plan, &mut local, isolation);
@@ -597,3 +599,24 @@ pub use table::{Delete, IntoValue, Query, Rows, Table, Update, val};
 
 mod schema_builder;
 pub use schema_builder::{ColumnBuilder, TableBuilder};
+
+thread_local! {
+    static FORCE_AUTOCOMMIT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// While alive, default-session statements on this thread run as their own autocommit
+/// transaction even if an explicit txn is open (used for the auto-id counter, so a
+/// ROLLBACK of the outer txn cannot hand the same id out again).
+pub(crate) struct ForceAutocommit(bool);
+
+impl ForceAutocommit {
+    pub(crate) fn new() -> Self {
+        ForceAutocommit(FORCE_AUTOCOMMIT.with(|c| c.replace(true)))
+    }
+}
+
+impl Drop for ForceAutocommit {
+    fn drop(&mut self) {
+        FORCE_AUTOCOMMIT.with(|c| c.set(self.0));
+    }
+}

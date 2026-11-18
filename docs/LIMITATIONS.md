@@ -46,3 +46,9 @@
 
 **Not the database's job**
 - Password hashing, sessions and WebSocket real-time belong to the app layer.
+
+## Default session and auto ids
+- The default session (`execute_sql`, Table/ORM API) runs plain autocommit statements without holding the session mutex, so threads run in parallel. A `BEGIN` on one thread does not capture a statement running at the same time on another thread (that statement runs in its own autocommit transaction). For several threads with explicit transactions, use one session per thread (`create_session` / `execute_in_session`).
+- Auto ids are never reused, also inside an explicit transaction: the id counter is committed on its own, so a ROLLBACK leaves a gap (auto_txn_rollback.rs). Ids can have gaps.
+- Many threads inserting auto-id rows into one table contend on one counter row. Measured (tmpfs, one run): 1 thread about 0.6 ms per insert, 4 threads 4-7 ms.
+- `insert_auto` inside an explicit transaction does not retry a write conflict (not tested).
