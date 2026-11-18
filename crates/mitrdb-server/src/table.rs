@@ -528,6 +528,8 @@ impl Table<'_> {
         if row.iter().any(|(n, _)| *n == pk) {
             return Err(bad(format!("column '{}' is auto, do not pass it", pk)));
         }
+        let table_lock = auto_table_lock(&self.name);
+        let _auto_guard = table_lock.lock().unwrap_or_else(|e| e.into_inner());
         const SEQ: &str = "mitrdb_seq";
         let g0 = crate::ForceAutocommit::new();
         ensure_internal(
@@ -575,7 +577,7 @@ impl Table<'_> {
                         Ok(_) => true,
                         Err(e)
                             if e.to_string().contains("Duplicate")
-                                || e.to_string().contains("WRITE_CONFLICT") =>
+                                || seq_retryable(&e) =>
                         {
                             false
                         }
@@ -591,7 +593,7 @@ impl Table<'_> {
                         .run()
                     {
                         Ok(n) => n == 1,
-                        Err(e) if e.to_string().contains("WRITE_CONFLICT") => false,
+                        Err(e) if seq_retryable(&e) => false,
                         Err(e) => return Err(e),
                     }
                 }
@@ -607,7 +609,7 @@ impl Table<'_> {
                 Ok(n) => return Ok((next, n)),
                 Err(e)
                     if e.to_string().contains("Duplicate primary key")
-                        || e.to_string().contains("WRITE_CONFLICT") =>
+                        || seq_retryable(&e) =>
                 {
                     continue
                 }
@@ -616,6 +618,25 @@ impl Table<'_> {
         }
         Err(bad("auto id: too many conflicts"))
     }
+}
+
+/// One lock per table name, so threads of this process do not fight over the same
+/// auto-id counter row and the same rightmost leaf. Other processes still rely on the CAS.
+fn auto_table_lock(name: &str) -> std::sync::Arc<std::sync::Mutex<()>> {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex, OnceLock};
+    static LOCKS: OnceLock<Mutex<HashMap<String, Arc<Mutex<()>>>>> = OnceLock::new();
+    let mut m = LOCKS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    m.entry(name.to_string()).or_default().clone()
+}
+
+/// Errors that mean another thread won the race for the auto-id counter or key: retry.
+fn seq_retryable(e: &impl std::fmt::Display) -> bool {
+    let m = e.to_string();
+    m.contains("WRITE_CONFLICT") || m.contains("LOCK_TIMEOUT")
 }
 
 /// Small backoff for the hot auto-id counter row: yield first, then short capped sleeps.
