@@ -194,3 +194,26 @@ Status tracker. `[x]` = done and measured/tested, `[ ]` = pending.
 - [x] CI: clippy approx_constant (legacy_migrate_probe), collapsible_if (2 examples), deny.toml Unicode-3.0 allow. Gate: 376 passed, 0 failed, 17 ignored.
 - [ ] Open: insert_auto explicit txn ke andar WriteConflict pe retry nahi kar sakta (txn poisoned), test nahi hua.
 - [ ] Known limit: default session par ek thread ka BEGIN aur doosre thread ka concurrent autocommit statement alag txn slot pe chal sakte hain. Multi-thread explicit txn ke liye create_session use karo.
+
+## Session 6: auto-id correctness + perf findings (2026-11-18)
+- [x] Probe (auto_txn_probe.rs) ne bug pakda: explicit txn ROLLBACK pe auto id reuse hoti thi (counter update outer txn ke andar tha; probe: a=1, b=2, rollback ke baad d=2). Autocommit mein reuse nahi hota tha, isliye auto_reuse pass tha
+- [x] Fix: `ForceAutocommit` (thread-local guard, lib.rs `run_default_plan`): `insert_auto` ka seq counter read/claim outer txn se alag autocommit mein chalta hai. Row insert aur `max_pk` read outer txn mein hi rehte hain. Ab rollback pe gap banta hai, reuse nahi. auto_txn_rollback (assert d > b), auto_reuse, auto_concurrent: pass (ek-ek run). Local, abhi COMMIT NAHI hua
+- [x] Disk floor measured: `dd oflag=dsync` 300 x 4 KB = 3.66 s = ~12.2 ms/write (btrfs /home). Autocommit 13 ms/stmt isi floor ke paas hai, engine ka overhead nahi. WAL commit path pehle se `sync_data` use karta hai (sync_all sirf recovery/backup/checkpoint mein)
+- [x] insert_auto thread scaling (auto_scale_probe.rs, tmpfs, 500 inserts/thread, ek run): NEW 1/2/4T = 605/1779/7536 us per insert; OLD 41e53a0 = 597/1593/4028 us. Contention pehle se maujood tha (3 alag statements: counter read, max_pk, CAS update), mutex hatane se naya nahi bana. NEW 4T ka 1.9x gap ek run hai, noise ya regression pakka nahi. Backoff badalne se farak nahi (21.4 s vs 20.4 s), wapas liya
+- [ ] Insert_auto block reservation (ek claim mein 32 ids, per-table cache): 4T contention kam karne ke liye. Design change, alag commit, A/B ke saath. Tradeoff: crash/restart pe gap 32 tak, "kabhi reuse nahi" guarantee wahi
+- [ ] Benchmark A/B: HEAD bace4d0 vs working tree (ForceAutocommit ka thread-local read), 12 round alternating, tmpfs aur real disk. auto_scale_probe 4T 5 baar dono pe
+- [ ] Last batch: clippy --all-targets, auto_concurrent 30x, full gate, commit (auto_txn_rollback.rs + auto_scale_probe.rs `#[ignore]` ke saath), push, CI
+- [ ] docs/LIMITATIONS.md: (1) default-session BEGIN vs concurrent autocommit statement, (2) auto id rollback pe gap, reuse nahi, (3) hot counter pe multi-thread contention (1T 0.6 ms, 4T 4-7 ms)
+- [ ] README: roadmap stale (Prepared statements / `$n` binding abhi unchecked hai), benchmark mein tmpfs (~50k) aur real disk btrfs (~36k rows/s) alag likhna
+
+### Open (production checks, kuch bhi measure nahi hua)
+- [ ] Disk full ke baad data integrity (sirf errors dekhe, integrity check nahi)
+- [ ] TCP path under kill -9
+- [ ] Power loss / fsync lie (sirf process crash tested)
+- [ ] 1M / 10M rows (50k ke upar test nahi)
+- [ ] Backup drill bada DB + concurrent writers ke saath
+- [ ] guard_raw_dml sirf public entry points cover karta hai, internal path skip ho sakta hai
+- [ ] insert_auto explicit txn ke andar WriteConflict pe retry: untested (txn poisoned ho sakta hai)
+- [ ] tmpfs CPU scaling flat kyun, perf record nahi hua
+- [ ] Delete 6 KB WAL per row; kam distinct values wale index pe 3x slow insert
+- [ ] 2 unused dependency warnings (mitrdb-catalog -> mitrdb-txn, mitrdb-observe -> mitrdb-common)
