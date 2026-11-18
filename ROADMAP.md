@@ -217,7 +217,9 @@ Status tracker. `[x]` = done and measured/tested, `[ ]` = pending.
 - [ ] tmpfs CPU scaling flat kyun, perf record nahi hua
 - [ ] Delete 6 KB WAL per row; kam distinct values wale index pe 3x slow insert
 - [ ] 2 unused dependency warnings (mitrdb-catalog -> mitrdb-txn, mitrdb-observe -> mitrdb-common)
-- [x] CI debug build pe auto_concurrent fail (LockTimeout; local debug 2/5 aur 5/15 fail, release 30x ne cover nahi kiya). LOCK_TIMEOUT retry kaafi nahi tha (`too many conflicts`). Fix: insert_auto per-table in-process mutex (0854a4f). Release auto_scale_probe 1/2/4T = 759/1018/2347 us (pehle 605/1779/7536, ek run). CI se verify: <result yahan likh>
-- [ ] Shak: max_pk query (order_by_desc limit 1) full scan to nahi? insert_auto 1T 0.6-0.7 ms tmpfs pe zyada hai. Measure nahi hua
+- [x] CI debug build pe auto_concurrent fail (LockTimeout; local debug 2/5 aur 5/15 fail, release 30x ne cover nahi kiya). LOCK_TIMEOUT retry kaafi nahi tha (`too many conflicts`). Fix: insert_auto per-table in-process mutex (0854a4f). Release auto_scale_probe 1/2/4T = 759/1018/2347 us (pehle 605/1779/7536, ek run). CI se verify: green (0854a4f)
+- [x] insert_auto max(pk) full scan hataya (8357ae9): scan sirf pehli claim ya duplicate pk ke baad. auto_growth_probe (release, tmpfs, ek run): 0 rows 1726 us -> 96 us, 12k rows 36448 us -> 101 us, 18k rows 105 us (flat). Pehle O(n) per insert tha, bulk auto-id insert O(n^2)
 - [ ] insert_auto explicit txn mein mutex + row lock stall (untested)
 - [ ] Benchmark A/B bace4d0 vs HEAD (ForceAutocommit thread-local), ab bhi baaki
+- [ ] insert_auto per-table mutex (0854a4f) ab shayad zaroori nahi (scan hat gaya). Real disk pe group commit rokta hai. Hatane se pehle auto_concurrent debug build (CI) pe check karna
+- [ ] Debug auto_concurrent ab bhi ~20 s: scan hatne ke baad dobara time dekhna
