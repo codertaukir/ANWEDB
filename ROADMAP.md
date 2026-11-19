@@ -229,3 +229,5 @@ Status tracker. `[x]` = done and measured/tested, `[ ]` = pending.
 - [ ] Lock manager per-row cost kam karna (3 mutex per row, bookkeeping spike), phir A/B 12 round alternating
 - [x] read_key_visible_value: 64 txn-shard lock ab sirf tab jab version chain khali na ho (logically sahi, lock order same). raw_ins_probe A/B 6 round: HEAD 40548 vs PATCH 42677 rows/s (+5.2%), lekin PATCH spread 35.3k-47.9k, HEAD ke range ke andar = inconclusive, speed-up claim nahi. mitrdb-txn tests pass
 - [ ] Insert ka asli bottleneck abhi pakka nahi: perf profile mein scans mile hue the. Scans band karke dobara profile lena
+- [x] Perf try (revert kiya): insert ke duplicate-PK check se Shared lock hataya (get_already_locked). raw_ins_probe A/B 6 round: HEAD 51762 vs PATCH 50598 rows/s (-2.3%), no win, revert
+- [ ] Insert perf profile (perf, 5701 samples): acquire_batch_with_rollback 15.6%, memcmp 10.2%, SipHash ~6.5%, malloc/free ~12%. Kaaran (code se): acquire_exclusive_keys slow path (global mutex + 64-shard drain), active_slow_locks sirf line 692 par reset. Fix idea: acquire_exclusive_keys ko sharded fast path, ya FxHash. Asar measure nahi hua
