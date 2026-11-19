@@ -56,9 +56,9 @@ impl Default for DatabaseSession {
 }
 
 /// Auto-checkpoint: trigger when total WAL bytes (segments * max segment size) reach this.
-const DEFAULT_AUTO_CHECKPOINT_WAL_BYTES: u64 = 256 * 1024 * 1024;
+const DEFAULT_AUTO_CHECKPOINT_WAL_BYTES: u64 = 64 * 1024 * 1024;
 /// Only look at the WAL every N statements, so the hot path pays one atomic add.
-const AUTO_CHECKPOINT_CHECK_EVERY: u64 = 256;
+const AUTO_CHECKPOINT_CHECK_EVERY: u64 = 16;
 
 pub struct Server {
     catalog: Arc<Catalog>,
@@ -114,6 +114,26 @@ impl Server {
     }
 
     pub fn open_with_segment_size<P: AsRef<Path>>(
+        db_path: P,
+        wal_path: P,
+        pool_size: usize,
+        max_segment_bytes: u64,
+    ) -> Result<(Self, RecoveryReport)> {
+        let (server, report) = Self::open_inner(db_path, wal_path, pool_size, max_segment_bytes)?;
+        // Recovery replayed the whole WAL; checkpoint now so the next restart does not
+        // replay it again. A failure here must not fail open: it is counted instead.
+        if let Some(wal) = server.wal_mgr.as_ref() {
+            let wal_bytes = (wal.segment_count() as u64).saturating_mul(wal.max_segment_bytes());
+            if wal_bytes > 8 * 1024 * 1024 && server.checkpoint_with_meta().is_err() {
+                GLOBAL_METRICS
+                    .checkpoint_errors
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+        Ok((server, report))
+    }
+
+    fn open_inner<P: AsRef<Path>>(
         db_path: P,
         wal_path: P,
         pool_size: usize,
