@@ -223,3 +223,7 @@ Status tracker. `[x]` = done and measured/tested, `[ ]` = pending.
 - [ ] Benchmark A/B bace4d0 vs HEAD (ForceAutocommit thread-local), ab bhi baaki
 - [ ] insert_auto per-table mutex (0854a4f) ab shayad zaroori nahi (scan hat gaya). Real disk pe group commit rokta hai. Hatane se pehle auto_concurrent debug build (CI) pe check karna
 - [ ] Debug auto_concurrent ab bhi ~20 s: scan hatne ke baad dobara time dekhna
+
+## Session 7: speed profiling (2026-11-19)
+- [x] Per-phase profile (perf_bench batch 20000 rows, tmpfs, ek run, phases overlap): PlanExecution 469 ms, InsertExecution 352, TxnPut 156, BtreeMutation 79, TxnCommit 48, WalAppend 26, WalFlush 11, B+Tree splits ~40. Lock: LockMutexWait 75 (60000 calls = 3 per row), LockBookkeeping 60 (max 12.8 ms spike), LockAcquire 35. MVCC/Txn mutex wait ~2 ms
+- [ ] Lock manager per-row cost kam karna (3 mutex per row, bookkeeping spike), phir A/B 12 round alternating
