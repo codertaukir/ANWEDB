@@ -238,3 +238,5 @@ Status tracker. `[x]` = done and measured/tested, `[ ]` = pending.
 - [ ] Peak memory ~960 B/row (scan poora memory mein?): 10M rows test nahi hua
 - [x] Reopen fix measured (6f26e22): million_drill 1M rows, real disk btrfs. Pehle reopen 17.45 s (WAL 294 MB). Ab: reopen 1.49 s / second 1.38 s (WAL 28 MB before drop). Insert 3 runs 15.8k / 21.7k / 28.3k rows/s (btrfs spread bada) = regression nahi, speed-up claim nahi. Ek beech ka run 14.0 s reopen aaya (WAL size naapa nahi, kaaran pakka nahi)
 - [ ] Reopen 14 s outlier dobara aaye to wal_mb_before_drop ke saath dekhna
+- [x] Backup drill bada DB + concurrent writers (examples/backup_big_drill.rs, real disk btrfs, ek run): 1M rows (91 MB), 4 insert threads chalte hue backup 2.79 s, restore 2.16 s. Restored: base 1000000/1000000, writer_rows 289 (301 acked kul), bad=0 (no dup/corrupt), writers errors=0. Scope: insert-only writers, process crash/kill beech mein nahi, point-in-time prefix check nahi
+- [ ] Backup ke dauran update/delete writers, kill -9 backup ke beech, aur snapshot prefix-consistency check
