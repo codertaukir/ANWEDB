@@ -236,3 +236,5 @@ Status tracker. `[x]` = done and measured/tested, `[ ]` = pending.
 - [x] 1M rows drill (examples/million_drill.rs, real disk btrfs, ek run, 1000 rows/INSERT autocommit, 3 cols ~50 B/row, DB 136 MB): insert 63.2 s = 15.8k rows/s, flat (13.7k-17.4k per 100k). Reopen 17.45 s. Full scan 1M rows 3.89 s ok. Point lookup 297 us avg (1000/1000 ok). CREATE INDEX 20 s, index lookup 0.256 s. Peak RSS 960 MB. No panic/error
 - [ ] Reopen 17.45 s pe 136 MB DB: shak WAL recovery (checkpoint ke baad reopen time measure nahi hua)
 - [ ] Peak memory ~960 B/row (scan poora memory mein?): 10M rows test nahi hua
+- [x] Reopen fix measured (6f26e22): million_drill 1M rows, real disk btrfs. Pehle reopen 17.45 s (WAL 294 MB). Ab: reopen 1.49 s / second 1.38 s (WAL 28 MB before drop). Insert 3 runs 15.8k / 21.7k / 28.3k rows/s (btrfs spread bada) = regression nahi, speed-up claim nahi. Ek beech ka run 14.0 s reopen aaya (WAL size naapa nahi, kaaran pakka nahi)
+- [ ] Reopen 14 s outlier dobara aaye to wal_mb_before_drop ke saath dekhna

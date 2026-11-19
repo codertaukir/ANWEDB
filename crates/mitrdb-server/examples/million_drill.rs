@@ -28,11 +28,19 @@ fn main() {
         }
     }
     println!("MD insert_total secs={:.1} rows_s={:.0}", t0.elapsed().as_secs_f64(), total as f64 / t0.elapsed().as_secs_f64());
+    let wal_sz: u64 = std::fs::read_dir(dir).unwrap().filter_map(|e| e.ok())
+        .filter(|e| e.file_name().to_string_lossy().contains("wal.0"))
+        .map(|e| e.metadata().map(|m| m.len()).unwrap_or(0)).sum();
+    println!("MD wal_mb_before_drop={}", wal_sz / 1_000_000);
     drop(s);
 
     let t1 = Instant::now();
     let s = open(dir);
     println!("MD reopen secs={:.2}", t1.elapsed().as_secs_f64());
+    drop(s);
+    let t1b = Instant::now();
+    let s = open(dir);
+    println!("MD reopen_second secs={:.2}", t1b.elapsed().as_secs_f64());
 
     let t2 = Instant::now();
     let c = s.table("m").find().columns(&["id"]).run().unwrap().rows.len();
