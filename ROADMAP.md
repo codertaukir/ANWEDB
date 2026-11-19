@@ -227,3 +227,5 @@ Status tracker. `[x]` = done and measured/tested, `[ ]` = pending.
 ## Session 7: speed profiling (2026-11-19)
 - [x] Per-phase profile (perf_bench batch 20000 rows, tmpfs, ek run, phases overlap): PlanExecution 469 ms, InsertExecution 352, TxnPut 156, BtreeMutation 79, TxnCommit 48, WalAppend 26, WalFlush 11, B+Tree splits ~40. Lock: LockMutexWait 75 (60000 calls = 3 per row), LockBookkeeping 60 (max 12.8 ms spike), LockAcquire 35. MVCC/Txn mutex wait ~2 ms
 - [ ] Lock manager per-row cost kam karna (3 mutex per row, bookkeeping spike), phir A/B 12 round alternating
+- [x] read_key_visible_value: 64 txn-shard lock ab sirf tab jab version chain khali na ho (logically sahi, lock order same). raw_ins_probe A/B 6 round: HEAD 40548 vs PATCH 42677 rows/s (+5.2%), lekin PATCH spread 35.3k-47.9k, HEAD ke range ke andar = inconclusive, speed-up claim nahi. mitrdb-txn tests pass
+- [ ] Insert ka asli bottleneck abhi pakka nahi: perf profile mein scans mile hue the. Scans band karke dobara profile lena

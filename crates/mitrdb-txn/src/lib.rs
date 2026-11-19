@@ -1639,11 +1639,11 @@ impl TxnManager {
         }
 
         let versions = self.mvcc_shard(skey).lock();
-        let txns = self.lock_all_txn_shards();
 
         if let Some(chain) = versions.get(skey)
             && !chain.is_empty()
         {
+            let txns = self.lock_all_txn_shards();
             for ver in chain.iter().rev() {
                 if self.is_version_visible(txn_id, isolation, read_ts, ver, &txns) {
                     return Ok(ver.value.clone());
@@ -1652,7 +1652,6 @@ impl TxnManager {
             return Ok(None);
         }
 
-        drop(txns);
         // IMPORTANT: keep `versions` locked while reading the B+Tree. Writers mutate the
         // tree while holding this same mutex, so we can never observe an uncommitted
         // tree value for a key that has no MVCC chain (vacuum race fix).
