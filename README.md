@@ -223,18 +223,29 @@ Know these before you use MITRDB.
 
 ## Benchmarks
 
-Single process, single thread, 10,000 rows inserted in one transaction (batch mode),
-16 MB buffer pool, durable commit with fsync:
+All numbers are single runs on one development machine (4 cores, Linux). Real-disk numbers are on btrfs, where one fsync takes about 12 ms (measured with `dd oflag=dsync`). Run-to-run spread on real disk is large, so treat them as indicative only.
 
-| | Durable insert throughput |
-|---|---|
-| Result on a development machine | roughly 50,000 - 59,000 rows/sec |
+| Workload | Storage | Result |
+|---|---|---|
+| Insert, one explicit transaction, row by row (`perf_bench batch`) | tmpfs | about 50,000 rows/s |
+| Same | real disk | about 36,000 - 40,000 rows/s |
+| Autocommit, 1000 rows per `INSERT ... VALUES`, 1M rows | real disk | about 16,000 - 28,000 rows/s (3 runs) |
+| Autocommit, 1 row per statement, 1 thread | real disk | about 77 rows/s (fsync-bound) |
+| Autocommit, 1 row per statement, 8 threads | real disk | about 300 rows/s (group commit) |
+| Autocommit, 100 rows per statement, 1 to 8 threads (default session) | real disk | about 5,500 to 14,000 rows/s |
 
-In the same run, full-scan latency (p50) is about 32 - 34 ms.
-Reproduce with `./scripts/bench.sh` (5 runs).
+Other measured points (1M rows, about 50 bytes per row, real disk): full scan 3.9 s, point lookup about 300 us, `CREATE INDEX` 20 s, peak memory about 960 MB, reopen about 1.5 s after the open-time checkpoint.
 
-This is a single-thread baseline, not a concurrency benchmark. Numbers vary between
-machines and between runs, so treat them as indicative only.
+Reproduce with `./scripts/bench.sh` and the examples in `crates/mitrdb-server/examples`.
+
+## Verified checks (process-crash level)
+
+Each was run once; none covers power loss.
+
+- **Disk full:** on an 8 MB tmpfs, inserts fail with a clean `No space left on device` error. After restart every acknowledged row is present (lost=0, phantom=0, duplicates=0), and inserts work again once space is freed.
+- **1M rows:** insert, full scan, point lookups and index creation complete with correct results.
+- **Backup under load:** a 1M-row database backed up in 2.8 s while 4 threads inserted; restore took 2.2 s and the restored data had no missing base rows and no corrupt or duplicate rows.
+- **Not tested yet:** power loss, TCP under `kill -9`, datasets above 1M rows.
 
 ## Design notes
 
@@ -252,7 +263,7 @@ machines and between runs, so treat them as indicative only.
 - [ ] Faster inserts: in-place leaf updates with smaller WAL records
 - [ ] Reduce per-row lock bookkeeping
 - [x] Non-unique indexes in `sync()` / `define_table`
-- [ ] Prepared statements and `$n` parameter binding
+- [x] Prepared statements and `$n` parameter binding (`execute_sql_params`)
 - [ ] Space reclaim for dropped columns (table rewrite)
 - [ ] Containerized, Kubernetes-friendly deployment (StatefulSet with persistent volumes)
 
