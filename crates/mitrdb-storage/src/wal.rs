@@ -817,12 +817,13 @@ impl WalManager {
         let ckpt_path = Self::ckpt_path(&self.path);
         let bytes = meta.serialize();
         {
-            let mut tmp_file = OpenOptions::new()
-                .read(true)
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .open(&tmp_path)?;
+            let mut tmp_opts = OpenOptions::new();
+            tmp_opts.read(true).write(true).create(true).truncate(true);
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                tmp_opts.mode(0o600);
+            }
+            let mut tmp_file = tmp_opts.open(&tmp_path)?;
             tmp_file.write_all(&bytes)?;
             tmp_file.flush()?;
             tmp_file.sync_all()?;
