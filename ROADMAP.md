@@ -206,52 +206,40 @@ Status tracker. `[x]` = done and measured/tested, `[ ]` = pending.
 - [x] docs/LIMITATIONS.md: (1) default-session BEGIN vs concurrent autocommit statement, (2) auto id rollback pe gap, reuse nahi, (3) hot counter pe multi-thread contention (1T 0.6 ms, 4T 4-7 ms)
 - [ ] README: roadmap stale (Prepared statements / `$n` binding abhi unchecked hai), benchmark mein tmpfs (~50k) aur real disk btrfs (~36k rows/s) alag likhna
 
-### Open (production checks, kuch bhi measure nahi hua)
-- [ ] Disk full ke baad data integrity (sirf errors dekhe, integrity check nahi)
-- [ ] TCP path under kill -9
-- [ ] Power loss / fsync lie (sirf process crash tested)
-- [ ] 1M / 10M rows (50k ke upar test nahi)
-- [ ] Backup drill bada DB + concurrent writers ke saath
+### Open (production checks, updated 2026-11-20; done wale Session 7 mein)
+- [ ] Power loss / fsync lie (VM hard power-off ya dm-flakey; abhi sirf process crash tested)
 - [ ] guard_raw_dml sirf public entry points cover karta hai, internal path skip ho sakta hai
-- [ ] insert_auto explicit txn ke andar WriteConflict pe retry: untested (txn poisoned ho sakta hai)
+- [ ] insert_auto explicit txn ke andar WriteConflict retry + mutex/row lock stall: untested
 - [ ] tmpfs CPU scaling flat kyun, perf record nahi hua
 - [ ] Delete 6 KB WAL per row; kam distinct values wale index pe 3x slow insert
-- [ ] 2 unused dependency warnings (mitrdb-catalog -> mitrdb-txn, mitrdb-observe -> mitrdb-common)
-- [x] CI debug build pe auto_concurrent fail (LockTimeout; local debug 2/5 aur 5/15 fail, release 30x ne cover nahi kiya). LOCK_TIMEOUT retry kaafi nahi tha (`too many conflicts`). Fix: insert_auto per-table in-process mutex (0854a4f). Release auto_scale_probe 1/2/4T = 759/1018/2347 us (pehle 605/1779/7536, ek run). CI se verify: green (0854a4f)
-- [x] insert_auto max(pk) full scan hataya (8357ae9): scan sirf pehli claim ya duplicate pk ke baad. auto_growth_probe (release, tmpfs, ek run): 0 rows 1726 us -> 96 us, 12k rows 36448 us -> 101 us, 18k rows 105 us (flat). Pehle O(n) per insert tha, bulk auto-id insert O(n^2)
-- [ ] insert_auto explicit txn mein mutex + row lock stall (untested)
-- [ ] Benchmark A/B bace4d0 vs HEAD (ForceAutocommit thread-local), ab bhi baaki
-- [ ] insert_auto per-table mutex (0854a4f) ab shayad zaroori nahi (scan hat gaya). Real disk pe group commit rokta hai. Hatane se pehle auto_concurrent debug build (CI) pe check karna
-- [ ] Debug auto_concurrent ab bhi ~20 s: scan hatne ke baad dobara time dekhna
+- [ ] Benchmark A/B bace4d0 vs HEAD (ForceAutocommit thread-local), 12 round
+- [ ] insert_auto per-table mutex (0854a4f) shayad ab zaroori nahi; hatane se pehle debug auto_concurrent (CI) pe check
+- [ ] Debug auto_concurrent ~20 s: scan hatne ke baad dobara time dekhna
+- [x] CI debug auto_concurrent fail: insert_auto per-table mutex (0854a4f), CI green
+- [x] insert_auto max(pk) full scan hataya (8357ae9): 12k rows 36448 us -> 101 us (ek run)
+- [x] Unused deps hataye (3849f7b)
 
-## Session 7: speed profiling (2026-11-19)
-- [x] Per-phase profile (perf_bench batch 20000 rows, tmpfs, ek run, phases overlap): PlanExecution 469 ms, InsertExecution 352, TxnPut 156, BtreeMutation 79, TxnCommit 48, WalAppend 26, WalFlush 11, B+Tree splits ~40. Lock: LockMutexWait 75 (60000 calls = 3 per row), LockBookkeeping 60 (max 12.8 ms spike), LockAcquire 35. MVCC/Txn mutex wait ~2 ms
-- [ ] Lock manager per-row cost kam karna (3 mutex per row, bookkeeping spike), phir A/B 12 round alternating
-- [x] read_key_visible_value: 64 txn-shard lock ab sirf tab jab version chain khali na ho (logically sahi, lock order same). raw_ins_probe A/B 6 round: HEAD 40548 vs PATCH 42677 rows/s (+5.2%), lekin PATCH spread 35.3k-47.9k, HEAD ke range ke andar = inconclusive, speed-up claim nahi. mitrdb-txn tests pass
-- [ ] Insert ka asli bottleneck abhi pakka nahi: perf profile mein scans mile hue the. Scans band karke dobara profile lena
-- [x] Perf try (revert kiya): insert ke duplicate-PK check se Shared lock hataya (get_already_locked). raw_ins_probe A/B 6 round: HEAD 51762 vs PATCH 50598 rows/s (-2.3%), no win, revert
-- [ ] Insert perf profile (perf, 5701 samples): acquire_batch_with_rollback 15.6%, memcmp 10.2%, SipHash ~6.5%, malloc/free ~12%. Kaaran (code se): acquire_exclusive_keys slow path (global mutex + 64-shard drain), active_slow_locks sirf line 692 par reset. Fix idea: acquire_exclusive_keys ko sharded fast path, ya FxHash. Asar measure nahi hua
-- [x] Disk-full drill (examples/diskfull_drill.rs, 8 MB tmpfs, ek run): fill 9654 acked INSERT, phir 50 errors `IO_ERROR: No space left on device` (clean, no panic). Restart ke baad (disk full aur space free karke dono): rows=9654 acked=9654 lost=0 phantom=0 dup=0 bad_payload=0, space free hone ke baad insert OK. Scope: process crash (exit bina Drop), power loss nahi, chhota DB. (Pehla verify galat tha: id parse bug in drill, DB nahi)
-- [ ] Disk-full: DDL/checkpoint/backup ke dauran full disk, aur bade DB pe, test nahi hua
-- [x] 1M rows drill (examples/million_drill.rs, real disk btrfs, ek run, 1000 rows/INSERT autocommit, 3 cols ~50 B/row, DB 136 MB): insert 63.2 s = 15.8k rows/s, flat (13.7k-17.4k per 100k). Reopen 17.45 s. Full scan 1M rows 3.89 s ok. Point lookup 297 us avg (1000/1000 ok). CREATE INDEX 20 s, index lookup 0.256 s. Peak RSS 960 MB. No panic/error
-- [ ] Reopen 17.45 s pe 136 MB DB: shak WAL recovery (checkpoint ke baad reopen time measure nahi hua)
-- [ ] Peak memory ~960 B/row (scan poora memory mein?): 10M rows test nahi hua
-- [x] Reopen fix measured (6f26e22): million_drill 1M rows, real disk btrfs. Pehle reopen 17.45 s (WAL 294 MB). Ab: reopen 1.49 s / second 1.38 s (WAL 28 MB before drop). Insert 3 runs 15.8k / 21.7k / 28.3k rows/s (btrfs spread bada) = regression nahi, speed-up claim nahi. Ek beech ka run 14.0 s reopen aaya (WAL size naapa nahi, kaaran pakka nahi)
-- [ ] Reopen 14 s outlier dobara aaye to wal_mb_before_drop ke saath dekhna
-- [x] Backup drill bada DB + concurrent writers (examples/backup_big_drill.rs, real disk btrfs, ek run): 1M rows (91 MB), 4 insert threads chalte hue backup 2.79 s, restore 2.16 s. Restored: base 1000000/1000000, writer_rows 289 (301 acked kul), bad=0 (no dup/corrupt), writers errors=0. Scope: insert-only writers, process crash/kill beech mein nahi, point-in-time prefix check nahi
-- [ ] Backup ke dauran update/delete writers, kill -9 backup ke beech, aur snapshot prefix-consistency check
-- [x] TCP under kill -9 (examples/tcp_kill_drill.rs, real disk btrfs, ek run): CLI server alag process, 4 TCP clients (auth token, raw INSERT), SIGKILL after 3 s. intent=501 acked=497, restart ke baad rows=499 lost=0 phantom=0 dup=0 bad_payload=0, recovery open 0.22 s. 2 rows durable par unacked (reply se pehle kill). Scope: loopback, no TLS, insert-only, process crash, power loss nahi
-- [x] Unused deps: mitrdb-observe se mitrdb-common hata, mitrdb-txn catalog dev-dependency (3849f7b)
-- [ ] TCP kill -9 with update/delete clients, TLS, 100+ connections
-- [ ] 10M rows (RAM 7.6 GB, scan ka Vec<Row> memory kha raha hai: scan hata ke sirf insert+reopen naapna)
-- [ ] Power loss (VM hard power-off ya dm-flakey)
-- [x] 10M rows, 4 threads (examples/ten_m_drill.rs, real disk btrfs, ek run, 1000 rows/INSERT autocommit, 50 B/row): insert 494.6 s = 20.2k rows/s (flat 18k-21.8k per 1M), peak RSS 4216 MB (~420 B/row, last 2M rows pe growth ruki), reopen 19.58 s, point lookup 1147 us avg (1000/1000 ok), COUNT(*) 99.95 s = 10000000 (ok). Bina memory cap ke 4 threads pe machine OOM hui (VS Code kill), cap wala run (systemd-run MemoryMax=4G) pass, par cap kaam kiya ya nahi pakka nahi (RSS 4462 MB)
-- [ ] 10M pe reopen 19.6 s (1M pe 1.5 s), point lookup 1147 us (1M pe 297 us), COUNT(*) 100 s: kaaran measure nahi hua. Shak: COUNT full scan, buffer pool sirf 16 MB
+## Session 7: speed profiling + production drills (2026-11-19/20)
+### Insert profile
+- [x] Per-phase profile (perf_bench batch 20000 rows, tmpfs, ek run): PlanExecution 469 ms, InsertExecution 352, TxnPut 156, BtreeMutation 79, TxnCommit 48, WalAppend 26, WalFlush 11. LockMutexWait 75 ms (3 per row), LockBookkeeping 60 (max 12.8 ms spike)
+- [x] read_key_visible_value: shard lock sirf non-empty chain pe. A/B 6 round +5.2% par spread overlap = inconclusive, speed-up claim nahi
+- [x] Duplicate-PK check se Shared lock hataya: -2.3%, no win, revert
+- [ ] Insert perf profile: acquire_batch_with_rollback 15.6%, memcmp 10.2%, SipHash 6.5%, malloc/free 12%. Idea: acquire_exclusive_keys sharded fast path / FxHash. Asar measure nahi hua
+- [ ] Lock manager per-row cost kam karna (3 mutex/row), phir A/B 12 round
+### Drills (real disk btrfs, ek run each)
+- [x] Disk-full (diskfull_drill.rs, 8 MB tmpfs): 9654 acked, phir clean `IO_ERROR: No space left on device`; restart: lost=0 phantom=0 dup=0. Scope: chhota DB, process crash. [ ] DDL/checkpoint/backup ke dauran full disk, bade DB pe
+- [x] 1M rows (million_drill.rs): insert 15.8k rows/s, scan 3.89 s, point lookup 297 us, CREATE INDEX 20 s, RSS 960 MB
+- [x] Reopen fix (6f26e22): 1M reopen 17.45 s -> 1.49 s (WAL 294 MB -> 28 MB). Ek beech ka run 14.0 s aaya, kaaran pakka nahi [ ] outlier dobara aaye to wal_mb_before_drop dekhna
+- [x] Backup bada DB + concurrent writers (backup_big_drill.rs): 1M rows, 4 insert threads, backup 2.79 s, restore 2.16 s, bad=0. [ ] update/delete writers, kill -9 beech mein, prefix-consistency
+- [x] TCP kill -9 (tcp_kill_drill.rs): 4 clients, SIGKILL, lost=0 phantom=0 dup=0, recovery 0.22 s. Scope: loopback, no TLS, insert-only. [ ] update/delete clients, TLS, 100+ connections
+- [x] 10M rows (ten_m_drill.rs, 4 threads): insert 20.2k rows/s, peak RSS 4216 MB (~420 B/row), reopen 19.58 s, point lookup 1147 us, COUNT(*) 99.95 s ok. Bina cap ke OOM; MemoryMax=4G wale run mein pass (cap kaam kiya ya nahi pakka nahi)
 - [ ] Insert memory ~420 B/row ka source (MVCC versions? vacuum ke baad RSS naapna)
-- [x] 10M rows, 4 threads (examples/ten_m_drill.rs, real disk btrfs, ek run, 1000 rows/INSERT autocommit): insert 494.6 s = 20.2k rows/s (flat 18k-21.8k per 1M), peak RSS 4216 MB, reopen 19.58 s, point lookup 1147 us, COUNT(*) 99.95 s = 10000000 ok. Bina cap ke OOM (VS Code kill); cap wale run mein pass
-- [x] COUNT(*) fast path try (revert): Aggregate+SeqScan pe rows decode/Vec hataya. 200k rows: count_star 0.60-0.66 s vs COUNT(id) 0.65-0.67 s = fayda noise ke andar. Bottleneck txn_mgr.scan (entries Vec + MVCC visibility), decode nahi
-- [ ] 10M pe reopen 19.6 s, point lookup 1147 us, COUNT(*) 100 s; scan ko streaming banana (perf profile pehle)
-- [ ] Single-thread 10M run ke numbers (paste nahi hue)
-- [x] COUNT(*) scan profile (count_profile.rs, 300k rows, ek run): 1.37 s/COUNT at pool 4096, 0.98 s at pool 65536 (-28%, ek run). Perf: find_victim_frame_sharded 22% (load + scan mila hua), memcmp 9.6%, lock manager 6.9%, range_scan_directed closure 5%, extend_keys_in_range 4.5%, malloc/free ~15%, SipHash ~5%. Decode hatana (fast path) aur pool badhana dono ne bada fayda nahi diya
-- [ ] Scan rewrite (txn_mgr.scan / range_scan_directed streaming, key clone hatana): bada change, 2-3x ki ummeed, 10M COUNT abhi 100 s
-- [ ] Default pool size 4096 (16 MB) chhota: 10M pe reopen/point lookup slow, badhane ka A/B baaki
+- [ ] Single-thread 10M numbers (paste nahi hue)
+### COUNT / scan
+- [x] COUNT(*) fast path (decode/Vec hataya): noise (0.60-0.66 vs 0.65-0.67 s @200k), revert. Bottleneck decode nahi
+- [x] COUNT profile (count_profile.rs, 300k rows): 1.37 s @pool 4096 -> 0.98 s @pool 65536 (-28%, ek run). perf: find_victim_frame_sharded 22%, memcmp 9.6%, lock manager 6.9%, range_scan_directed closure 5%, extend_keys_in_range 4.5%, malloc/free ~15%, SipHash ~5%
+- [ ] Scan rewrite (txn_mgr.scan / range_scan_directed streaming, key clone hatana): 2-3x ki ummeed, 10M COUNT abhi 100 s
+- [ ] Default pool 4096 (16 MB) chhota: 32768 pe A/B (reopen, point lookup, scan)
+### CI
+- [x] file_perms CI red: `Server::open` ka checkpoint (6f26e22) `t.wal.ckpt` dobara likhta tha, nayi file 644. Fix (8005777): `write_checkpoint_metadata_to_disk` (wal.rs) tmp file `.mode(0o600)` se banata hai, open + auto-checkpoint dono cover. file_perms + backup_perms ok, mitrdb-storage 53 passed
+- [ ] CI 8005777 green verify
