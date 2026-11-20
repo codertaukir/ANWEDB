@@ -240,3 +240,8 @@ Status tracker. `[x]` = done and measured/tested, `[ ]` = pending.
 - [ ] Reopen 14 s outlier dobara aaye to wal_mb_before_drop ke saath dekhna
 - [x] Backup drill bada DB + concurrent writers (examples/backup_big_drill.rs, real disk btrfs, ek run): 1M rows (91 MB), 4 insert threads chalte hue backup 2.79 s, restore 2.16 s. Restored: base 1000000/1000000, writer_rows 289 (301 acked kul), bad=0 (no dup/corrupt), writers errors=0. Scope: insert-only writers, process crash/kill beech mein nahi, point-in-time prefix check nahi
 - [ ] Backup ke dauran update/delete writers, kill -9 backup ke beech, aur snapshot prefix-consistency check
+- [x] TCP under kill -9 (examples/tcp_kill_drill.rs, real disk btrfs, ek run): CLI server alag process, 4 TCP clients (auth token, raw INSERT), SIGKILL after 3 s. intent=501 acked=497, restart ke baad rows=499 lost=0 phantom=0 dup=0 bad_payload=0, recovery open 0.22 s. 2 rows durable par unacked (reply se pehle kill). Scope: loopback, no TLS, insert-only, process crash, power loss nahi
+- [x] Unused deps: mitrdb-observe se mitrdb-common hata, mitrdb-txn catalog dev-dependency (3849f7b)
+- [ ] TCP kill -9 with update/delete clients, TLS, 100+ connections
+- [ ] 10M rows (RAM 7.6 GB, scan ka Vec<Row> memory kha raha hai: scan hata ke sirf insert+reopen naapna)
+- [ ] Power loss (VM hard power-off ya dm-flakey)
