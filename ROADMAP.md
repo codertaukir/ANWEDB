@@ -252,3 +252,6 @@ Status tracker. `[x]` = done and measured/tested, `[ ]` = pending.
 - [x] COUNT(*) fast path try (revert): Aggregate+SeqScan pe rows decode/Vec hataya. 200k rows: count_star 0.60-0.66 s vs COUNT(id) 0.65-0.67 s = fayda noise ke andar. Bottleneck txn_mgr.scan (entries Vec + MVCC visibility), decode nahi
 - [ ] 10M pe reopen 19.6 s, point lookup 1147 us, COUNT(*) 100 s; scan ko streaming banana (perf profile pehle)
 - [ ] Single-thread 10M run ke numbers (paste nahi hue)
+- [x] COUNT(*) scan profile (count_profile.rs, 300k rows, ek run): 1.37 s/COUNT at pool 4096, 0.98 s at pool 65536 (-28%, ek run). Perf: find_victim_frame_sharded 22% (load + scan mila hua), memcmp 9.6%, lock manager 6.9%, range_scan_directed closure 5%, extend_keys_in_range 4.5%, malloc/free ~15%, SipHash ~5%. Decode hatana (fast path) aur pool badhana dono ne bada fayda nahi diya
+- [ ] Scan rewrite (txn_mgr.scan / range_scan_directed streaming, key clone hatana): bada change, 2-3x ki ummeed, 10M COUNT abhi 100 s
+- [ ] Default pool size 4096 (16 MB) chhota: 10M pe reopen/point lookup slow, badhane ka A/B baaki
