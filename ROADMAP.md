@@ -239,7 +239,8 @@ Status tracker. `[x]` = done and measured/tested, `[ ]` = pending.
 - [x] COUNT(*) fast path (decode/Vec hataya): noise (0.60-0.66 vs 0.65-0.67 s @200k), revert. Bottleneck decode nahi
 - [x] COUNT profile (count_profile.rs, 300k rows): 1.37 s @pool 4096 -> 0.98 s @pool 65536 (-28%, ek run). perf: find_victim_frame_sharded 22%, memcmp 9.6%, lock manager 6.9%, range_scan_directed closure 5%, extend_keys_in_range 4.5%, malloc/free ~15%, SipHash ~5%
 - [ ] Scan rewrite (txn_mgr.scan / range_scan_directed streaming, key clone hatana): 2-3x ki ummeed, 10M COUNT abhi 100 s
-- [ ] Default pool 4096 (16 MB) chhota: 32768 pe A/B (reopen, point lookup, scan)
+- [x] CLI/TCP server pool 64 frames (256 KB) hardcoded tha; ab default 32768 (128 MB), env MITRDB_POOL_FRAMES se override
+- [ ] Pool A/B (64 vs 32768) CLI/TCP path pe, aur library users ke liye 4096 default dekhna (measure nahi hua)
 ### CI
 - [x] file_perms CI red: `Server::open` ka checkpoint (6f26e22) `t.wal.ckpt` dobara likhta tha, nayi file 644. Fix (8005777): `write_checkpoint_metadata_to_disk` (wal.rs) tmp file `.mode(0o600)` se banata hai, open + auto-checkpoint dono cover. file_perms + backup_perms ok, mitrdb-storage 53 passed
 - [ ] CI 8005777 green verify

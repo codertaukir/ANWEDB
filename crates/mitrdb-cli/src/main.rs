@@ -183,7 +183,7 @@ fn main() {
         }
 
         let server = if let (Some(db), Some(wal)) = (db_path, wal_path) {
-            let (server, report) = match Server::open(&db, &wal, 64) {
+            let (server, report) = match Server::open(&db, &wal, pool_frames()) {
                 Ok(res) => res,
                 Err(err) => {
                     eprintln!("mitrdb-cli open error: {err}");
@@ -256,7 +256,7 @@ fn main() {
     }
 
     if let (Some(db), Some(wal)) = (db_path, wal_path) {
-        let (server, report) = match Server::open(&db, &wal, 64) {
+        let (server, report) = match Server::open(&db, &wal, pool_frames()) {
             Ok(res) => res,
             Err(err) => {
                 eprintln!("mitrdb-cli open error: {}", err);
@@ -291,4 +291,13 @@ fn main() {
         }
         println!("mitrdb-cli v0.1.0");
     }
+}
+
+/// Buffer pool frames (4 KB each). Default 32768 = 128 MB. Override: MITRDB_POOL_FRAMES.
+fn pool_frames() -> usize {
+    std::env::var("MITRDB_POOL_FRAMES")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|n| *n >= 64)
+        .unwrap_or(32768)
 }
