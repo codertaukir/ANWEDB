@@ -245,3 +245,6 @@ Status tracker. `[x]` = done and measured/tested, `[ ]` = pending.
 - [ ] TCP kill -9 with update/delete clients, TLS, 100+ connections
 - [ ] 10M rows (RAM 7.6 GB, scan ka Vec<Row> memory kha raha hai: scan hata ke sirf insert+reopen naapna)
 - [ ] Power loss (VM hard power-off ya dm-flakey)
+- [x] 10M rows, 4 threads (examples/ten_m_drill.rs, real disk btrfs, ek run, 1000 rows/INSERT autocommit, 50 B/row): insert 494.6 s = 20.2k rows/s (flat 18k-21.8k per 1M), peak RSS 4216 MB (~420 B/row, last 2M rows pe growth ruki), reopen 19.58 s, point lookup 1147 us avg (1000/1000 ok), COUNT(*) 99.95 s = 10000000 (ok). Bina memory cap ke 4 threads pe machine OOM hui (VS Code kill), cap wala run (systemd-run MemoryMax=4G) pass, par cap kaam kiya ya nahi pakka nahi (RSS 4462 MB)
+- [ ] 10M pe reopen 19.6 s (1M pe 1.5 s), point lookup 1147 us (1M pe 297 us), COUNT(*) 100 s: kaaran measure nahi hua. Shak: COUNT full scan, buffer pool sirf 16 MB
+- [ ] Insert memory ~420 B/row ka source (MVCC versions? vacuum ke baad RSS naapna)
