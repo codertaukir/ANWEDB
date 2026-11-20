@@ -123,9 +123,6 @@ dependencies = [
 [[package]]
 name = "mitrdb-observe"
 version = "0.1.0"
-dependencies = [
- "mitrdb-common",
-]
 
 [[package]]
 name = "mitrdb-orm"
