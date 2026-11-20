@@ -248,3 +248,7 @@ Status tracker. `[x]` = done and measured/tested, `[ ]` = pending.
 - [x] 10M rows, 4 threads (examples/ten_m_drill.rs, real disk btrfs, ek run, 1000 rows/INSERT autocommit, 50 B/row): insert 494.6 s = 20.2k rows/s (flat 18k-21.8k per 1M), peak RSS 4216 MB (~420 B/row, last 2M rows pe growth ruki), reopen 19.58 s, point lookup 1147 us avg (1000/1000 ok), COUNT(*) 99.95 s = 10000000 (ok). Bina memory cap ke 4 threads pe machine OOM hui (VS Code kill), cap wala run (systemd-run MemoryMax=4G) pass, par cap kaam kiya ya nahi pakka nahi (RSS 4462 MB)
 - [ ] 10M pe reopen 19.6 s (1M pe 1.5 s), point lookup 1147 us (1M pe 297 us), COUNT(*) 100 s: kaaran measure nahi hua. Shak: COUNT full scan, buffer pool sirf 16 MB
 - [ ] Insert memory ~420 B/row ka source (MVCC versions? vacuum ke baad RSS naapna)
+- [x] 10M rows, 4 threads (examples/ten_m_drill.rs, real disk btrfs, ek run, 1000 rows/INSERT autocommit): insert 494.6 s = 20.2k rows/s (flat 18k-21.8k per 1M), peak RSS 4216 MB, reopen 19.58 s, point lookup 1147 us, COUNT(*) 99.95 s = 10000000 ok. Bina cap ke OOM (VS Code kill); cap wale run mein pass
+- [x] COUNT(*) fast path try (revert): Aggregate+SeqScan pe rows decode/Vec hataya. 200k rows: count_star 0.60-0.66 s vs COUNT(id) 0.65-0.67 s = fayda noise ke andar. Bottleneck txn_mgr.scan (entries Vec + MVCC visibility), decode nahi
+- [ ] 10M pe reopen 19.6 s, point lookup 1147 us, COUNT(*) 100 s; scan ko streaming banana (perf profile pehle)
+- [ ] Single-thread 10M run ke numbers (paste nahi hue)
