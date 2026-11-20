@@ -1854,7 +1854,7 @@ impl TxnManager {
             let mut fallback_keys = 0usize;
 
             for key_batch in ordered_keys.chunks(MVCC_SCAN_BATCH_SIZE) {
-                let mut resolved: Vec<(Vec<u8>, Option<Vec<u8>>, bool)> =
+                let mut resolved: Vec<(&Vec<u8>, Option<Vec<u8>>, bool)> =
                     Vec::with_capacity(key_batch.len());
 
                 let mvcc_chunk_started = std::time::Instant::now();
@@ -1875,13 +1875,13 @@ impl TxnManager {
                                     self.is_version_visible(txn_id, isolation, read_ts, ver, &txns)
                                 })
                                 .and_then(|ver| ver.value.clone());
-                            resolved.push(((**key).clone(), visible, true));
+                            resolved.push((*key, visible, true));
                         } else {
                             if chain_epoch_changed {
                                 let fresh = tree.get((**key).as_slice())?;
-                                resolved.push(((**key).clone(), fresh, true));
+                                resolved.push((*key, fresh, true));
                             } else {
-                                resolved.push(((**key).clone(), None, false));
+                                resolved.push((*key, None, false));
                             }
                         }
                     }
@@ -1890,14 +1890,15 @@ impl TxnManager {
 
                 let fallback_chunk_started = std::time::Instant::now();
                 for (key, mvcc_value, had_mvcc_chain) in resolved {
-                    let value = if had_mvcc_chain {
-                        mvcc_value
+                    if had_mvcc_chain {
+                        if let Some(value) = mvcc_value {
+                            visible_entries.push((key.clone(), value));
+                        }
                     } else {
                         fallback_keys += 1;
-                        raw_values.remove(&key)
-                    };
-                    if let Some(value) = value {
-                        visible_entries.push((key, value));
+                        if let Some((k, v)) = raw_values.remove_entry(key) {
+                            visible_entries.push((k, v));
+                        }
                     }
                 }
                 fallback_time_total += fallback_chunk_started.elapsed();

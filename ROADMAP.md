@@ -244,3 +244,4 @@ Status tracker. `[x]` = done and measured/tested, `[ ]` = pending.
 ### CI
 - [x] file_perms CI red: `Server::open` ka checkpoint (6f26e22) `t.wal.ckpt` dobara likhta tha, nayi file 644. Fix (8005777): `write_checkpoint_metadata_to_disk` (wal.rs) tmp file `.mode(0o600)` se banata hai, open + auto-checkpoint dono cover. file_perms + backup_perms ok, mitrdb-storage 53 passed
 - [ ] CI 8005777 green verify
+- [x] range_scan_directed: resolved Vec mein key clone hataya (remove_entry). count_profile 300k rows, 6 round alternating, pool 4096: median old 1.72 vs new 1.63 s (~-5%), spread 1.45-1.81 = noise, speed-up claim nahi. Cleanup. Tests: mitrdb-txn + orm relations/page/count ok
