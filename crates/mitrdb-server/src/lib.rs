@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 mod network;
 pub use network::{TcpServerConfig, TcpServerHandle};
@@ -71,7 +71,7 @@ pub struct Server {
     executor: Executor,
     default_session: DatabaseSession,
     next_session_id: AtomicU64,
-    sessions: Mutex<HashMap<SessionId, Arc<DatabaseSession>>>,
+    sessions: RwLock<HashMap<SessionId, Arc<DatabaseSession>>>,
     backup_lock: Mutex<()>,
     auto_ckpt_wal_bytes: AtomicU64,
     auto_ckpt_tick: AtomicU64,
@@ -96,7 +96,7 @@ impl Server {
             executor,
             default_session: DatabaseSession::new(),
             next_session_id: AtomicU64::new(1),
-            sessions: Mutex::new(HashMap::new()),
+            sessions: RwLock::new(HashMap::new()),
             backup_lock: Mutex::new(()),
             auto_ckpt_wal_bytes: AtomicU64::new(0),
             auto_ckpt_tick: AtomicU64::new(0),
@@ -192,7 +192,7 @@ impl Server {
                 executor,
                 default_session: DatabaseSession::new(),
                 next_session_id: AtomicU64::new(1),
-                sessions: Mutex::new(HashMap::new()),
+                sessions: RwLock::new(HashMap::new()),
                 backup_lock: Mutex::new(()),
                 auto_ckpt_wal_bytes: AtomicU64::new(DEFAULT_AUTO_CHECKPOINT_WAL_BYTES),
                 auto_ckpt_tick: AtomicU64::new(0),
@@ -229,7 +229,7 @@ impl Server {
     pub fn create_session_with_isolation(&self, isolation: IsolationLevel) -> SessionId {
         let id = self.next_session_id.fetch_add(1, Ordering::SeqCst);
         self.sessions
-            .lock()
+            .write()
             .unwrap()
             .insert(id, Arc::new(DatabaseSession::with_isolation(isolation)));
         id
@@ -246,7 +246,7 @@ impl Server {
     ) -> Result<()> {
         let session = self
             .sessions
-            .lock()
+            .read()
             .unwrap()
             .get(&session_id)
             .cloned()
@@ -256,7 +256,7 @@ impl Server {
     }
 
     pub fn close_session(&self, session_id: SessionId) -> Result<()> {
-        let session_opt = self.sessions.lock().unwrap().remove(&session_id);
+        let session_opt = self.sessions.write().unwrap().remove(&session_id);
         if let Some(session) = session_opt
             && let Some(tid) = session.active_txn.lock().unwrap().take()
         {
@@ -371,7 +371,7 @@ impl Server {
     ) -> Result<ExecutionResult> {
         let session = self
             .sessions
-            .lock()
+            .read()
             .unwrap()
             .get(&session_id)
             .cloned()
