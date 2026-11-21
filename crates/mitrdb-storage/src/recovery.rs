@@ -178,20 +178,22 @@ impl RecoveryManager {
                     self.bpm.unmark_page_free(r.page_id);
                     let page = match self.bpm.fetch_page(r.page_id) {
                         Ok(p) => p,
-                        Err(Error::PageCorrupted(msg)) => match first_full_lsn.get(&r.page_id) {
-                            Some(&full_lsn) if r.lsn < full_lsn => continue,
-                            Some(&full_lsn) if r.lsn == full_lsn => {
-                                self.bpm.install_blank_page(r.page_id)?;
-                                self.bpm.fetch_page(r.page_id)?
+                        Err(err @ (Error::PageCorrupted(_) | Error::InvalidPageId(_))) => {
+                            match first_full_lsn.get(&r.page_id) {
+                                Some(&full_lsn) if r.lsn < full_lsn => continue,
+                                Some(&full_lsn) if r.lsn == full_lsn => {
+                                    self.bpm.install_blank_page(r.page_id)?;
+                                    self.bpm.fetch_page(r.page_id)?
+                                }
+                                Some(_) => {
+                                    return Err(Error::CrashRecovery(format!(
+                                        "Torn page {} met record LSN {} after its full image was skipped",
+                                        r.page_id, r.lsn
+                                    )));
+                                }
+                                None => return Err(err),
                             }
-                            Some(_) => {
-                                return Err(Error::CrashRecovery(format!(
-                                    "Torn page {} met record LSN {} after its full image was skipped",
-                                    r.page_id, r.lsn
-                                )));
-                            }
-                            None => return Err(Error::PageCorrupted(msg)),
-                        },
+                        }
                         Err(e) => return Err(e),
                     };
                     let page_lsn = page.page_lsn();

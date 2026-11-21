@@ -118,7 +118,13 @@ fn torn_wal_tail_is_truncated_and_data_kept() {
     let mut wals: Vec<PathBuf> = std::fs::read_dir(&d)
         .unwrap()
         .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| p.is_file() && p.file_name().unwrap().to_string_lossy().contains("wal"))
+        .filter(|p| {
+            let name = p.file_name().unwrap().to_string_lossy();
+            p.is_file()
+                && name.contains("wal")
+                && !name.ends_with(".ckpt")
+                && !name.ends_with(".ckpt.tmp")
+        })
         .filter(|p| std::fs::metadata(p).map(|m| m.len() > 0).unwrap_or(false))
         .collect();
     wals.sort();
@@ -162,4 +168,33 @@ fn repeated_crash_restart_with_checkpoint_in_middle() {
     drop(s);
     let s = open(&d);
     assert_eq!(count(&s, Some(5)), 900);
+}
+
+#[test]
+fn recovery_extends_unflushed_db_file_from_wal_full_page_images() {
+    let d = dir("unextended_db");
+    let db_path = d.join("t.db");
+    let snap_path = d.join("t.db.snap");
+    {
+        let s = open(&d);
+        setup(&s);
+        insert_range(&s, 0, 20, 9);
+        std::fs::copy(&db_path, &snap_path).unwrap();
+        let snap_len = std::fs::metadata(&snap_path).unwrap().len();
+        insert_range(&s, 20, 500, 9);
+        std::mem::forget(s);
+        std::fs::copy(&snap_path, &db_path).unwrap();
+        let after_len = std::fs::metadata(&db_path).unwrap().len();
+        assert_eq!(snap_len, after_len);
+    }
+
+    let s = open(&d);
+    assert_eq!(count(&s, None), 500);
+    assert_eq!(count(&s, Some(9)), 500);
+    // recovery ke baad ke inserts: pehla leaf split recovered page ka frame overwrite na kare
+    for i in 500..550 {
+        insert_range(&s, i, i + 1, 9);
+    }
+    assert_eq!(count(&s, None), 550);
+    assert_eq!(count(&s, Some(9)), 550);
 }

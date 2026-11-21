@@ -600,12 +600,17 @@ impl BufferPoolManager {
     }
 
     pub fn install_blank_page(&self, page_id: PageId) -> Result<()> {
+        self.disk_manager.ensure_page_capacity(page_id)?;
         let mut shards = self.lock_all_shards_write();
         let s = shard_of(page_id);
         if shards[s].contains_key(&page_id) {
             return Ok(());
         }
         let victim_idx = self.find_victim_frame_sharded(&mut shards)?;
+        self.free_frames
+            .lock()
+            .unwrap()
+            .retain(|&i| i != victim_idx);
         let mut frame = self.frames[victim_idx].write().unwrap();
         frame.page = Page::new_empty(page_id, crate::page::PAGE_TYPE_RAW);
         frame.page_id = Some(page_id);
@@ -1351,5 +1356,28 @@ mod tests {
         bpm.unpin_page(reclaimed_pid, false).unwrap();
 
         let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_install_blank_page_frame_not_reused_by_new_page() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("mitrdb_bp_test_blank_frame_{}", std::process::id()));
+        let db_path = temp_dir.join("test.db");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+
+        let disk = Arc::new(DiskManager::open_or_create(db_path.as_path()).unwrap());
+        let bpm = BufferPoolManager::new(disk, 8);
+
+        bpm.install_blank_page(3).unwrap();
+        let (new_id, _) = bpm.new_page(PAGE_TYPE_SLOTTED).unwrap();
+        bpm.unpin_page(new_id, false).unwrap();
+        assert_ne!(new_id, 3);
+
+        let p3 = bpm.fetch_page(3).unwrap();
+        assert_eq!(p3.page_id(), 3);
+        bpm.unpin_page(3, false).unwrap();
+        let pn = bpm.fetch_page(new_id).unwrap();
+        assert_eq!(pn.page_id(), new_id);
+        bpm.unpin_page(new_id, false).unwrap();
     }
 }

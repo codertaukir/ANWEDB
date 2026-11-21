@@ -333,6 +333,18 @@ impl DiskManager {
         &self.path
     }
 
+    pub fn ensure_page_capacity(&self, page_id: PageId) -> Result<()> {
+        let mut num_pages = self.num_pages.lock().unwrap();
+        if page_id >= *num_pages {
+            let new_num_pages = page_id + 1;
+            let new_len = (new_num_pages as u64) * (PAGE_SIZE as u64);
+            let file = self.file.lock().unwrap();
+            file.set_len(new_len)?;
+            *num_pages = new_num_pages;
+        }
+        Ok(())
+    }
+
     pub fn read_page(&self, page_id: PageId) -> Result<Page> {
         let num_pages = self.num_pages.lock().unwrap();
         let free_pages = self.free_pages.write().unwrap();
