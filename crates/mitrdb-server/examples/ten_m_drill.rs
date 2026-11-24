@@ -1,16 +1,21 @@
 use mitrdb_server::Server;
-use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::{Duration, Instant};
 
 fn open(dir: &str) -> Server {
-    Server::open(format!("{dir}/t.db"), format!("{dir}/t.wal"), 4096).unwrap().0
+    Server::open(format!("{dir}/t.db"), format!("{dir}/t.wal"), 4096)
+        .unwrap()
+        .0
 }
 fn hwm_mb() -> u64 {
-    std::fs::read_to_string("/proc/self/status").unwrap_or_default().lines()
+    std::fs::read_to_string("/proc/self/status")
+        .unwrap_or_default()
+        .lines()
         .find(|l| l.starts_with("VmHWM"))
         .and_then(|l| l.split_whitespace().nth(1)?.parse::<u64>().ok())
-        .unwrap_or(0) / 1024
+        .unwrap_or(0)
+        / 1024
 }
 
 fn main() {
@@ -22,38 +27,54 @@ fn main() {
     std::fs::create_dir_all(dir).unwrap();
 
     let s = Arc::new(open(dir));
-    s.execute_sql("CREATE TABLE m (id INT PRIMARY KEY, n INT, t TEXT)").unwrap();
+    s.execute_sql("CREATE TABLE m (id INT PRIMARY KEY, n INT, t TEXT)")
+        .unwrap();
     let done = Arc::new(AtomicI64::new(0));
     let per = total / threads;
     let t0 = Instant::now();
-    let hs: Vec<_> = (0..threads).map(|t| {
-        let (s, done) = (s.clone(), done.clone());
-        std::thread::spawn(move || {
-            let base = t * per;
-            let mut k = 0;
-            while k < per {
-                let v: Vec<String> = (0..1000).map(|j| {
-                    let id = base + k + j;
-                    format!("({id}, {}, 'row-{id}-xxxxxxxxxxxxxxxx')", id % 1000)
-                }).collect();
-                s.execute_sql(&format!("INSERT INTO m VALUES {}", v.join(","))).unwrap();
-                k += 1000;
-                done.fetch_add(1000, Ordering::Relaxed);
-            }
+    let hs: Vec<_> = (0..threads)
+        .map(|t| {
+            let (s, done) = (s.clone(), done.clone());
+            std::thread::spawn(move || {
+                let base = t * per;
+                let mut k = 0;
+                while k < per {
+                    let v: Vec<String> = (0..1000)
+                        .map(|j| {
+                            let id = base + k + j;
+                            format!("({id}, {}, 'row-{id}-xxxxxxxxxxxxxxxx')", id % 1000)
+                        })
+                        .collect();
+                    s.execute_sql(&format!("INSERT INTO m VALUES {}", v.join(",")))
+                        .unwrap();
+                    k += 1000;
+                    done.fetch_add(1000, Ordering::Relaxed);
+                }
+            })
         })
-    }).collect();
+        .collect();
     let (mut next, mut seg) = (1_000_000i64, Instant::now());
     while done.load(Ordering::Relaxed) < per * threads {
         std::thread::sleep(Duration::from_millis(200));
         if done.load(Ordering::Relaxed) >= next {
-            println!("TM threads={threads} rows={next} last1M_rows_s={:.0} rss_mb={}", 1_000_000.0 / seg.elapsed().as_secs_f64(), hwm_mb());
+            println!(
+                "TM threads={threads} rows={next} last1M_rows_s={:.0} rss_mb={}",
+                1_000_000.0 / seg.elapsed().as_secs_f64(),
+                hwm_mb()
+            );
             seg = Instant::now();
             next += 1_000_000;
         }
     }
-    for h in hs { h.join().unwrap(); }
+    for h in hs {
+        h.join().unwrap();
+    }
     let secs = t0.elapsed().as_secs_f64();
-    println!("TM threads={threads} insert_total secs={secs:.1} rows_s={:.0} peak_rss_mb={}", (per * threads) as f64 / secs, hwm_mb());
+    println!(
+        "TM threads={threads} insert_total secs={secs:.1} rows_s={:.0} peak_rss_mb={}",
+        (per * threads) as f64 / secs,
+        hwm_mb()
+    );
     drop(s);
 
     let t1 = Instant::now();
@@ -63,12 +84,24 @@ fn main() {
     let mut ok = 0;
     for k in 0..1000i64 {
         let id = (k * 7919) % (per * threads);
-        let r = s.execute_sql(&format!("SELECT id FROM m WHERE id = {id}")).unwrap();
-        if format!("{:?}", r).contains(&id.to_string()) { ok += 1; }
+        let r = s
+            .execute_sql(&format!("SELECT id FROM m WHERE id = {id}"))
+            .unwrap();
+        if format!("{:?}", r).contains(&id.to_string()) {
+            ok += 1;
+        }
     }
-    println!("TM point_lookup ok={ok}/1000 avg_us={:.0}", t3.elapsed().as_secs_f64() * 1e6 / 1000.0);
+    println!(
+        "TM point_lookup ok={ok}/1000 avg_us={:.0}",
+        t3.elapsed().as_secs_f64() * 1e6 / 1000.0
+    );
     println!("TM rss_before_count_mb={}", hwm_mb());
     let t2 = Instant::now();
     let r = s.execute_sql("SELECT COUNT(*) FROM m").unwrap();
-    println!("TM count secs={:.2} result={:?} peak_rss_mb={}", t2.elapsed().as_secs_f64(), r, hwm_mb());
+    println!(
+        "TM count secs={:.2} result={:?} peak_rss_mb={}",
+        t2.elapsed().as_secs_f64(),
+        r,
+        hwm_mb()
+    );
 }

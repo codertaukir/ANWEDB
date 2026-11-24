@@ -17,7 +17,10 @@ fn value_limit_probe2() {
     let mut id = 0i64;
 
     // 1) Hindi: 3 bytes/char. chars vs bytes
-    for n in (1000usize..=1500).step_by(25).chain([1330, 1331, 1332, 1333, 1334, 1335]) {
+    for n in (1000usize..=1500)
+        .step_by(25)
+        .chain([1330, 1331, 1332, 1333, 1334, 1335])
+    {
         id += 1;
         let r = t.insert(&[("id", val(id)), ("data", val("अ".repeat(n)))]);
         eprintln!("VL hindi chars={n} bytes={} ok={}", n * 3, r.is_ok());
@@ -41,7 +44,10 @@ fn value_limit_probe2() {
         let r = t.insert(&[("id", val(id)), ("data", val("अ".repeat(mid)))]);
         if r.is_ok() { lo = mid } else { hi = mid }
     }
-    eprintln!("VL hindi_threshold max_ok_chars={lo} first_fail_chars={hi} bytes_ok={}", lo * 3);
+    eprintln!(
+        "VL hindi_threshold max_ok_chars={lo} first_fail_chars={hi} bytes_ok={}",
+        lo * 3
+    );
 
     // 4) Oversize error text (Debug + Display)
     for n in [4100usize, 5000, 100_000] {

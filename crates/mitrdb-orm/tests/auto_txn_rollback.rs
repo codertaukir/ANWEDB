@@ -21,7 +21,13 @@ fn auto_id_after_rollback_probe() {
     let c = db.insert_get_id(&Job { id: 0, n: 3 });
     println!("PROBE in-txn ids: a={a} b={b:?} c={c:?}");
     db.execute_sql("ROLLBACK").unwrap();
-    println!("PROBE count after rollback = {}", db.count::<Job>().unwrap());
+    println!(
+        "PROBE count after rollback = {}",
+        db.count::<Job>().unwrap()
+    );
     let d = db.insert_get_id(&Job { id: 0, n: 4 }).unwrap();
-    assert!(d > *b.as_ref().unwrap(), "id reused after rollback: d={d} b={b:?}");
+    assert!(
+        d > *b.as_ref().unwrap(),
+        "id reused after rollback: d={d} b={b:?}"
+    );
 }

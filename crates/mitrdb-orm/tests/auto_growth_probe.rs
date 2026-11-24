@@ -19,7 +19,11 @@ fn auto_id_cost_vs_table_size_probe() {
     for block in 0..10 {
         let t0 = Instant::now();
         for i in 0..2000 {
-            db.insert_get_id(&Job { id: 0, n: block * 2000 + i }).unwrap();
+            db.insert_get_id(&Job {
+                id: 0,
+                n: block * 2000 + i,
+            })
+            .unwrap();
         }
         let us = t0.elapsed().as_secs_f64() * 1e6 / 2000.0;
         println!("AGP rows_before={} us_per_insert={:.0}", block * 2000, us);

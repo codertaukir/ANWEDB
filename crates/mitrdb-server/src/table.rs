@@ -582,12 +582,7 @@ impl Table<'_> {
                 None => {
                     match seq.insert(&[("tbl", key.clone()), ("last_id", Value::Int64(next))]) {
                         Ok(_) => true,
-                        Err(e)
-                            if e.to_string().contains("Duplicate")
-                                || seq_retryable(&e) =>
-                        {
-                            false
-                        }
+                        Err(e) if e.to_string().contains("Duplicate") || seq_retryable(&e) => false,
                         Err(e) => return Err(e),
                     }
                 }
@@ -614,12 +609,9 @@ impl Table<'_> {
             full.extend(row.iter().cloned());
             match self.insert(&full) {
                 Ok(n) => return Ok((next, n)),
-                Err(e)
-                    if e.to_string().contains("Duplicate primary key")
-                        || seq_retryable(&e) =>
-                {
+                Err(e) if e.to_string().contains("Duplicate primary key") || seq_retryable(&e) => {
                     need_scan = true;
-                    continue
+                    continue;
                 }
                 Err(e) => return Err(e),
             }

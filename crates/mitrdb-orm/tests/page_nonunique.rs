@@ -16,7 +16,11 @@ fn page_nonunique_pinned() {
     db.sync::<Pn>().unwrap();
     // 10 distinct ts values (1..=10), 5 rows each = 50 rows
     for i in 0..50 {
-        db.insert(&Pn { id: 0, ts: i / 5 + 1 }).unwrap();
+        db.insert(&Pn {
+            id: 0,
+            ts: i / 5 + 1,
+        })
+        .unwrap();
     }
 
     // Forward: naive cursor loop on non-unique ts, page size 7, cursor = last row's ts
@@ -25,9 +29,15 @@ fn page_nonunique_pinned() {
     let mut pages = 0;
     loop {
         let page = db.all::<Pn>().page_after(Pn::ts, last, 7).unwrap();
-        if page.is_empty() { break; }
+        if page.is_empty() {
+            break;
+        }
         pages += 1;
-        eprintln!("PN fwd page{pages} ids={:?} ts={:?}", page.iter().map(|m| m.id).collect::<Vec<_>>(), page.iter().map(|m| m.ts).collect::<Vec<_>>());
+        eprintln!(
+            "PN fwd page{pages} ids={:?} ts={:?}",
+            page.iter().map(|m| m.id).collect::<Vec<_>>(),
+            page.iter().map(|m| m.ts).collect::<Vec<_>>()
+        );
         last = page.last().unwrap().ts;
         seen.extend(page.iter().map(|m| m.id));
     }
@@ -39,7 +49,9 @@ fn page_nonunique_pinned() {
     let mut pages_b = 0;
     loop {
         let page = db.all::<Pn>().page_before(Pn::ts, first, 7).unwrap();
-        if page.is_empty() { break; }
+        if page.is_empty() {
+            break;
+        }
         pages_b += 1;
         first = page.last().unwrap().ts;
         seen_b.extend(page.iter().map(|m| m.id));
@@ -51,7 +63,9 @@ fn page_nonunique_pinned() {
     let mut lastid = 0i64;
     loop {
         let page = db.find(Pn::ts.ge(1)).page_after(Pn::id, lastid, 7).unwrap();
-        if page.is_empty() { break; }
+        if page.is_empty() {
+            break;
+        }
         lastid = page.last().unwrap().id;
         seen_pk.extend(page.iter().map(|m| m.id));
     }

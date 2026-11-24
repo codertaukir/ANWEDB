@@ -23,13 +23,20 @@ fn auto_id_thread_scaling_probe() {
             for t in 0..th {
                 s.spawn(move || {
                     for i in 0..500 {
-                        db.insert_get_id(&Job { id: 0, n: t * 1000 + i }).unwrap();
+                        db.insert_get_id(&Job {
+                            id: 0,
+                            n: t * 1000 + i,
+                        })
+                        .unwrap();
                     }
                 });
             }
         });
         let e = t0.elapsed().as_secs_f64();
         let total = th * 500;
-        println!("ASP threads={th} total={total} secs={e:.2} us_per_insert={:.0}", e * 1e6 / total as f64);
+        println!(
+            "ASP threads={th} total={total} secs={e:.2} us_per_insert={:.0}",
+            e * 1e6 / total as f64
+        );
     }
 }
