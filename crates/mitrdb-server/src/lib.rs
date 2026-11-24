@@ -150,6 +150,11 @@ impl Server {
             p.push(".lock");
             std::path::PathBuf::from(p)
         };
+        if let Some(parent) = db_copy.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent)?;
+        }
         let lock_file = std::fs::OpenOptions::new()
             .read(true)
             .write(true)

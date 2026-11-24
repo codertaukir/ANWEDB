@@ -157,8 +157,7 @@ fn main() {
         let mut after_fail = 0usize;
         for i in 0..2000i64 {
             let k = uid * 100_000 - i;
-            if s
-                .execute_sql(&format!("INSERT INTO pl VALUES ({k}, 'payload-{k}-after')"))
+            if s.execute_sql(&format!("INSERT INTO pl VALUES ({k}, 'payload-{k}-after')"))
                 .is_err()
             {
                 after_fail += 1;
