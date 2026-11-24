@@ -52,3 +52,8 @@
 - Auto ids are never reused, also inside an explicit transaction: the id counter is committed on its own, so a ROLLBACK leaves a gap (auto_txn_rollback.rs). Ids can have gaps.
 - Many threads inserting auto-id rows into one table contend on one counter row. Measured (tmpfs, one run): 1 thread about 0.6 ms per insert, 4 threads 4-7 ms.
 - `insert_auto` inside an explicit transaction does not retry a write conflict (not tested).
+
+## Durability / crash testing scope
+- Power-loss test sirf ek VM (virsh destroy, directsync, ext4) par, kuch hi cuts. Real hardware/doosre filesystems par test nahi hua.
+- Ek DB directory ek hi process khol sakta hai (<db>.lock). Network filesystem par flock ki guarantee nahi.
+- Torn WAL tail ka rule: CRC-fail record ke baad sirf zeros ho tabhi truncate; beech ka corruption error rehta hai.

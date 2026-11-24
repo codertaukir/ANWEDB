@@ -245,3 +245,17 @@ Status tracker. `[x]` = done and measured/tested, `[ ]` = pending.
 - [x] file_perms CI red: `Server::open` ka checkpoint (6f26e22) `t.wal.ckpt` dobara likhta tha, nayi file 644. Fix (8005777): `write_checkpoint_metadata_to_disk` (wal.rs) tmp file `.mode(0o600)` se banata hai, open + auto-checkpoint dono cover. file_perms + backup_perms ok, mitrdb-storage 53 passed
 - [ ] CI 8005777 green verify
 - [x] range_scan_directed: resolved Vec mein key clone hataya (remove_entry). count_profile 300k rows, 6 round alternating, pool 4096: median old 1.72 vs new 1.63 s (~-5%), spread 1.45-1.81 = noise, speed-up claim nahi. Cleanup. Tests: mitrdb-txn + orm relations/page/count ok
+
+## Session: crash/power-loss hardening (scope: host SIGKILL + 1 VM power-off, har ek kuch hi run)
+- [x] recovery: install_blank_page ne free_frames se frame nahi hataya -> recovered page ka frame overwrite hota tha (b5d43c6, regression + unit test)
+- [x] Server::open par exclusive dir lock (<db>.lock): do process ek hi DB par WAL corrupt karte the (173e084, 6d80a87)
+- [x] WAL: last segment mein CRC-fail record ke baad sirf zeros ho to torn tail maan ke truncate (ac20e81, 2 tests)
+- [x] Power-loss drill: VM virsh destroy, directsync, ext4, 4 threads, 5 cuts (checkpointer + segment rotation ke saath bhi) -> lost=0 phantom=0 dup=0
+- [ ] Rotated WAL segment (t.wal.0000000N) permission 0644 dikha, 0600 hona chahiye
+- [ ] Power-loss: aur cuts (alag waqt, checkpoint ke andar), doosri disk/VM config
+- [ ] CI green confirm (74a551e, ac20e81 ka status abhi nahi aaya)
+- [ ] Backup ke dauran update/delete writers, kill -9 backup ke beech
+- [ ] TCP + TLS, 100+ connections
+- [ ] insert_auto explicit txn ke andar WriteConflict (untested)
+- [ ] Recovery ke baad har insert ~7 KB WAL (full page image) likhta dikha: perf/disk issue
+- [ ] Drills mein "recovery ke baad 1000+ inserts" step (is se free_frames bug pakda gaya)

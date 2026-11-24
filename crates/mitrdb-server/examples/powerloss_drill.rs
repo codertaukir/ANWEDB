@@ -103,6 +103,18 @@ fn main() {
             }));
         }
 
+        if let Some(secs) = std::env::var("PL_CKPT_SECS")
+            .ok()
+            .and_then(|v| v.parse::<f64>().ok())
+        {
+            let s2 = Arc::clone(&s);
+            std::thread::spawn(move || {
+                loop {
+                    std::thread::sleep(Duration::from_secs_f64(secs));
+                    let _ = s2.checkpoint();
+                }
+            });
+        }
         loop {
             std::thread::sleep(Duration::from_secs(1));
             let n = acked_total.load(Ordering::Relaxed);
