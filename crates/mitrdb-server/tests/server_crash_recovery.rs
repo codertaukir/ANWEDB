@@ -248,3 +248,23 @@ fn crc_fail_with_data_after_is_still_error() {
     append_bad_record(&d, &[0xABu8; 100]);
     assert!(Server::open(d.join("t.db"), d.join("t.wal"), 64).is_err());
 }
+
+#[test]
+fn rotated_wal_segments_are_0600() {
+    use std::os::unix::fs::PermissionsExt;
+    let d = dir("seg_perm");
+    let (s, _) =
+        Server::open_with_segment_size(d.join("t.db"), d.join("t.wal"), 64, 64 * 1024).unwrap();
+    setup(&s);
+    insert_range(&s, 0, 300, 9);
+    let mut segs = 0;
+    for e in std::fs::read_dir(&d).unwrap().flatten() {
+        let name = e.file_name().to_string_lossy().to_string();
+        if name.starts_with("t.wal.0") {
+            segs += 1;
+            let mode = e.metadata().unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "{} mode {:o}", name, mode);
+        }
+    }
+    assert!(segs >= 1, "WAL rotate nahi hua");
+}
