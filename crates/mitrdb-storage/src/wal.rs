@@ -833,6 +833,22 @@ impl WalManager {
         Ok(())
     }
 
+    fn tail_is_zero(file: &mut std::fs::File, from: u64, file_len: u64) -> Result<bool> {
+        use std::io::{Read, Seek, SeekFrom};
+        file.seek(SeekFrom::Start(from.min(file_len)))?;
+        let mut buf = vec![0u8; 64 * 1024];
+        let mut left = file_len.saturating_sub(from);
+        while left > 0 {
+            let n = (left as usize).min(buf.len());
+            file.read_exact(&mut buf[..n])?;
+            if buf[..n].iter().any(|&x| x != 0) {
+                return Ok(false);
+            }
+            left -= n as u64;
+        }
+        Ok(true)
+    }
+
     pub fn truncate_torn_tail(&self) -> Result<Vec<LogRecord>> {
         let mut inner = self.inner.lock();
         let ckpt_meta = self.load_checkpoint_metadata_from_disk()?;
@@ -1000,7 +1016,23 @@ impl WalManager {
                 record_buf[0..4].copy_from_slice(&size_buf);
                 file.read_exact(&mut record_buf[4..])?;
 
-                let record = LogRecord::deserialize(&record_buf)?;
+                let record = match LogRecord::deserialize(&record_buf) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        // Torn tail: record is complete by length but its data never reached
+                        // disk (power loss). Only the last segment, and only if nothing but
+                        // zeros follows. Anything else is real corruption and stays an error.
+                        let torn = is_last_segment
+                            && matches!(e, Error::WalCorrupted(_))
+                            && Self::tail_is_zero(&mut file, offset + total_size as u64, file_len)?;
+                        if torn {
+                            file.set_len(offset)?;
+                            file.sync_all()?;
+                            break;
+                        }
+                        return Err(e);
+                    }
+                };
                 if let Some(exp_lsn) = expected_next_lsn {
                     if record.lsn != exp_lsn {
                         return Err(Error::WalCorrupted(format!(

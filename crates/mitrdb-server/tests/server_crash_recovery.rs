@@ -207,3 +207,44 @@ fn second_open_same_dir_is_refused() {
     drop(s);
     let _s2 = open(&d);
 }
+
+fn append_bad_record(d: &std::path::Path, extra: &[u8]) {
+    use std::io::Write;
+    let mut f = std::fs::OpenOptions::new()
+        .append(true)
+        .open(d.join("t.wal"))
+        .unwrap();
+    let mut rec = vec![0u8; 8179];
+    rec[0..4].copy_from_slice(&8179u32.to_le_bytes());
+    f.write_all(&rec).unwrap();
+    f.write_all(extra).unwrap();
+}
+
+#[test]
+fn torn_zero_tail_record_is_truncated() {
+    let d = dir("torn_zero_tail");
+    {
+        let s = open(&d);
+        setup(&s);
+        insert_range(&s, 0, 50, 9);
+        drop(s);
+    }
+    append_bad_record(&d, &[0u8; 444]);
+    let s = open(&d);
+    assert_eq!(count(&s, None), 50);
+    insert_range(&s, 50, 60, 9);
+    assert_eq!(count(&s, None), 60);
+}
+
+#[test]
+fn crc_fail_with_data_after_is_still_error() {
+    let d = dir("crc_data_after");
+    {
+        let s = open(&d);
+        setup(&s);
+        insert_range(&s, 0, 50, 9);
+        drop(s);
+    }
+    append_bad_record(&d, &[0xABu8; 100]);
+    assert!(Server::open(d.join("t.db"), d.join("t.wal"), 64).is_err());
+}
