@@ -1854,6 +1854,7 @@ impl TxnManager {
             let mut fallback_keys = 0usize;
 
             for key_batch in ordered_keys.chunks(MVCC_SCAN_BATCH_SIZE) {
+                #[allow(clippy::type_complexity)]
                 let mut resolved: Vec<(&Vec<u8>, Option<Vec<u8>>, bool)> =
                     Vec::with_capacity(key_batch.len());
 
