@@ -251,7 +251,7 @@ Status tracker. `[x]` = done and measured/tested, `[ ]` = pending.
 - [x] Server::open par exclusive dir lock (<db>.lock): do process ek hi DB par WAL corrupt karte the (173e084, 6d80a87)
 - [x] WAL: last segment mein CRC-fail record ke baad sirf zeros ho to torn tail maan ke truncate (ac20e81, 2 tests)
 - [x] Power-loss drill: VM virsh destroy, directsync, ext4, 4 threads, 5 cuts (checkpointer + segment rotation ke saath bhi) -> lost=0 phantom=0 dup=0
-- [ ] Rotated WAL segment (t.wal.0000000N) permission 0644 dikha, 0600 hona chahiye
+- [x] Rotated WAL segment permission 0644 tha -> 0600 (a47516e, test rotated_wal_segments_are_0600 5a59f12; purani wal.rs par fail confirm)
 - [ ] Power-loss: aur cuts (alag waqt, checkpoint ke andar), doosri disk/VM config
 - [ ] CI green confirm (74a551e, ac20e81 ka status abhi nahi aaya)
 - [ ] Backup ke dauran update/delete writers, kill -9 backup ke beech
