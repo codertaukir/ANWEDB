@@ -33,6 +33,13 @@ pub struct CheckpointMetadata {
     pub segments_reclaimed: usize,
 }
 
+fn wal_open_opts() -> OpenOptions {
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut o = OpenOptions::new();
+    o.mode(0o600);
+    o
+}
+
 impl CheckpointMetadata {
     pub fn serialize(&self) -> [u8; CHECKPOINT_META_SIZE] {
         let mut buf = [0u8; CHECKPOINT_META_SIZE];
@@ -879,7 +886,7 @@ impl WalManager {
                 )));
             }
             let seg0_path = Self::segment_path(&self.path, 0);
-            let _file = OpenOptions::new()
+            let _file = wal_open_opts()
                 .read(true)
                 .write(true)
                 .create(true)
@@ -1210,7 +1217,7 @@ impl WalManager {
             .checked_add(1)
             .ok_or_else(|| Error::WalCorrupted("Segment ID overflow".to_string()))?;
         let next_path = Self::segment_path(&self.path, next_seg_id);
-        let file = OpenOptions::new()
+        let file = wal_open_opts()
             .read(true)
             .write(true)
             .create(true)
@@ -1675,7 +1682,7 @@ impl WalManager {
             };
 
             if needs_reopen {
-                let file = OpenOptions::new()
+                let file = wal_open_opts()
                     .read(true)
                     .write(true)
                     .create(true)
@@ -1777,7 +1784,7 @@ impl WalManager {
             let prev_flushed_bytes = inner.segments[seg_idx].flushed_bytes;
             let existed_before = seg_path.exists();
 
-            let mut file = OpenOptions::new()
+            let mut file = wal_open_opts()
                 .read(true)
                 .write(true)
                 .create(true)
