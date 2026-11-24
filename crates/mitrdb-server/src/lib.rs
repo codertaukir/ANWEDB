@@ -77,6 +77,7 @@ pub struct Server {
     auto_ckpt_tick: AtomicU64,
     auto_ckpt_floor: AtomicU64,
     auto_ckpt_running: std::sync::atomic::AtomicBool,
+    _dir_lock: Option<std::fs::File>,
 }
 
 impl Server {
@@ -102,6 +103,7 @@ impl Server {
             auto_ckpt_tick: AtomicU64::new(0),
             auto_ckpt_floor: AtomicU64::new(0),
             auto_ckpt_running: std::sync::atomic::AtomicBool::new(false),
+            _dir_lock: None,
         }
     }
 
@@ -141,6 +143,29 @@ impl Server {
     ) -> Result<(Self, RecoveryReport)> {
         let db_copy = db_path.as_ref().to_path_buf();
         let wal_copy = wal_path.as_ref().to_path_buf();
+        // Exclusive per-directory lock BEFORE touching db/WAL: recovery truncates the WAL,
+        // so a second process must be refused before it gets that far.
+        let lock_path = {
+            let mut p = db_copy.clone().into_os_string();
+            p.push(".lock");
+            std::path::PathBuf::from(p)
+        };
+        let lock_file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)?;
+        match lock_file.try_lock() {
+            Ok(()) => {}
+            Err(std::fs::TryLockError::WouldBlock) => {
+                return Err(Error::Io(format!(
+                    "database {} is already open (locked by another Server/process)",
+                    db_copy.display()
+                )));
+            }
+            Err(std::fs::TryLockError::Error(e)) => return Err(e.into()),
+        }
         let disk = Arc::new(DiskManager::open_or_create(db_path)?);
         let wal = Arc::new(WalManager::open_with_segment_size(
             wal_path,
@@ -198,6 +223,7 @@ impl Server {
                 auto_ckpt_tick: AtomicU64::new(0),
                 auto_ckpt_floor: AtomicU64::new(0),
                 auto_ckpt_running: std::sync::atomic::AtomicBool::new(false),
+                _dir_lock: Some(lock_file),
             },
             report,
         ))

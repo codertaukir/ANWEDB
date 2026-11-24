@@ -182,7 +182,7 @@ fn recovery_extends_unflushed_db_file_from_wal_full_page_images() {
         std::fs::copy(&db_path, &snap_path).unwrap();
         let snap_len = std::fs::metadata(&snap_path).unwrap().len();
         insert_range(&s, 20, 500, 9);
-        std::mem::forget(s);
+        drop(s);
         std::fs::copy(&snap_path, &db_path).unwrap();
         let after_len = std::fs::metadata(&db_path).unwrap().len();
         assert_eq!(snap_len, after_len);
@@ -197,4 +197,13 @@ fn recovery_extends_unflushed_db_file_from_wal_full_page_images() {
     }
     assert_eq!(count(&s, None), 550);
     assert_eq!(count(&s, Some(9)), 550);
+}
+
+#[test]
+fn second_open_same_dir_is_refused() {
+    let d = dir("lock2");
+    let s = open(&d);
+    assert!(Server::open(d.join("t.db"), d.join("t.wal"), 64).is_err());
+    drop(s);
+    let _s2 = open(&d);
 }
