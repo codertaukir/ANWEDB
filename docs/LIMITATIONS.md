@@ -57,3 +57,4 @@
 - Power-loss test sirf ek VM (virsh destroy, directsync, ext4) par, kuch hi cuts. Real hardware/doosre filesystems par test nahi hua.
 - Ek DB directory ek hi process khol sakta hai (<db>.lock). Network filesystem par flock ki guarantee nahi.
 - Torn WAL tail ka rule: CRC-fail record ke baad sirf zeros ho tabhi truncate; beech ka corruption error rehta hai.
+- Power-loss: 10 cuts, ek VM, ek disk config (qcow2, directsync, ext4), 4 threads, ek table, sirf INSERT. UPDATE/DELETE/DDL ke saath power-cut test nahi hua. Cut ke andar checkpoint girne ka pakka sabut nahi.
