@@ -54,12 +54,18 @@ fn start(cli: &str, root: &str, certs: &str, maxc: usize) -> Child {
     Command::new(cli)
         .env("MITRDB_AUTH_TOKEN", TOKEN)
         .args([
-            "--db", &format!("{root}/t.db"),
-            "--wal", &format!("{root}/t.wal"),
-            "--listen", ADDR,
-            "--tls-cert", &format!("{certs}/cert.pem"),
-            "--tls-key", &format!("{certs}/key.pem"),
-            "--max-connections", &maxc.to_string(),
+            "--db",
+            &format!("{root}/t.db"),
+            "--wal",
+            &format!("{root}/t.wal"),
+            "--listen",
+            ADDR,
+            "--tls-cert",
+            &format!("{certs}/cert.pem"),
+            "--tls-key",
+            &format!("{certs}/key.pem"),
+            "--max-connections",
+            &maxc.to_string(),
         ])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -89,7 +95,9 @@ fn main() {
 
     let mut roots = RootCertStore::empty();
     roots
-        .add(CertificateDer::from(std::fs::read(format!("{certs}/cert.der")).unwrap()))
+        .add(CertificateDer::from(
+            std::fs::read(format!("{certs}/cert.der")).unwrap(),
+        ))
         .unwrap();
     let cfg = Arc::new(
         ClientConfig::builder()
@@ -100,7 +108,10 @@ fn main() {
     let mut child = start(&cli, &root, &certs, 256);
     let mut c0 = wait_ready(&cfg);
     send(&mut c0, b"CREATE TABLE t (id INT PRIMARY KEY, p TEXT)").unwrap();
-    println!("TLS create => {}", recv(&mut c0).unwrap().chars().take(60).collect::<String>());
+    println!(
+        "TLS create => {}",
+        recv(&mut c0).unwrap().chars().take(60).collect::<String>()
+    );
     let bad = client(&cfg, "wrong-token-0123456789-abcdefghijklmnop");
     println!("TLS wrong_token_refused={}", bad.is_err());
 
@@ -110,8 +121,13 @@ fn main() {
     let conn_fail = Arc::new(AtomicUsize::new(0));
     let hs: Vec<_> = (0..n as i64)
         .map(|t| {
-            let (stop, intent, acked, cf, cfg) =
-                (stop.clone(), intent.clone(), acked.clone(), conn_fail.clone(), cfg.clone());
+            let (stop, intent, acked, cf, cfg) = (
+                stop.clone(),
+                intent.clone(),
+                acked.clone(),
+                conn_fail.clone(),
+                cfg.clone(),
+            );
             std::thread::spawn(move || {
                 let mut c = match client(&cfg, TOKEN) {
                     Ok(c) => c,
@@ -147,7 +163,10 @@ fn main() {
     for h in hs {
         let _ = h.join();
     }
-    let (intent, acked) = (intent.lock().unwrap().clone(), acked.lock().unwrap().clone());
+    let (intent, acked) = (
+        intent.lock().unwrap().clone(),
+        acked.lock().unwrap().clone(),
+    );
     println!(
         "TLS clients={n} conn_fail={} killed: intent={} acked={}",
         conn_fail.load(Ordering::Relaxed),
@@ -158,7 +177,13 @@ fn main() {
     let s = Server::open(format!("{root}/t.db"), format!("{root}/t.wal"), 1024)
         .unwrap()
         .0;
-    let rows = s.table("t").find().columns(&["id", "p"]).run().unwrap().rows;
+    let rows = s
+        .table("t")
+        .find()
+        .columns(&["id", "p"])
+        .run()
+        .unwrap()
+        .rows;
     let mut present = HashSet::new();
     let mut badp = 0;
     for r in &rows {
@@ -174,7 +199,9 @@ fn main() {
     let mut fail = 0;
     for i in 0..2000i64 {
         let id = 1_000_000_000_000 + i;
-        if s.execute_sql(&format!("INSERT INTO t VALUES ({id}, 'p-{id}-after')")).is_err() {
+        if s.execute_sql(&format!("INSERT INTO t VALUES ({id}, 'p-{id}-after')"))
+            .is_err()
+        {
             fail += 1;
         }
     }
@@ -202,7 +229,9 @@ fn main() {
     drop(held);
     std::thread::sleep(Duration::from_secs(1));
     let after = client(&cfg, TOKEN).is_ok();
-    println!("TLS limit max=20 tried=30 ok={ok} refused={refused} server_alive={alive} new_conn_after_release={after}");
+    println!(
+        "TLS limit max=20 tried=30 ok={ok} refused={refused} server_alive={alive} new_conn_after_release={after}"
+    );
     let _ = child.kill();
     let _ = child.wait();
     if lost + phantom + dup + badp + fail > 0 || !alive || !after {
