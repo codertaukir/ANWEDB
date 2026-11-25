@@ -33,5 +33,5 @@ Restore check (hafte mein ek baar, alag dir mein; destination pehle se EXIST nah
 - Lock network filesystem (NFS) par guaranteed nahi, local disk hi use karo.
 
 ## Abhi untested
-TCP+TLS: 100 aur 200 clients ek-ek run pass (loopback, kill -9, max-connections 256); default limit 128 par 200 clients, slow clients, real network untested. DDL/multi-table txn ke saath power-cut, doosri disk/filesystem,
+TCP+TLS: 100 aur 200 clients ek-ek run pass (loopback, kill -9, max-connections 256); default limit 128 par 200 clients, slow clients, real network untested. DDL power-cut: 4 cuts pass (single thread, basic DDL); concurrent DDL untested, doosri disk/filesystem,
 (insert_auto explicit txn ke andar: ek test pass; multi-table txn+counter power-loss: 4 cuts pass), lamba soak (ghanton).
