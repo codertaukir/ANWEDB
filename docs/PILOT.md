@@ -24,7 +24,7 @@ Restore check (hafte mein ek baar, alag dir mein; destination pehle se EXIST nah
 ## 3. Bade table par COUNT(*) nahi
 - 10M rows par COUNT(*) ~100 s laga (measure hua). 1M par ~4 s full scan.
 - Chhoti counter table rakho, row insert/delete ke saath usi explicit txn (BEGIN..COMMIT) mein update karo.
-- Counter update ka exact SQL pattern (n = n + 1) is repo mein abhi test nahi hua, pehle ek chhota test chalao.
+- Counter `UPDATE c SET n = n + 1 WHERE k = 1`: autocommit, ROLLBACK, COMMIT, reopen test pass (counter_update.rs, ek run).
 - Batch INSERT (VALUES ...) ya explicit txn use karo, ek-ek row autocommit nahi.
 
 ## 4. Ek DB dir = ek process
@@ -34,4 +34,4 @@ Restore check (hafte mein ek baar, alag dir mein; destination pehle se EXIST nah
 
 ## Abhi untested
 TCP+TLS: 100 aur 200 clients ek-ek run pass (loopback, kill -9, max-connections 256); default limit 128 par 200 clients, slow clients, real network untested. DDL/multi-table txn ke saath power-cut, doosri disk/filesystem,
-insert_auto explicit txn ke andar, lamba soak (ghanton).
+(insert_auto explicit txn ke andar: ek test pass; multi-table txn+counter power-loss: 4 cuts pass), lamba soak (ghanton).

@@ -262,3 +262,6 @@ Status tracker. `[x]` = done and measured/tested, `[ ]` = pending.
 - [ ] Drills mein "recovery ke baad 1000+ inserts" step (is se free_frames bug pakda gaya)
 - [x] Backup + kill -9 drill (writers I/U/D, har backup restore+verify): host, kuch kill-runs, bad=0 (drill ke 2 bug fix ke baad)
 - [x] TCP+TLS drill (tcp_tls_drill): 100 aur 200 clients, kill -9, lost=0 phantom=0, wrong token refuse, conn limit par server zinda (host, loopback, ek-ek run)
+- [x] powerloss_txn (multi-table BEGIN..COMMIT + counter n=n+1): VM destroy, directsync, ext4, 4 threads, 4 cuts -> torn=0 lost=0 phantom=0 counter_bad=0
+- [x] insert_auto explicit txn ke andar (ROLLBACK/COMMIT) test, counter n=n+1 test
+- [ ] DDL (ALTER/CREATE/DROP) ke saath power-cut
