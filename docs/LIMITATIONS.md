@@ -59,3 +59,4 @@
 - Torn WAL tail ka rule: CRC-fail record ke baad sirf zeros ho tabhi truncate; beech ka corruption error rehta hai.
 - Power-loss: 10 cuts, ek VM, ek disk config (qcow2, directsync, ext4), 4 threads, ek table, sirf INSERT. UPDATE/DELETE/DDL ke saath power-cut test nahi hua. Cut ke andar checkpoint girne ka pakka sabut nahi.
 - Power-loss soak (I/U/D): 4 cuts, ek VM, ek disk config, 4 threads, ek table. DDL, multi-statement txn aur multi-table ke saath power-cut test nahi hua.
+- Backup/restore: process kill -9 level par kuch hi runs me verify hua. Power-loss ke dauran backup, aur backup ka lamba soak test nahi hua.

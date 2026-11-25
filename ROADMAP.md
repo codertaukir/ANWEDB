@@ -260,3 +260,4 @@ Status tracker. `[x]` = done and measured/tested, `[ ]` = pending.
 - [ ] insert_auto explicit txn ke andar WriteConflict (untested)
 - [ ] Recovery ke baad har insert ~7 KB WAL (full page image) likhta dikha: perf/disk issue
 - [ ] Drills mein "recovery ke baad 1000+ inserts" step (is se free_frames bug pakda gaya)
+- [x] Backup + kill -9 drill (writers I/U/D, har backup restore+verify): host, kuch kill-runs, bad=0 (drill ke 2 bug fix ke baad)
