@@ -265,3 +265,4 @@ Status tracker. `[x]` = done and measured/tested, `[ ]` = pending.
 - [x] powerloss_txn (multi-table BEGIN..COMMIT + counter n=n+1): VM destroy, directsync, ext4, 4 threads, 4 cuts -> torn=0 lost=0 phantom=0 counter_bad=0
 - [x] insert_auto explicit txn ke andar (ROLLBACK/COMMIT) test, counter n=n+1 test
 - [x] DDL power-cut (CREATE TABLE/INSERT/CREATE INDEX/ALTER ADD COLUMN/DROP TABLE loop): VM destroy, directsync, ext4, 4 cuts, bad=0 phantom=0 (ek table-per-iteration, ek thread)
+- [x] Lamba soak ~100 min (I/U/D, checkpointer, WAL rotation 5 segments) + power cut: lost=0 phantom=0
