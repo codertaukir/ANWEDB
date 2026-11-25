@@ -225,4 +225,6 @@ Status tracker. `[x]` = done and measured/tested, `[ ]` = pending.
 - [x] insert_auto explicit txn ke andar (ROLLBACK/COMMIT) test, counter n=n+1 test
 - [x] DDL power-cut (CREATE TABLE/INSERT/CREATE INDEX/ALTER ADD COLUMN/DROP TABLE loop): VM destroy, directsync, ext4, 4 cuts, bad=0 phantom=0 (ek table-per-iteration, ek thread)
 - [x] Lamba soak ~100 min (I/U/D, checkpointer, WAL rotation 5 segments) + power cut: lost=0 phantom=0
-- [x] CI green (1d88c86); README Verified checks updated (4c31cc0); docs/PILOT.md + docs/LIMITATIONS.md maintained
+- [x] CI: run #180 on 7eca40d success (audit, test, deny); README Verified checks, docs/PILOT.md, docs/LIMITATIONS.md updated
+- [ ] Open: `insert_auto` inside an explicit txn cannot retry WriteConflict (txn poisoned); only ROLLBACK/COMMIT tested
+- [ ] Untested: other filesystems/hardware, concurrent DDL, DDL + DML together, default connection limit with 200 TLS clients, soak longer than ~100 min

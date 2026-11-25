@@ -1,7 +1,12 @@
 # MITRDB pilot rules (Mittr)
 
-Status: PILOT only. Production-ready nahi. Scope: ek VM, ek disk config (ext4, directsync),
-4 threads, ek table; INSERT-only 10 power-cuts, I/U/D 4 power-cuts, backup+kill -9 kuch runs. CI status confirm nahi.
+Status: PILOT only. Experimental, single-node. PostgreSQL / YugabyteDB ka replacement nahi.
+CI: run #180 (commit 7eca40d, branch anwedb-clean): success (audit, test, deny). Baad ke commits docs-only hain, unka CI alag dekho.
+
+Test hua (sab ek VM / ek disk config: QEMU, virsh destroy, directsync, ext4, 4 threads; har cut ek run):
+- Power-loss INSERT-only: 10 cuts. I/U/D soak: 4 cuts + ~100 min soak 1 cut (WAL 5 segments, 65141 ids). Multi-table txn + counter: 4 cuts. DDL loop (single thread): 4 cuts. Sab mein lost=0 phantom=0 (txn: torn=0; DDL: bad=0).
+- Host, process kill -9 (power-loss nahi): backup + concurrent I/U/D writers (har backup restore+verify, bad=0); TCP+TLS 100 aur 200 clients (loopback).
+Ye test evidence hai, guarantee nahi.
 
 ## 1. Sirf non-critical data
 - Mittr ka wo data jo kho jaye to chalega (test users, logs, cache-type). Messages/keys ka akela source mat banao.
@@ -33,5 +38,8 @@ Restore check (hafte mein ek baar, alag dir mein; destination pehle se EXIST nah
 - Lock network filesystem (NFS) par guaranteed nahi, local disk hi use karo.
 
 ## Abhi untested
-TCP+TLS: 100 aur 200 clients ek-ek run pass (loopback, kill -9, max-connections 256); default limit 128 par 200 clients, slow clients, real network untested. DDL power-cut: 4 cuts pass (single thread, basic DDL); concurrent DDL untested, doosri disk/filesystem,
-(insert_auto explicit txn ke andar: ek test pass; multi-table txn+counter power-loss: 4 cuts pass), lamba soak (ghanton).
+- Doosra filesystem / hardware / disk config; power-loss ke dauran backup
+- Concurrent DDL, DDL + DML saath, ALTER DROP/RENAME COLUMN
+- TLS: default connection limit (128) par 200 clients, slow clients, real network (drill sirf loopback par, --max-connections 256)
+- ~100 min se lamba soak
+- insert_auto explicit txn ke andar WriteConflict retry (sirf basic ROLLBACK/COMMIT test hua)
