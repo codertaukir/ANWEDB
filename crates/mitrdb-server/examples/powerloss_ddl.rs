@@ -22,11 +22,9 @@ fn op(s: &Server, f: &mut std::fs::File, c: char, n: i64, sql: &str, must: bool)
     writeln!(f, "P {c} {n}").unwrap();
     f.sync_data().unwrap();
     let r = s.execute_sql(sql);
-    if must {
-        if let Err(e) = &r {
-            eprintln!("DDL_ERR op={c} n={n} sql={sql} err={e:?}");
-            std::process::exit(3);
-        }
+    if must && let Err(e) = &r {
+        eprintln!("DDL_ERR op={c} n={n} sql={sql} err={e:?}");
+        std::process::exit(3);
     }
     writeln!(f, "A {c} {n}").unwrap();
     f.sync_data().unwrap();
