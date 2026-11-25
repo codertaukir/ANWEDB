@@ -261,3 +261,4 @@ Status tracker. `[x]` = done and measured/tested, `[ ]` = pending.
 - [ ] Recovery ke baad har insert ~7 KB WAL (full page image) likhta dikha: perf/disk issue
 - [ ] Drills mein "recovery ke baad 1000+ inserts" step (is se free_frames bug pakda gaya)
 - [x] Backup + kill -9 drill (writers I/U/D, har backup restore+verify): host, kuch kill-runs, bad=0 (drill ke 2 bug fix ke baad)
+- [x] TCP+TLS drill (tcp_tls_drill): 100 aur 200 clients, kill -9, lost=0 phantom=0, wrong token refuse, conn limit par server zinda (host, loopback, ek-ek run)
