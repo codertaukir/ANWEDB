@@ -255,6 +255,12 @@ writes after recovery):
 restored and verified); TCP + TLS with 100 and 200 clients (wrong token refused,
 connection limit refused cleanly).
 
+**Earlier process-crash checks (one run each):** disk full on an 8 MB tmpfs fails inserts
+with a clean `No space left on device` error, and after restart every acknowledged row is
+present (lost=0, phantom=0, duplicates=0); 1M rows insert, scan, point lookups and index
+creation give correct results; a 1M-row database backed up in 2.8 s under 4 inserting
+threads and restored with no missing, corrupt or duplicate rows.
+
 **Bugs found and fixed by these drills:** recovered page frame overwritten after
 recovery, no exclusive directory lock (two processes corrupted the WAL), torn WAL tail
 rejected instead of truncated, rotated WAL segments created world-readable.
