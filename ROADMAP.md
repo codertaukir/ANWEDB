@@ -252,7 +252,8 @@ Status tracker. `[x]` = done and measured/tested, `[ ]` = pending.
 - [x] WAL: last segment mein CRC-fail record ke baad sirf zeros ho to torn tail maan ke truncate (ac20e81, 2 tests)
 - [x] Power-loss drill: VM virsh destroy, directsync, ext4, 4 threads, 10 cuts (3 s se 71 s run, PL_CKPT_SECS=0.5/3, segment rotation ke saath) -> lost=0 phantom=0 dup=0 har cut mein, har ek cut ek hi run (binary 5d0b21c6)
 - [x] Rotated WAL segment permission 0644 tha -> 0600 (a47516e, test rotated_wal_segments_are_0600 5a59f12; purani wal.rs par fail confirm)
-- [ ] Power-loss: aur cuts (alag waqt, checkpoint ke andar), doosri disk/VM config
+- [x] Power-loss soak (I/U/D, fsync intent/ack, checkpointer): VM destroy, directsync, ext4, 4 threads, 4 cuts -> lost=0 phantom=0, har ek cut ek run
+- [ ] Power-loss: aur cuts (alag waqt, checkpoint ke andar), doosri disk/VM config, DDL ke saath
 - [ ] CI green confirm (74a551e, ac20e81 ka status abhi nahi aaya)
 - [ ] Backup ke dauran update/delete writers, kill -9 backup ke beech
 - [ ] TCP + TLS, 100+ connections
