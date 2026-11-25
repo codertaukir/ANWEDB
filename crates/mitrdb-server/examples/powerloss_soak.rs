@@ -65,11 +65,16 @@ fn main() {
     if mode == "run" {
         let secs: u64 = a[3].parse().unwrap();
         let end = Instant::now() + Duration::from_secs(secs);
-        if let Some(cs) = std::env::var("PL_CKPT_SECS").ok().and_then(|v| v.parse::<f64>().ok()) {
+        if let Some(cs) = std::env::var("PL_CKPT_SECS")
+            .ok()
+            .and_then(|v| v.parse::<f64>().ok())
+        {
             let s2 = s.clone();
-            std::thread::spawn(move || loop {
-                std::thread::sleep(Duration::from_secs_f64(cs));
-                let _ = s2.checkpoint();
+            std::thread::spawn(move || {
+                loop {
+                    std::thread::sleep(Duration::from_secs_f64(cs));
+                    let _ = s2.checkpoint();
+                }
             });
         }
         let mut hs = vec![];
@@ -167,15 +172,28 @@ fn main() {
         lost,
         phantom
     );
-    let u = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos() as i64 % 1_000_000_000;
+    let u = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos() as i64
+        % 1_000_000_000;
     let base = -(u + 1) * 100_000;
     let mut fail = 0;
     for i in 0..2000i64 {
-        if s.execute_sql(&format!("INSERT INTO soak VALUES ({}, 9, 0)", base - i)).is_err() {
+        if s.execute_sql(&format!("INSERT INTO soak VALUES ({}, 9, 0)", base - i))
+            .is_err()
+        {
             fail += 1;
         }
     }
-    let n = s.table("soak").find().columns(&["id", "val"]).run().unwrap().rows.len();
+    let n = s
+        .table("soak")
+        .find()
+        .columns(&["id", "val"])
+        .run()
+        .unwrap()
+        .rows
+        .len();
     println!("AFTER2 inserts=2000 fail={fail} rows_now={n}");
     if lost + phantom + fail > 0 {
         std::process::exit(1);
