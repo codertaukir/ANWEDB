@@ -63,3 +63,4 @@
 - DDL power-loss: 4 cuts, ek thread, ek table per iteration. Concurrent DDL, DDL+DML saath, ALTER DROP/RENAME COLUMN untested.
 - Multi-table txn power-loss: 4 cuts, 4 sessions, 2 tables + counter. Sirf ek VM/disk config.
 - Lamba soak: powerloss_soak I/U/D, 4 threads, PL_CKPT_SECS=3, ~100 min, 1 cut, ek VM: lost=0 phantom=0 (65141 ids checked).
+- Perf notes (measured, not fixed): 10M rows par COUNT(*) ~100 s (scan decode/clone heavy); insert memory ~420 B/row (10M rows = 4.2 GB RSS); recovery ke baad har insert ~7 KB WAL (full page image) likhta dikha; delete ~6 KB WAL per row.
