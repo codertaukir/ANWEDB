@@ -64,7 +64,6 @@ Status tracker. `[x]` = done and measured/tested, `[ ]` = pending.
 - [x] SQL `LIKE` (`%`, `_`, case-sensitive, text only, full scan + filter) (d6263f8); ORM `Col::like` (38e317a)
 - [x] Auto id kabhi reuse nahi hoti: `mitrdb_seq` counter table, CAS update (52d3cab)
 - [x] Perf A/B (write_mark_real 4T, 10 round): OLD 2cf6b66 248.5k vs NEW 245.0k ops/s (-1.4%, noise). Purana 73k vs 368k fark = noisy machine, engine regression nahi
-- [x] Baaki (closed): default values, foreign key, CHECK, savepoints, native Timestamp/Float, non-hint path A/B: sab ho chuka (Session 2 aur Session 3 dekho)
 - [x] SAVEPOINT / ROLLBACK TO / RELEASE: `TransactionContext.savepoints`, `write_mark` + `rollback_to_mark` par based, COMMIT/ROLLBACK par khud saaf (c36e383)
 - [x] Foreign key (RESTRICT): `#[col(references = "table.col")]`, `Table::add_foreign_key`, defs `mitrdb_fk` mein, catalog format untouched. Limit: sirf Table/ORM API enforce karta hai, raw SQL bypass, check+write atomic nahi (353fbac) [UPDATE Session 3: raw SQL bypass ab band, raw DML refused]
 - [x] CHECK: `#[col(check = ">= 0")]`, `Table::add_check`, defs `mitrdb_check` mein, insert/update par, NULL pass, purani rows verify nahi. f64 column par mat lagao (55b1a5f)
@@ -72,7 +71,6 @@ Status tracker. `[x]` = done and measured/tested, `[ ]` = pending.
 - [x] Non-hint path A/B (perf_bench batch 20000 rows, 12 round): OLD 78.5k vs NEW 78.3k rows/s (-0.2%, noise)
 - [x] Concurrency bugs mile aur fix hue: internal table create race (mitrdb_seq/fk/check "already exists"), FK check+write race (1500 rounds mein 21 orphans -> 0, process-wide FK lock). Limit: lock sirf ek process ke andar, raw SQL bypass (4859919 aur ye commit) [UPDATE: raw SQL bypass ab band, Session 3]
 - [x] Docs: README ORM section, docs/ORM.md, docs/LIMITATIONS.md, orm quickstart example (03d6af8, 2bb3f9b)
-- [x] Baaki (closed): native Timestamp/Float, DEFAULT, FK cascade done (Session 2). Engine-level FK/CHECK skipped (step 9), raw SQL DML reject se band (Session 3). Cross-process FK safety khula: Known limits
 
 ## Session 2: done (local commits, push baaki ho to pehle push karo)
 - [x] Native TIMESTAMP (tag 5, int micros) (d4e3501)
@@ -92,18 +90,14 @@ Status tracker. `[x]` = done and measured/tested, `[ ]` = pending.
 - [x] Step 10: LIKE literal-prefix index range scan (3777be7): `like_prefix_range` + Like arm in `extract_column_ranges` (query/lib.rs). Range is a superset, every caller re-applies the filter (verified in code). like_prefix.rs 14 patterns (incl. Hindi), like_explain.rs pins plans (`ab%`, `ab_c%` IndexRangeScan; `%bc`, `_bc`, unindexed column SeqScan). Probe N=20000: prefix 131 us vs full scan 76733 us (different queries, order of magnitude only)
 - [x] Raw SQL bypass closed (76e068d): `guard_raw_dml` (server/table.rs) refuses raw INSERT/UPDATE/DELETE on tables with FK / CHECK / DEFAULT rules and on FK parents. Public entry points guarded: execute_sql, execute_sql_params, execute_in_session, execute_plan, execute_plan_in_session (also CLI and TCP). Table/ORM use `*_internal` calls. raw_guard.rs + tcp_fk.rs (now asserts rejection). Gate: clippy 0, 372 passed / 0 failed / 17 ignored
 - [x] Guard cost + insert A/B measured (Session 4): see below. Result: noise
-- [ ] Open (not checked): guard covers public Server entry points only; any internal path calling the executor directly would skip it
 
 ## Session 4: production checks (measured, real disk btrfs, not tmpfs)
 - [x] Raw insert A/B, pre-guard 3777be7 vs HEAD, 12 rounds alternating, taskset 0-3, TMPDIR on /home (btrfs): batch median 54688 vs 55226 rows/s (+1.0%), spread 47.4k-59.9k vs 49.1k-58.6k; autocommit median 13045 vs 13145 us (+0.8%), spread 12.0k-15.7k vs 12.3k-14.6k. Difference is far smaller than spread = noise, no guard cost visible. Autocommit ~13 ms/stmt on real disk (fsync), vs 95 us on tmpfs
 - [x] Soak v2 (examples/soak.rs): 30 cycles of kill -9, 4 threads raw INSERT/UPDATE/DELETE, intent+ack log, real disk. Every cycle lost=0 phantom=0, rows grew to 34210, stderr empty. Scope: process crash only, NOT power loss / fsync lie. (Soak v1 showed 29 failures: harness bug, ack written after SQL, kill -9 between them. Not an engine bug, replaced by v2)
 - [x] Backup/restore drill (examples/backup_drill.rs, restore_drill.rs): backup of 1000 rows -> Server::restore into new dir -> rows=1000 content_ok=true; restore into an existing dir refused; backup with 1 flipped byte in t.db: validate and restore both fail with `Database file CRC mismatch` (corruption detected)
 - [x] FK soak (crates/mitrdb-orm/examples/soak_fk.rs): ORM insert parent+child (FK RESTRICT) and child delete, 4 threads, 60 min of kill -9 cycles, real disk: lost=0 phantom=0 orphan=0 every cycle (process crash only)
-- [ ] Open: power loss, disk full, TCP path under kill -9
-- [ ] Open: backup drill was a small DB (1000 rows, no concurrent writers during backup)
 - [x] Thread scaling (examples/scale_sessions.rs, one session per thread, 4 cores, 3 rounds x 5 s, median): real disk btrfs autocommit 1 row/stmt 77/80/155/275 rows/s (1/2/4/8 threads, group commit works); autocommit 100 rows/stmt 5438/7320/12126/14106; explicit txn per thread 35132/29926/22628/21765. tmpfs (no fsync): single ~33-35k flat, multi100 61k to 47k, txn 45.9k/46.1k/39.7k/40.2k. errors=0 everywhere except one tmpfs run where /tmp (4 GB) filled up (cause: disk full, not an engine bug; exact error text not captured)
 - [x] Note: `execute_sql` and the Table/ORM API use one default session (one mutex): multi-threaded use of them is serialized. Real concurrency needs one session per thread (`create_session` / `execute_in_session`, what TCP does). Earlier 4-thread numbers on the default session were mutex-bound and fsync-noisy, not a regression (A/B 161b1d8 vs HEAD: no systematic gap)
-- [ ] Open: why tmpfs CPU scaling is flat (no profile done); disk-full behaviour (errors seen, data integrity after full disk not checked); TCP 100-1000 connections; datasets above ~50k rows (1M/10M rows not tested)
 
 ## Baaki (is order mein karo, har step ke baad sirf cargo check; full test last mein)
 - [x] 1. MIN/MAX Timestamp+Float, ORM sum/avg/min/max (69396e6)
@@ -180,41 +174,20 @@ Status tracker. `[x]` = done and measured/tested, `[ ]` = pending.
 - [x] F5. DONE (docs updated, 3 unverified lines pinned by value_limit_probe2.rs + page_nonunique.rs; old note: copy the 'Limits and numbers' section above into README + docs/LIMITATIONS.md first; drop the [verified]/[unverified] tags only after checking the unverified lines) (LIMITATIONS.md stale lines 7, 12, 23: DEFAULT, cascade, mitrdb_default reserved) Docs update: README Limits (Timestamp/Float native, DEFAULT, LIKE, composite), docs/ORM.md (types, default, on_delete, unique_together, OR/IN, aggregates), docs/LIMITATIONS.md (purani lines hatao)
 - [x] F6. ROADMAP [x] + git push origin anwedb-clean
 
-## Known limits (jaan-boojhkar)
-- FK/CHECK/DEFAULT sirf Table/ORM API se; raw SQL DML un tables pe refused (bypass band)
-- FK lock sirf ek process ke andar; cascade atomic nahi
-- AVG integer truncate; f64 par CHECK mat lagao
-- App layer ka kaam: password hashing, sessions, WebSocket real-time
-- Raw SQL guard: sirf INSERT/UPDATE/DELETE check hota hai (SELECT/DDL nahi); lookup cost measure nahi hua
-- Step 9 (engine-level FK/CHECK/DEFAULT) skipped: raw SQL enforce nahi hota, sirf reject
-
 ## Session 5: default-session concurrency
 - [x] Default-session autocommit lock-free (`run_default_plan`, lib.rs): plain autocommit statement ab default_session mutex ke bina local txn slot pe chalta hai; BEGIN/COMMIT/ROLLBACK/SAVEPOINT/Checkpoint aur explicit txn purane path pe. default_session_concurrency 3 tests. Real disk btrfs, 4 cores, median: multi100 1/2/4/8 threads 5460/5400/5438/5171 -> 5511/7288/11940/14005 rows/s; single 79/74/77/74 -> 77/80/138/296 rows/s. Single-thread raw insert A/B 8 rounds alternating: batch 36160 vs 35277 rows/s, autocommit 12944 vs 13051 us = noise.
 - [x] insert_auto: WriteConflict ab CAS mismatch ki tarah retry hota hai (1000 attempts, yield + capped sleep backoff). auto_concurrent 30x loop: pass=30 fail=0. Claimed id burn ho sakti hai (gaps possible, reuse nahi).
 - [x] CI: clippy approx_constant (legacy_migrate_probe), collapsible_if (2 examples), deny.toml Unicode-3.0 allow. Gate: 376 passed, 0 failed, 17 ignored.
-- [ ] Open: insert_auto explicit txn ke andar WriteConflict pe retry nahi kar sakta (txn poisoned), test nahi hua.
-- [ ] Known limit: default session par ek thread ka BEGIN aur doosre thread ka concurrent autocommit statement alag txn slot pe chal sakte hain. Multi-thread explicit txn ke liye create_session use karo.
 
 ## Session 6: auto-id correctness + perf findings (2026-11-18)
 - [x] Probe (auto_txn_probe.rs) ne bug pakda: explicit txn ROLLBACK pe auto id reuse hoti thi (counter update outer txn ke andar tha; probe: a=1, b=2, rollback ke baad d=2). Autocommit mein reuse nahi hota tha, isliye auto_reuse pass tha
 - [x] Fix: `ForceAutocommit` (thread-local guard, lib.rs `run_default_plan`): `insert_auto` ka seq counter read/claim outer txn se alag autocommit mein chalta hai. Row insert aur `max_pk` read outer txn mein hi rehte hain. Ab rollback pe gap banta hai, reuse nahi. auto_txn_rollback (assert d > b), auto_reuse, auto_concurrent: pass (ek-ek run). Local, abhi COMMIT NAHI hua
 - [x] Disk floor measured: `dd oflag=dsync` 300 x 4 KB = 3.66 s = ~12.2 ms/write (btrfs /home). Autocommit 13 ms/stmt isi floor ke paas hai, engine ka overhead nahi. WAL commit path pehle se `sync_data` use karta hai (sync_all sirf recovery/backup/checkpoint mein)
 - [x] insert_auto thread scaling (auto_scale_probe.rs, tmpfs, 500 inserts/thread, ek run): NEW 1/2/4T = 605/1779/7536 us per insert; OLD 41e53a0 = 597/1593/4028 us. Contention pehle se maujood tha (3 alag statements: counter read, max_pk, CAS update), mutex hatane se naya nahi bana. NEW 4T ka 1.9x gap ek run hai, noise ya regression pakka nahi. Backoff badalne se farak nahi (21.4 s vs 20.4 s), wapas liya
-- [ ] Insert_auto block reservation (ek claim mein 32 ids, per-table cache): 4T contention kam karne ke liye. Design change, alag commit, A/B ke saath. Tradeoff: crash/restart pe gap 32 tak, "kabhi reuse nahi" guarantee wahi
-- [ ] Benchmark A/B: HEAD bace4d0 vs working tree (ForceAutocommit ka thread-local read), 12 round alternating, tmpfs aur real disk. auto_scale_probe 4T 5 baar dono pe
 - [x] Last batch: clippy --all-targets, auto_concurrent 30x, full gate, commit (auto_txn_rollback.rs + auto_scale_probe.rs `#[ignore]` ke saath), push, CI
 - [x] docs/LIMITATIONS.md: (1) default-session BEGIN vs concurrent autocommit statement, (2) auto id rollback pe gap, reuse nahi, (3) hot counter pe multi-thread contention (1T 0.6 ms, 4T 4-7 ms)
-- [ ] README: roadmap stale (Prepared statements / `$n` binding abhi unchecked hai), benchmark mein tmpfs (~50k) aur real disk btrfs (~36k rows/s) alag likhna
 
-### Open (production checks, updated 2026-11-20; done wale Session 7 mein)
-- [ ] Power loss / fsync lie (VM hard power-off ya dm-flakey; abhi sirf process crash tested)
-- [ ] guard_raw_dml sirf public entry points cover karta hai, internal path skip ho sakta hai
-- [ ] insert_auto explicit txn ke andar WriteConflict retry + mutex/row lock stall: untested
-- [ ] tmpfs CPU scaling flat kyun, perf record nahi hua
-- [ ] Delete 6 KB WAL per row; kam distinct values wale index pe 3x slow insert
-- [ ] Benchmark A/B bace4d0 vs HEAD (ForceAutocommit thread-local), 12 round
-- [ ] insert_auto per-table mutex (0854a4f) shayad ab zaroori nahi; hatane se pehle debug auto_concurrent (CI) pe check
-- [ ] Debug auto_concurrent ~20 s: scan hatne ke baad dobara time dekhna
+### Done (2026-11-20)
 - [x] CI debug auto_concurrent fail: insert_auto per-table mutex (0854a4f), CI green
 - [x] insert_auto max(pk) full scan hataya (8357ae9): 12k rows 36448 us -> 101 us (ek run)
 - [x] Unused deps hataye (3849f7b)
@@ -224,26 +197,19 @@ Status tracker. `[x]` = done and measured/tested, `[ ]` = pending.
 - [x] Per-phase profile (perf_bench batch 20000 rows, tmpfs, ek run): PlanExecution 469 ms, InsertExecution 352, TxnPut 156, BtreeMutation 79, TxnCommit 48, WalAppend 26, WalFlush 11. LockMutexWait 75 ms (3 per row), LockBookkeeping 60 (max 12.8 ms spike)
 - [x] read_key_visible_value: shard lock sirf non-empty chain pe. A/B 6 round +5.2% par spread overlap = inconclusive, speed-up claim nahi
 - [x] Duplicate-PK check se Shared lock hataya: -2.3%, no win, revert
-- [ ] Insert perf profile: acquire_batch_with_rollback 15.6%, memcmp 10.2%, SipHash 6.5%, malloc/free 12%. Idea: acquire_exclusive_keys sharded fast path / FxHash. Asar measure nahi hua
-- [ ] Lock manager per-row cost kam karna (3 mutex/row), phir A/B 12 round
 ### Drills (real disk btrfs, ek run each)
-- [x] Disk-full (diskfull_drill.rs, 8 MB tmpfs): 9654 acked, phir clean `IO_ERROR: No space left on device`; restart: lost=0 phantom=0 dup=0. Scope: chhota DB, process crash. [ ] DDL/checkpoint/backup ke dauran full disk, bade DB pe
+- [x] Disk-full (diskfull_drill.rs, 8 MB tmpfs): 9654 acked, phir clean `IO_ERROR: No space left on device`; restart: lost=0 phantom=0 dup=0. Scope: chhota DB, process crash.
 - [x] 1M rows (million_drill.rs): insert 15.8k rows/s, scan 3.89 s, point lookup 297 us, CREATE INDEX 20 s, RSS 960 MB
-- [x] Reopen fix (6f26e22): 1M reopen 17.45 s -> 1.49 s (WAL 294 MB -> 28 MB). Ek beech ka run 14.0 s aaya, kaaran pakka nahi [ ] outlier dobara aaye to wal_mb_before_drop dekhna
-- [x] Backup bada DB + concurrent writers (backup_big_drill.rs): 1M rows, 4 insert threads, backup 2.79 s, restore 2.16 s, bad=0. [ ] update/delete writers, kill -9 beech mein, prefix-consistency
-- [x] TCP kill -9 (tcp_kill_drill.rs): 4 clients, SIGKILL, lost=0 phantom=0 dup=0, recovery 0.22 s. Scope: loopback, no TLS, insert-only. [ ] update/delete clients, TLS, 100+ connections
+- [x] Reopen fix (6f26e22): 1M reopen 17.45 s -> 1.49 s (WAL 294 MB -> 28 MB). Ek beech ka run 14.0 s aaya, kaaran pakka nahi
+- [x] Backup bada DB + concurrent writers (backup_big_drill.rs): 1M rows, 4 insert threads, backup 2.79 s, restore 2.16 s, bad=0.
+- [x] TCP kill -9 (tcp_kill_drill.rs): 4 clients, SIGKILL, lost=0 phantom=0 dup=0, recovery 0.22 s. Scope: loopback, no TLS, insert-only.
 - [x] 10M rows (ten_m_drill.rs, 4 threads): insert 20.2k rows/s, peak RSS 4216 MB (~420 B/row), reopen 19.58 s, point lookup 1147 us, COUNT(*) 99.95 s ok. Bina cap ke OOM; MemoryMax=4G wale run mein pass (cap kaam kiya ya nahi pakka nahi)
-- [ ] Insert memory ~420 B/row ka source (MVCC versions? vacuum ke baad RSS naapna)
-- [ ] Single-thread 10M numbers (paste nahi hue)
 ### COUNT / scan
 - [x] COUNT(*) fast path (decode/Vec hataya): noise (0.60-0.66 vs 0.65-0.67 s @200k), revert. Bottleneck decode nahi
 - [x] COUNT profile (count_profile.rs, 300k rows): 1.37 s @pool 4096 -> 0.98 s @pool 65536 (-28%, ek run). perf: find_victim_frame_sharded 22%, memcmp 9.6%, lock manager 6.9%, range_scan_directed closure 5%, extend_keys_in_range 4.5%, malloc/free ~15%, SipHash ~5%
-- [ ] Scan rewrite (txn_mgr.scan / range_scan_directed streaming, key clone hatana): 2-3x ki ummeed, 10M COUNT abhi 100 s
 - [x] CLI/TCP server pool 64 frames (256 KB) hardcoded tha; ab default 32768 (128 MB), env MITRDB_POOL_FRAMES se override
-- [ ] Pool A/B (64 vs 32768) CLI/TCP path pe, aur library users ke liye 4096 default dekhna (measure nahi hua)
 ### CI
 - [x] file_perms CI red: `Server::open` ka checkpoint (6f26e22) `t.wal.ckpt` dobara likhta tha, nayi file 644. Fix (8005777): `write_checkpoint_metadata_to_disk` (wal.rs) tmp file `.mode(0o600)` se banata hai, open + auto-checkpoint dono cover. file_perms + backup_perms ok, mitrdb-storage 53 passed
-- [ ] CI 8005777 green verify
 - [x] range_scan_directed: resolved Vec mein key clone hataya (remove_entry). count_profile 300k rows, 6 round alternating, pool 4096: median old 1.72 vs new 1.63 s (~-5%), spread 1.45-1.81 = noise, speed-up claim nahi. Cleanup. Tests: mitrdb-txn + orm relations/page/count ok
 
 ## Session: crash/power-loss hardening (scope: host SIGKILL + 1 VM power-off, har ek kuch hi run)
@@ -253,16 +219,10 @@ Status tracker. `[x]` = done and measured/tested, `[ ]` = pending.
 - [x] Power-loss drill: VM virsh destroy, directsync, ext4, 4 threads, 10 cuts (3 s se 71 s run, PL_CKPT_SECS=0.5/3, segment rotation ke saath) -> lost=0 phantom=0 dup=0 har cut mein, har ek cut ek hi run (binary 5d0b21c6)
 - [x] Rotated WAL segment permission 0644 tha -> 0600 (a47516e, test rotated_wal_segments_are_0600 5a59f12; purani wal.rs par fail confirm)
 - [x] Power-loss soak (I/U/D, fsync intent/ack, checkpointer): VM destroy, directsync, ext4, 4 threads, 4 cuts -> lost=0 phantom=0, har ek cut ek run
-- [ ] Power-loss: aur cuts (alag waqt, checkpoint ke andar), doosri disk/VM config, DDL ke saath
-- [ ] CI green confirm (74a551e, ac20e81 ka status abhi nahi aaya)
-- [ ] Backup ke dauran update/delete writers, kill -9 backup ke beech
-- [ ] TCP + TLS, 100+ connections
-- [ ] insert_auto explicit txn ke andar WriteConflict (untested)
-- [ ] Recovery ke baad har insert ~7 KB WAL (full page image) likhta dikha: perf/disk issue
-- [ ] Drills mein "recovery ke baad 1000+ inserts" step (is se free_frames bug pakda gaya)
 - [x] Backup + kill -9 drill (writers I/U/D, har backup restore+verify): host, kuch kill-runs, bad=0 (drill ke 2 bug fix ke baad)
 - [x] TCP+TLS drill (tcp_tls_drill): 100 aur 200 clients, kill -9, lost=0 phantom=0, wrong token refuse, conn limit par server zinda (host, loopback, ek-ek run)
 - [x] powerloss_txn (multi-table BEGIN..COMMIT + counter n=n+1): VM destroy, directsync, ext4, 4 threads, 4 cuts -> torn=0 lost=0 phantom=0 counter_bad=0
 - [x] insert_auto explicit txn ke andar (ROLLBACK/COMMIT) test, counter n=n+1 test
 - [x] DDL power-cut (CREATE TABLE/INSERT/CREATE INDEX/ALTER ADD COLUMN/DROP TABLE loop): VM destroy, directsync, ext4, 4 cuts, bad=0 phantom=0 (ek table-per-iteration, ek thread)
 - [x] Lamba soak ~100 min (I/U/D, checkpointer, WAL rotation 5 segments) + power cut: lost=0 phantom=0
+- [x] CI green (1d88c86); README Verified checks updated (4c31cc0); docs/PILOT.md + docs/LIMITATIONS.md maintained
