@@ -238,14 +238,29 @@ Other measured points (1M rows, about 50 bytes per row, real disk): full scan 3.
 
 Reproduce with `./scripts/bench.sh` and the examples in `crates/mitrdb-server/examples`.
 
-## Verified checks (process-crash level)
+## Verified checks
 
-Each was run once; none covers power loss.
+Every item was run a small number of times on one machine; counts are listed. This is
+test evidence for a pilot, not a guarantee. See docs/LIMITATIONS.md and docs/PILOT.md.
 
-- **Disk full:** on an 8 MB tmpfs, inserts fail with a clean `No space left on device` error. After restart every acknowledged row is present (lost=0, phantom=0, duplicates=0), and inserts work again once space is freed.
-- **1M rows:** insert, full scan, point lookups and index creation complete with correct results.
-- **Backup under load:** a 1M-row database backed up in 2.8 s while 4 threads inserted; restore took 2.2 s and the restored data had no missing base rows and no corrupt or duplicate rows.
-- **Not tested yet:** power loss, TCP under `kill -9`, datasets above 1M rows.
+**Power loss** (QEMU VM, hard `virsh destroy`, `cache=directsync`, ext4, 4 writer threads;
+each cut verified: acked rows present, no phantom rows, no duplicates, DB accepts new
+writes after recovery):
+- INSERT only: 10 cuts
+- INSERT/UPDATE/DELETE soak: 4 cuts, plus one ~100 min soak (WAL rotated through 5 segments) with 1 cut
+- Multi-table `BEGIN..COMMIT` + counter `UPDATE n = n + 1`: 4 cuts, atomicity held
+- DDL loop (CREATE TABLE, INSERT, CREATE INDEX, ALTER ADD COLUMN, DROP TABLE), single thread: 4 cuts
+
+**Process crash (`kill -9`, host):** online backup with concurrent writers (each backup
+restored and verified); TCP + TLS with 100 and 200 clients (wrong token refused,
+connection limit refused cleanly).
+
+**Bugs found and fixed by these drills:** recovered page frame overwritten after
+recovery, no exclusive directory lock (two processes corrupted the WAL), torn WAL tail
+rejected instead of truncated, rotated WAL segments created world-readable.
+
+**Not tested:** other filesystems/hardware, concurrent DDL, DDL together with DML,
+default connection limit with 200 clients, runs longer than ~100 min.
 
 ## Design notes
 
