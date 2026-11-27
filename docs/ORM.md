@@ -87,6 +87,20 @@ A row must fit in one page (about 4000 bytes in total, counted in bytes). For lo
 
 Set `TCP_NODELAY` (`set_nodelay(true)`) and send length + payload in one write (431 us vs 41 ms per statement measured). Raw SQL INSERT/UPDATE/DELETE over TCP on tables with FK / CHECK / DEFAULT rules is refused; use the ORM.
 
+## Concurrent sessions (Axum / async worker pools)
+
+For multi-threaded web servers where concurrent requests run explicit transactions, bind a session-scoped ORM handle with `db.session_orm(session_id)` (or `.in_session(session_id)` on individual builders):
+
+```rust
+let sid = db.create_session();
+let sdb = db.session_orm(sid);
+db.execute_in_session(sid, "BEGIN")?;
+let id = sdb.insert_get_id(&user)?;
+let posts = sdb.find(Post::user_id.eq(id)).limit(10).run()?;
+db.execute_in_session(sid, "COMMIT")?;
+db.close_session(sid)?;
+```
+
 ## Transactions and savepoints
 
 ```rust

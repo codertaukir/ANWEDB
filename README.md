@@ -136,7 +136,7 @@ db.execute_sql_params("INSERT INTO users VALUES ($1, $2)", &[val(1), val("O'Brie
 db.execute_sql_params("UPDATE users SET age = age + $1 WHERE id = $2", &[val(1), val(7)])?;
 ```
 
-Placeholders work for values in INSERT, UPDATE (`SET col = $n`, `col = col +/- $n`), and WHERE comparisons. Missing, extra, or non-integer increment parameters are errors. Plain `execute_sql` rejects `$n`. `Table::find/count/update/delete` already bind their values this way. `LIMIT`/`OFFSET` placeholders are not supported.
+Placeholders work for values in INSERT, UPDATE (`SET col = $n`, `col = col +/- $n`), WHERE comparisons, and `LIMIT $n` / `OFFSET $n` (non-negative integers). Missing, extra, or invalid parameters are errors. Plain `execute_sql` rejects `$n`. `Table::find/count/update/delete` already bind their values this way. Use `execute_sql_params_in_session(session_id, sql, params)` to run parameterized queries inside explicit per-request sessions.
 
 ### Big files
 
@@ -190,12 +190,12 @@ Know these before you use MITRDB.
 
 **SQL**
 - `CREATE TABLE IF NOT EXISTS` and `CREATE [UNIQUE] INDEX IF NOT EXISTS` do nothing (0 rows affected) when the name already exists. The old table or index is not changed.
-- `JOIN`, `INNER JOIN`, `LEFT JOIN` work. Equality conditions in `ON` use an in-memory hash join; other conditions (`<`, `!=`, ...) use a nested loop (O(left x right)). Both tables are read fully into memory, and `WHERE` is applied after the join (no pushdown), so very large joins use a lot of memory.
+- `JOIN`, `INNER JOIN`, `LEFT JOIN` work. Equality conditions in `ON` use index-assisted lookups on the right table's primary key or secondary index when the outer side is selective (`<= 256` distinct keys), falling back to an in-memory hash join; other conditions (`<`, `!=`, ...) use a nested loop. `WHERE` is applied after the join, so very large unselective joins can still use substantial memory.
 - In a `JOIN` query, an `ORDER BY` column must also appear in the `SELECT` list (otherwise an error is returned).
 - Large deletes write a lot of WAL. One `DELETE FROM t WHERE id >= 0` over 10k, 20k and 40k rows (table with an INT primary key, an INT and a TEXT column, no secondary index) took about 157, 139 and 117 us per row, wrote about 6 KB of WAL per row, and raised the process peak memory by about 45, 59 and 82 MB (2-5 KB per row). Per-row time and memory fall as the row count grows, so do not extrapolate. Measured on a release build with the files on tmpfs, one run per size; real disks with slower fsync were not measured. Delete in batches (for example a few thousand rows per statement) for big tables. This is a known limitation, not yet optimized.
 - Indexes on columns with few distinct values (many rows per value) slow inserts: inserting 100k rows with 1000 distinct indexed values ran about 3x slower and wrote about 9x more WAL than the same insert without the index (measured, one machine).
 - A write that fills the WAL's disk fails with an error and the transaction is marked for recovery; nothing is silently lost. Keep enough free disk space for the WAL.
-- Not supported yet: `LIMIT $n` / `OFFSET $n`. `DEFAULT` and composite indexes (max 4 columns, leftmost-prefix equality) are supported.
+- `LIMIT $n` / `OFFSET $n`, `DEFAULT`, and composite indexes (max 4 columns, leftmost-prefix equality) are supported.
 - `LIKE` (`%`, `_`) works on text columns: case-sensitive, no escape. A literal prefix (`'ab%'`) on an indexed column uses an index range scan; a leading `%` / `_` or an unindexed column does a full scan plus filter.
 - `SAVEPOINT x`, `ROLLBACK TO x`, `RELEASE x` work inside `BEGIN ... COMMIT`.
 - Foreign keys (RESTRICT or ON DELETE CASCADE), CHECK and DEFAULT are enforced by the Table/ORM API only; raw SQL INSERT/UPDATE/DELETE on such tables (and on FK parent tables) is refused, SELECT still works. Details in [docs/LIMITATIONS.md](docs/LIMITATIONS.md).
