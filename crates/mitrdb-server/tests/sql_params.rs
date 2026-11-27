@@ -186,3 +186,70 @@ fn execute_sql_params_supports_limit_and_offset() {
 
     let _ = std::fs::remove_dir_all(&d);
 }
+
+#[test]
+fn execute_sql_params_in_session_and_cached_ast_across_ddl() {
+    let d = dir("sess_params");
+    let s = open(&d);
+    s.execute_sql("CREATE TABLE items (id INT PRIMARY KEY, grp INT, title TEXT)")
+        .unwrap();
+
+    let sid = s.create_session();
+    s.execute_in_session(sid, "BEGIN").unwrap();
+    s.execute_sql_params_in_session(
+        sid,
+        "INSERT INTO items VALUES ($1, $2, $3)",
+        &[val(1), val(10), val("first")],
+    )
+    .unwrap();
+    s.execute_sql_params_in_session(
+        sid,
+        "INSERT INTO items VALUES ($1, $2, $3)",
+        &[val(2), val(10), val("second")],
+    )
+    .unwrap();
+    s.execute_in_session(sid, "COMMIT").unwrap();
+
+    // Run repeated parameterized SELECT before and after CREATE INDEX to verify AST cache + fresh planning
+    let q = "SELECT title FROM items WHERE grp = $1 ORDER BY id DESC LIMIT $2";
+    for _ in 0..3 {
+        match s.execute_sql_params_in_session(sid, q, &[val(10), val(1)]).unwrap() {
+            ExecutionResult::Rows { rows, .. } => {
+                assert_eq!(rows.len(), 1);
+                assert_eq!(rows[0][0], val("second"));
+            }
+            other => panic!("expected Rows, got {other:?}"),
+        }
+    }
+
+    s.execute_sql("CREATE INDEX idx_items_grp ON items (grp)").unwrap();
+    match s.execute_sql_params_in_session(sid, q, &[val(10), val(2)]).unwrap() {
+        ExecutionResult::Rows { rows, .. } => {
+            assert_eq!(rows.len(), 2);
+            assert_eq!(rows[0][0], val("second"));
+            assert_eq!(rows[1][0], val("first"));
+        }
+        other => panic!("expected Rows, got {other:?}"),
+    }
+
+    // Rollback inside session discards uncommitted parameterized write
+    s.execute_in_session(sid, "BEGIN").unwrap();
+    s.execute_sql_params_in_session(
+        sid,
+        "UPDATE items SET title = $1 WHERE id = $2",
+        &[val("rolled_back"), val(1)],
+    )
+    .unwrap();
+    s.execute_in_session(sid, "ROLLBACK").unwrap();
+
+    match s
+        .execute_sql_params_in_session(sid, "SELECT title FROM items WHERE id = $1", &[val(1)])
+        .unwrap()
+    {
+        ExecutionResult::Rows { rows, .. } => assert_eq!(rows[0][0], val("first")),
+        other => panic!("expected Rows, got {other:?}"),
+    }
+
+    s.close_session(sid).unwrap();
+    let _ = std::fs::remove_dir_all(&d);
+}

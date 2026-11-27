@@ -1055,13 +1055,22 @@ enum ResolvedProjection {
     Aggregates(Vec<BoundAggregate>),
 }
 
+const AST_CACHE_MAX_ENTRIES: usize = 256;
+const AST_CACHE_MAX_SQL_LEN: usize = 4096;
+
 pub struct QueryEngine {
     catalog: Arc<Catalog>,
+    stmt_cache: std::sync::Mutex<std::collections::HashMap<String, Statement>>,
+    param_stmt_cache: std::sync::Mutex<std::collections::HashMap<String, Statement>>,
 }
 
 impl QueryEngine {
     pub fn new(catalog: Arc<Catalog>) -> Self {
-        QueryEngine { catalog }
+        QueryEngine {
+            catalog,
+            stmt_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
+            param_stmt_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
+        }
     }
 
     pub fn catalog(&self) -> &Catalog {
@@ -1247,19 +1256,45 @@ impl QueryEngine {
         }
     }
 
+    fn cached_parse(&self, sql: &str, allow_params: bool) -> Result<Statement> {
+        let cache = if allow_params {
+            &self.param_stmt_cache
+        } else {
+            &self.stmt_cache
+        };
+        if sql.len() <= AST_CACHE_MAX_SQL_LEN {
+            if let Ok(guard) = cache.lock()
+                && let Some(stmt) = guard.get(sql)
+            {
+                return Ok(stmt.clone());
+            }
+        }
+        let stmt = if allow_params {
+            let _guard = ParamsGuard::enable();
+            self.parse(sql)?
+        } else {
+            self.parse(sql)?
+        };
+        if sql.len() <= AST_CACHE_MAX_SQL_LEN
+            && let Ok(mut guard) = cache.lock()
+        {
+            if guard.len() >= AST_CACHE_MAX_ENTRIES && !guard.contains_key(sql) {
+                guard.clear();
+            }
+            guard.insert(sql.to_string(), stmt.clone());
+        }
+        Ok(stmt)
+    }
+
     pub fn parse_and_plan(&self, sql: &str) -> Result<PhysicalPlan> {
-        let stmt = self.parse(sql)?;
+        let stmt = self.cached_parse(sql, false)?;
         self.plan(stmt)
     }
 
     /// Like `parse_and_plan`, but `$1, $2, ...` placeholders are allowed and bound
     /// to `params` (values never pass through SQL text, so no injection).
     pub fn parse_and_plan_params(&self, sql: &str, params: &[Value]) -> Result<PhysicalPlan> {
-        let parsed = {
-            let _guard = ParamsGuard::enable();
-            self.parse(sql)
-        };
-        let mut stmt = parsed?;
+        let mut stmt = self.cached_parse(sql, true)?;
         let mut used = vec![false; params.len()];
         stmt.bind_params(params, &mut used)?;
         if let Some(i) = used.iter().position(|u| !u) {
