@@ -7,6 +7,33 @@ use crate::Server;
 pub struct Table<'a> {
     server: &'a Server,
     name: String,
+    session_id: Option<crate::SessionId>,
+}
+
+impl<'a> Table<'a> {
+    fn with_name(&self, name: &str) -> Table<'a> {
+        Table {
+            server: self.server,
+            name: name.to_string(),
+            session_id: self.session_id,
+        }
+    }
+
+    fn exec_plan(&self, plan: PhysicalPlan) -> Result<ExecutionResult> {
+        match self.session_id {
+            Some(sid) => self.server.execute_plan_in_session_internal(sid, plan),
+            None => self.server.execute_plan_internal(plan),
+        }
+    }
+
+    fn exec_sql_params(&self, sql: &str, params: &[Value]) -> Result<ExecutionResult> {
+        match self.session_id {
+            Some(sid) => self
+                .server
+                .execute_sql_params_in_session_internal(sid, sql, params),
+            None => self.server.execute_sql_params_internal(sql, params),
+        }
+    }
 }
 
 impl Server {
@@ -14,6 +41,16 @@ impl Server {
         Table {
             server: self,
             name: name.to_string(),
+            session_id: None,
+        }
+    }
+
+    /// Session-scoped table helper for concurrent handlers using dedicated `SessionId`s.
+    pub fn session_table(&self, session_id: crate::SessionId, name: &str) -> Table<'_> {
+        Table {
+            server: self,
+            name: name.to_string(),
+            session_id: Some(session_id),
         }
     }
 }
@@ -513,10 +550,7 @@ impl Table<'_> {
         self.check_fks(&names, &values)?;
         self.check_checks(&names, &values)?;
 
-        match self
-            .server
-            .execute_plan_internal(PhysicalPlan::Insert { schema, values })?
-        {
+        match self.exec_plan(PhysicalPlan::Insert { schema, values })? {
             ExecutionResult::Affected(n) => Ok(n),
             _ => Ok(1),
         }
@@ -607,7 +641,7 @@ impl Table<'_> {
             let mut full: Vec<(&str, Value)> = Vec::with_capacity(row.len() + 1);
             full.push((pk, Value::Int64(next)));
             full.extend(row.iter().cloned());
-            let in_explicit_txn = self.server.default_session.active_txn.lock().unwrap().is_some();
+            let in_explicit_txn = self.server.session_has_active_txn(self.session_id);
             match self.insert(&full) {
                 Ok(n) => return Ok((next, n)),
                 Err(e)
@@ -849,8 +883,7 @@ impl Table<'_> {
                 continue;
             }
             let n = self
-                .server
-                .table(&ptbl)
+                .with_name(&ptbl)
                 .find()
                 .columns(&[pcol.as_str()])
                 .filter(&pcol, "=", v.clone())
@@ -1130,6 +1163,7 @@ pub struct Rows {
 /// Built by `table.find()`. Chain `filter`, `columns`, `order_by`, `limit`, `offset`, then `run()`.
 pub struct Query<'a> {
     server: &'a Server,
+    session_id: Option<crate::SessionId>,
     table: String,
     conds: Vec<(String, String, Value)>,
     anys: Vec<Vec<(String, String, Value)>>,
@@ -1139,11 +1173,29 @@ pub struct Query<'a> {
     offset: Option<usize>,
 }
 
+impl<'a> Query<'a> {
+    /// Bind this query to a specific session instead of the default session.
+    pub fn in_session(mut self, session_id: crate::SessionId) -> Self {
+        self.session_id = Some(session_id);
+        self
+    }
+
+    fn exec_sql_params(&self, sql: &str, params: &[Value]) -> Result<ExecutionResult> {
+        match self.session_id {
+            Some(sid) => self
+                .server
+                .execute_sql_params_in_session_internal(sid, sql, params),
+            None => self.server.execute_sql_params_internal(sql, params),
+        }
+    }
+}
+
 impl<'a> Table<'a> {
     /// Start a query: `db.table("users").find().filter("age", ">", val(26)).run()?`
     pub fn find(&self) -> Query<'a> {
         Query {
             server: self.server,
+            session_id: self.session_id,
             table: self.name.clone(),
             conds: Vec::new(),
             anys: Vec::new(),
@@ -1248,7 +1300,7 @@ impl Query<'_> {
             sql.push_str(&format!(" OFFSET {}", n));
         }
 
-        match self.server.execute_sql_params_internal(&sql, &params)? {
+        match self.exec_sql_params(&sql, &params)? {
             ExecutionResult::Rows { columns, rows } => Ok(Rows { columns, rows }),
             other => Err(bad(format!("unexpected result: {other:?}"))),
         }
@@ -1317,6 +1369,7 @@ fn where_sql(
 /// Built by `table.update()`. Chain `set`, `filter` (or `all`), then `run()`.
 pub struct Update<'a> {
     server: &'a Server,
+    session_id: Option<crate::SessionId>,
     table: String,
     sets: Vec<(String, Value)>,
     conds: Vec<(String, String, Value)>,
@@ -1327,10 +1380,41 @@ pub struct Update<'a> {
 /// Built by `table.delete()`. Chain `filter` (or `all`), then `run()`.
 pub struct Delete<'a> {
     server: &'a Server,
+    session_id: Option<crate::SessionId>,
     table: String,
     conds: Vec<(String, String, Value)>,
     anys: Vec<Vec<(String, String, Value)>>,
     all: bool,
+}
+
+impl<'a> Update<'a> {
+    pub fn in_session(mut self, session_id: crate::SessionId) -> Self {
+        self.session_id = Some(session_id);
+        self
+    }
+
+    fn table_ref(&self) -> Table<'a> {
+        Table {
+            server: self.server,
+            name: self.table.clone(),
+            session_id: self.session_id,
+        }
+    }
+}
+
+impl<'a> Delete<'a> {
+    pub fn in_session(mut self, session_id: crate::SessionId) -> Self {
+        self.session_id = Some(session_id);
+        self
+    }
+
+    fn table_ref(&self) -> Table<'a> {
+        Table {
+            server: self.server,
+            name: self.table.clone(),
+            session_id: self.session_id,
+        }
+    }
 }
 
 impl<'a> Table<'a> {
@@ -1338,6 +1422,7 @@ impl<'a> Table<'a> {
     pub fn update(&self) -> Update<'a> {
         Update {
             server: self.server,
+            session_id: self.session_id,
             table: self.name.clone(),
             sets: Vec::new(),
             conds: Vec::new(),
@@ -1350,6 +1435,7 @@ impl<'a> Table<'a> {
     pub fn delete(&self) -> Delete<'a> {
         Delete {
             server: self.server,
+            session_id: self.session_id,
             table: self.name.clone(),
             conds: Vec::new(),
             anys: Vec::new(),
@@ -1412,16 +1498,17 @@ impl Update<'_> {
         }
 
         let known = |c: &str| schema.columns.iter().any(|x| x.name == c);
-        let _fk_guard = self.server.table(&self.table).fk_guard(false)?;
+        let tbl = self.table_ref();
+        let _fk_guard = tbl.fk_guard(false)?;
         {
             let names: Vec<&str> = self.sets.iter().map(|(n, _)| n.as_str()).collect();
             let vals: Vec<Value> = self.sets.iter().map(|(_, v)| v.clone()).collect();
-            self.server.table(&self.table).check_fks(&names, &vals)?;
-            self.server.table(&self.table).check_checks(&names, &vals)?;
+            tbl.check_fks(&names, &vals)?;
+            tbl.check_checks(&names, &vals)?;
         }
         let wh = where_sql(&known, &self.conds, &self.anys, &mut params)?;
         let sql = format!("UPDATE {} SET {}{}", self.table, assigns.join(", "), wh);
-        match self.server.execute_sql_params_internal(&sql, &params)? {
+        match tbl.exec_sql_params(&sql, &params)? {
             ExecutionResult::Affected(n) => Ok(n),
             other => Err(bad(format!("unexpected result: {other:?}"))),
         }
@@ -1455,9 +1542,9 @@ impl Delete<'_> {
         let known = |c: &str| schema.columns.iter().any(|x| x.name == c);
         let mut params: Vec<Value> = Vec::new();
         let wh = where_sql(&known, &self.conds, &self.anys, &mut params)?;
-        let _fk_guard = self.server.table(&self.table).fk_guard(true)?;
+        let t = self.table_ref();
+        let _fk_guard = t.fk_guard(true)?;
         {
-            let t = self.server.table(&self.table);
             for (ctbl, ccol, pcol) in t.fks_of_parent()? {
                 let mut q = t.find().columns(&[pcol.as_str()]);
                 for (c, o, v) in &self.conds {
@@ -1472,16 +1559,14 @@ impl Delete<'_> {
                         continue;
                     }
                     if t.fk_is_cascade(&ctbl, &ccol, &pcol)? {
-                        self.server
-                            .table(&ctbl)
+                        t.with_name(&ctbl)
                             .delete()
                             .filter(&ccol, "=", v.clone())
                             .run()?;
                         continue;
                     }
-                    let used = self
-                        .server
-                        .table(&ctbl)
+                    let used = t
+                        .with_name(&ctbl)
                         .find()
                         .columns(&[ccol.as_str()])
                         .filter(&ccol, "=", v.clone())
@@ -1499,7 +1584,7 @@ impl Delete<'_> {
             }
         }
         let sql = format!("DELETE FROM {}{}", self.table, wh);
-        match self.server.execute_sql_params_internal(&sql, &params)? {
+        match t.exec_sql_params(&sql, &params)? {
             ExecutionResult::Affected(n) => Ok(n),
             other => Err(bad(format!("unexpected result: {other:?}"))),
         }
@@ -1523,7 +1608,7 @@ impl Query<'_> {
         let mut params: Vec<Value> = Vec::new();
         let wh = where_sql(&known, &self.conds, &self.anys, &mut params)?;
         let sql = format!("SELECT COUNT(*) FROM {}{}", self.table, wh);
-        match self.server.execute_sql_params_internal(&sql, &params)? {
+        match self.exec_sql_params(&sql, &params)? {
             ExecutionResult::Rows { rows, .. } => match rows.first().and_then(|r| r.first()) {
                 Some(Value::Int64(n)) if *n >= 0 => Ok(*n as usize),
                 other => Err(bad(format!("unexpected COUNT result: {other:?}"))),
@@ -1556,7 +1641,7 @@ impl Query<'_> {
         let mut params: Vec<Value> = Vec::new();
         let wh = where_sql(&known, &self.conds, &self.anys, &mut params)?;
         let sql = format!("SELECT {}({}) FROM {}{}", f, col, self.table, wh);
-        match self.server.execute_sql_params_internal(&sql, &params)? {
+        match self.exec_sql_params(&sql, &params)? {
             ExecutionResult::Rows { rows, .. } => rows
                 .first()
                 .and_then(|r| r.first())
@@ -1604,7 +1689,7 @@ impl Query<'_> {
         if let Some(n) = top {
             sql.push_str(&format!(" LIMIT {}", n));
         }
-        match self.server.execute_sql_params_internal(&sql, &params)? {
+        match self.exec_sql_params(&sql, &params)? {
             ExecutionResult::Rows { rows, .. } => rows
                 .into_iter()
                 .map(|r| match (r.first(), r.get(1)) {

@@ -5,8 +5,41 @@ use std::marker::PhantomData;
 
 pub use mitrdb_orm_derive::Model;
 
-use mitrdb_server::Query;
-pub use mitrdb_server::{Error, Result, Server, Value};
+use mitrdb_server::{Query, Table};
+pub use mitrdb_server::{Error, Result, Server, SessionId, Value};
+
+/// Session-scoped ORM handle returned by `server.session_orm(session_id)`.
+/// All typed queries, inserts, updates, deletes, relations, and counts execute on `session_id`
+/// without contending on `default_session`.
+#[derive(Clone, Copy)]
+pub struct SessionOrm<'a> {
+    server: &'a Server,
+    session_id: SessionId,
+}
+
+impl<'a> SessionOrm<'a> {
+    pub fn session_id(&self) -> SessionId {
+        self.session_id
+    }
+
+    pub fn table(&self, name: &str) -> Table<'a> {
+        self.server.session_table(self.session_id, name)
+    }
+}
+
+/// Extension method on `Server` to obtain a session-scoped ORM handle.
+pub trait OrmSession {
+    fn session_orm(&self, session_id: SessionId) -> SessionOrm<'_>;
+}
+
+impl OrmSession for Server {
+    fn session_orm(&self, session_id: SessionId) -> SessionOrm<'_> {
+        SessionOrm {
+            server: self,
+            session_id,
+        }
+    }
+}
 
 fn err(msg: impl Into<String>) -> Error {
     Error::TransactionError(msg.into())
@@ -439,6 +472,12 @@ pub struct ModelQuery<'a, M> {
 }
 
 impl<'a, M: Model> ModelQuery<'a, M> {
+    /// Bind this typed query to a specific session instead of the default session.
+    pub fn in_session(mut self, session_id: SessionId) -> Self {
+        self.q = self.q.in_session(session_id);
+        self
+    }
+
     pub fn filter_any(mut self, g: AnyOf<M>) -> Self {
         self.q = self.q.filter_any(g.conds);
         self
@@ -629,6 +668,12 @@ pub struct ModelUpdate<'a, M> {
 }
 
 impl<M: Model> ModelUpdate<'_, M> {
+    /// Bind this typed update to a specific session instead of the default session.
+    pub fn in_session(mut self, session_id: SessionId) -> Self {
+        self.u = self.u.in_session(session_id);
+        self
+    }
+
     pub fn filter_any(mut self, g: AnyOf<M>) -> Self {
         self.u = self.u.filter_any(g.conds);
         self
@@ -665,6 +710,12 @@ pub struct ModelDelete<'a, M> {
 }
 
 impl<M: Model> ModelDelete<'_, M> {
+    /// Bind this typed delete to a specific session instead of the default session.
+    pub fn in_session(mut self, session_id: SessionId) -> Self {
+        self.d = self.d.in_session(session_id);
+        self
+    }
+
     pub fn filter_any(mut self, g: AnyOf<M>) -> Self {
         self.d = self.d.filter_any(g.conds);
         self
@@ -898,4 +949,162 @@ fn with_defaults<M: Model>(row: Vec<(&'static str, Value)>) -> Vec<(&'static str
                     .any(|c| c.name == *n && c.default.is_some()))
         })
         .collect()
+}
+
+fn sync_with_table<M: Model>(server: &Server, tbl: &Table<'_>) -> Result<Vec<String>> {
+    let plan = tbl.sync(&spec_of(M::COLUMNS))?;
+    for c in M::COLUMNS {
+        if let Some(r) = c.references {
+            let (pt, pc) = r
+                .split_once('.')
+                .ok_or_else(|| err("references must look like \"table.column\""))?;
+            tbl.add_foreign_key_on(c.name, pt, pc, c.cascade)?;
+        }
+        if let Some(d) = c.default {
+            let v = match d.trim() {
+                "true" => Value::Bool(true),
+                "false" => Value::Bool(false),
+                x => parse_check(&format!("= {x}"))?.1,
+            };
+            tbl.set_default(c.name, v)?;
+        }
+        if let Some(ck) = c.check {
+            for part in ck.split(';') {
+                let (op, v) = parse_check(part)?;
+                tbl.add_check(c.name, op, v)?;
+            }
+        }
+    }
+    for (cols, uniq) in M::INDEXES {
+        let list: Vec<&str> = cols.split(',').map(|c| c.trim()).collect();
+        let name = format!(
+            "{}_{}_{}",
+            M::TABLE,
+            list.join("_"),
+            if *uniq { "uq" } else { "ix" }
+        );
+        server.table(M::TABLE).create_index(&name, &list, *uniq)?;
+    }
+    Ok(plan)
+}
+
+impl Orm for SessionOrm<'_> {
+    fn sync<M: Model>(&self) -> Result<Vec<String>> {
+        sync_with_table::<M>(self.server, &self.table(M::TABLE))
+    }
+    fn insert<M: Model>(&self, m: &M) -> Result<usize> {
+        match M::AUTO_PK {
+            None => self.table(M::TABLE).insert(&with_defaults::<M>(stamped(m))),
+            Some(pk) => {
+                let row: Vec<_> = with_defaults::<M>(stamped(m))
+                    .into_iter()
+                    .filter(|(n, _)| *n != pk)
+                    .collect();
+                self.table(M::TABLE).insert_auto(pk, &row).map(|(_, n)| n)
+            }
+        }
+    }
+    fn insert_get_id<M: Model>(&self, m: &M) -> Result<i64> {
+        let pk = M::AUTO_PK.ok_or_else(|| err("model has no #[col(auto)] column"))?;
+        let row: Vec<_> = with_defaults::<M>(stamped(m))
+            .into_iter()
+            .filter(|(n, _)| *n != pk)
+            .collect();
+        self.table(M::TABLE).insert_auto(pk, &row).map(|(id, _)| id)
+    }
+    fn find<M: Model>(&self, cond: Cond<M>) -> ModelQuery<'_, M> {
+        self.all::<M>().filter(cond)
+    }
+    fn all<M: Model>(&self) -> ModelQuery<'_, M> {
+        ModelQuery {
+            q: self.table(M::TABLE).find(),
+            _p: PhantomData,
+        }
+    }
+}
+
+impl OrmWrite for SessionOrm<'_> {
+    fn update<M: Model>(&self) -> ModelUpdate<'_, M> {
+        ModelUpdate {
+            u: self.table(M::TABLE).update(),
+            touched: false,
+            _p: PhantomData,
+        }
+    }
+    fn delete<M: Model>(&self) -> ModelDelete<'_, M> {
+        ModelDelete {
+            d: self.table(M::TABLE).delete(),
+            _p: PhantomData,
+        }
+    }
+    fn find_one<M: Model>(&self, cond: Cond<M>) -> Result<Option<M>> {
+        Ok(self.find(cond).limit(1).run()?.into_iter().next())
+    }
+    fn find_by_id<M: Model, K: Field>(&self, id: K) -> Result<Option<M>> {
+        let pk = M::COLUMNS
+            .iter()
+            .find(|c| c.primary_key)
+            .ok_or_else(|| err(format!("table '{}' has no primary_key column", M::TABLE)))?;
+        let rows = self
+            .table(M::TABLE)
+            .find()
+            .filter(pk.name, "=", id.to_value())
+            .limit(1)
+            .run()?;
+        match rows.rows.first() {
+            None => Ok(None),
+            Some(r) => M::from_row(&RowRef {
+                columns: &rows.columns,
+                values: r,
+            })
+            .map(Some),
+        }
+    }
+}
+
+impl OrmRelations for SessionOrm<'_> {
+    fn belongs_to<P: Model, K: Field>(&self, fk: K) -> Result<Option<P>> {
+        self.find_by_id::<P, K>(fk)
+    }
+    fn has_many<C: Model, K: Field>(&self, fk_col: Col<C, K>, parent_id: K) -> Result<Vec<C>> {
+        self.find(fk_col.eq(parent_id)).run()
+    }
+    fn load_many<C: Model, K: Field + Clone + Eq + std::hash::Hash>(
+        &self,
+        fk_col: Col<C, K>,
+        ids: &[K],
+    ) -> Result<std::collections::HashMap<K, Vec<C>>> {
+        let mut out: std::collections::HashMap<K, Vec<C>> = std::collections::HashMap::new();
+        let mut seen = std::collections::HashSet::new();
+        let uniq: Vec<K> = ids
+            .iter()
+            .filter(|k| seen.insert((*k).clone()))
+            .cloned()
+            .collect();
+        for chunk in uniq.chunks(LOAD_MANY_CHUNK) {
+            let rows = self
+                .all::<C>()
+                .filter_any(fk_col.in_list(chunk.iter().cloned()))
+                .run()?;
+            for r in rows {
+                let v = r
+                    .to_row()
+                    .into_iter()
+                    .find(|(n, _)| *n == fk_col.name)
+                    .map(|(_, v)| v)
+                    .ok_or_else(|| err("fk column missing in row"))?;
+                out.entry(K::from_value(v)?).or_default().push(r);
+            }
+        }
+        Ok(out)
+    }
+}
+
+impl OrmCount for SessionOrm<'_> {
+    fn count<M: Model>(&self) -> Result<usize> {
+        self.all::<M>().count()
+    }
+    fn count_where<M: Model>(&self, cond: Cond<M>) -> Result<usize> {
+        self.find(cond).count()
+    }
 }

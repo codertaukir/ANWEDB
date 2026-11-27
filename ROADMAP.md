@@ -233,4 +233,5 @@ Status tracker. `[x]` = done and measured/tested, `[ ]` = pending.
 - [x] Lamba soak ~100 min (I/U/D, checkpointer, WAL rotation 5 segments) + power cut: lost=0 phantom=0
 - [x] CI: run #180 on 7eca40d success (audit, test, deny); README Verified checks, docs/PILOT.md, docs/LIMITATIONS.md updated
 - [x] `insert_auto` inside an explicit txn now fails fast on `WriteConflict` / `SerializationFailure` instead of retrying against a poisoned transaction (`table.rs`, `insert_auto_txn.rs`)
+- [x] Session-scoped `Table` & ORM API (`Server::session_table`, `Server::session_orm`, `.in_session(session_id)`): typed CRUD, FK/CHECK/DEFAULT enforcement, cascade deletes, `insert_auto`, relations, and pagination execute directly on dedicated `SessionId`s without contending on `default_session` (`session_table.rs`, `session_orm.rs`)
 - [ ] Untested: other filesystems/hardware, concurrent DDL, DDL + DML together, default connection limit with 200 TLS clients, soak longer than ~100 min

@@ -354,6 +354,29 @@ impl Server {
         self.execute_plan_in_session_internal(session_id, plan)
     }
 
+    pub(crate) fn execute_sql_params_in_session_internal(
+        &self,
+        session_id: SessionId,
+        sql: &str,
+        params: &[mitrdb_query::Value],
+    ) -> Result<ExecutionResult> {
+        GLOBAL_METRICS.record_query();
+        let plan = self.query_engine.parse_and_plan_params(sql, params)?;
+        self.execute_plan_in_session_internal(session_id, plan)
+    }
+
+    pub(crate) fn session_has_active_txn(&self, session_id: Option<SessionId>) -> bool {
+        match session_id {
+            None => self.default_session.active_txn.lock().unwrap().is_some(),
+            Some(sid) => self
+                .sessions
+                .read()
+                .unwrap()
+                .get(&sid)
+                .is_some_and(|s| s.active_txn.lock().unwrap().is_some()),
+        }
+    }
+
     pub fn execute_plan(&self, plan: PhysicalPlan) -> Result<ExecutionResult> {
         self.guard_raw_dml(&plan)?;
         self.execute_plan_internal(plan)
