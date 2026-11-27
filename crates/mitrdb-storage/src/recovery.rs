@@ -5,8 +5,9 @@ use mitrdb_common::{Error, INVALID_LSN, Lsn, PAGE_HEADER_SIZE, PAGE_SIZE, PageId
 use mitrdb_observe::GLOBAL_METRICS;
 
 use crate::btree::{NODE_KIND_FREE, NODE_KIND_INTERNAL, NODE_KIND_LEAF};
+use crate::overflow::NODE_KIND_OVERFLOW;
 use crate::buffer_pool::BufferPoolManager;
-use crate::page::{PAGE_FLAG_FREE, PAGE_TYPE_BTREE_INTERNAL, PAGE_TYPE_BTREE_LEAF, PAGE_TYPE_RAW};
+use crate::page::{PAGE_FLAG_FREE, PAGE_TYPE_BTREE_INTERNAL, PAGE_TYPE_BTREE_LEAF, PAGE_TYPE_OVERFLOW, PAGE_TYPE_RAW};
 use crate::wal::{CheckpointMetadata, LogRecord, LogRecordType, WalManager};
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -159,7 +160,7 @@ impl RecoveryManager {
                 && r.redo_data.len() == PAGE_SIZE - PAGE_HEADER_SIZE
                 && matches!(
                     r.redo_data.first().copied(),
-                    Some(NODE_KIND_LEAF | NODE_KIND_INTERNAL | NODE_KIND_FREE)
+                    Some(NODE_KIND_LEAF | NODE_KIND_INTERNAL | NODE_KIND_FREE | NODE_KIND_OVERFLOW)
                 )
             {
                 first_full_lsn.entry(r.page_id).or_insert(r.lsn);
@@ -218,6 +219,10 @@ impl RecoveryManager {
                                     }
                                     NODE_KIND_INTERNAL => {
                                         p.set_page_type(PAGE_TYPE_BTREE_INTERNAL);
+                                        p.set_flags(0);
+                                    }
+                                    NODE_KIND_OVERFLOW => {
+                                        p.set_page_type(PAGE_TYPE_OVERFLOW);
                                         p.set_flags(0);
                                     }
                                     NODE_KIND_FREE => {
@@ -287,7 +292,7 @@ impl RecoveryManager {
                         && len == PAGE_SIZE - PAGE_HEADER_SIZE
                         && matches!(
                             rec.redo_data.first().copied(),
-                            Some(NODE_KIND_LEAF | NODE_KIND_INTERNAL | NODE_KIND_FREE)
+                            Some(NODE_KIND_LEAF | NODE_KIND_INTERNAL | NODE_KIND_FREE | NODE_KIND_OVERFLOW)
                         );
                     if is_full_btree_payload
                         && rec.page_id > 0
@@ -335,6 +340,10 @@ impl RecoveryManager {
                                     }
                                     NODE_KIND_INTERNAL => {
                                         p.set_page_type(PAGE_TYPE_BTREE_INTERNAL);
+                                        p.set_flags(0);
+                                    }
+                                    NODE_KIND_OVERFLOW => {
+                                        p.set_page_type(PAGE_TYPE_OVERFLOW);
                                         p.set_flags(0);
                                     }
                                     NODE_KIND_FREE => {
@@ -510,7 +519,7 @@ impl RecoveryManager {
                         && len == PAGE_SIZE - PAGE_HEADER_SIZE
                         && matches!(
                             rec.redo_data.first().copied(),
-                            Some(NODE_KIND_LEAF | NODE_KIND_INTERNAL | NODE_KIND_FREE)
+                            Some(NODE_KIND_LEAF | NODE_KIND_INTERNAL | NODE_KIND_FREE | NODE_KIND_OVERFLOW)
                         );
                     if is_full_btree_payload
                         && rec.page_id > 0
@@ -552,6 +561,10 @@ impl RecoveryManager {
                                 }
                                 NODE_KIND_INTERNAL => {
                                     p.set_page_type(PAGE_TYPE_BTREE_INTERNAL);
+                                    p.set_flags(0);
+                                }
+                                NODE_KIND_OVERFLOW => {
+                                    p.set_page_type(PAGE_TYPE_OVERFLOW);
                                     p.set_flags(0);
                                 }
                                 NODE_KIND_FREE => {

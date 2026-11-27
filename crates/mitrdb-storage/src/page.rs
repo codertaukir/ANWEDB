@@ -5,6 +5,7 @@ pub const PAGE_TYPE_RAW: u16 = 0;
 pub const PAGE_TYPE_SLOTTED: u16 = 1;
 pub const PAGE_TYPE_BTREE_LEAF: u16 = 2;
 pub const PAGE_TYPE_BTREE_INTERNAL: u16 = 3;
+pub const PAGE_TYPE_OVERFLOW: u16 = 4;
 pub const PAGE_FLAG_FREE: u16 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -128,6 +129,7 @@ impl Page {
             && ptype != PAGE_TYPE_SLOTTED
             && ptype != PAGE_TYPE_BTREE_LEAF
             && ptype != PAGE_TYPE_BTREE_INTERNAL
+            && ptype != PAGE_TYPE_OVERFLOW
         {
             return Err(Error::PageCorrupted(format!(
                 "Invalid page type: {}",

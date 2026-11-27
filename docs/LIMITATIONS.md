@@ -1,7 +1,7 @@
 # Known limitations
 
 **Size**
-- A row must fit in one 4096-byte page. The limit is per ROW (all columns added up) and counts bytes, not characters. With an `id int` primary key and one text column: 4019 ASCII bytes fit, 4020 fail. Hindi (3 bytes per character) fits 1339 characters.
+- `TEXT` and `BYTES` columns (and total row payloads) support up to **16,384 bytes (16 KB)** via linked 4 KB overflow page chains (`PAGE_TYPE_OVERFLOW`). Fields up to 2,048 bytes stay inline in the B+Tree leaf; payloads exceeding 16 KB fail with `OUT_OF_SPACE`. The limit counts UTF-8/raw bytes, not characters.
 - An oversized row is refused with `OUT_OF_SPACE` (`Error::OutOfSpace`) and nothing is half-written. The table stays usable.
 - `FileStore` has no size limit. Files live on disk, outside the database, WAL and transactions. Saving a file and inserting its row are not atomic: save the file first, insert the row second, delete the file if the insert fails. Orphan files after a crash are not swept. `FileStore` and `TextStore` are in-process only (no upload/download over TCP).
 - One TCP frame is at most 1 MB (requests and responses).

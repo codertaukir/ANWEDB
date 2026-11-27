@@ -6,7 +6,11 @@ use std::sync::{Arc, OnceLock};
 
 use mitrdb_common::{Error, INVALID_LSN, Lsn, PAGE_HEADER_SIZE, PAGE_SIZE, PageId, Result, TxnId};
 use mitrdb_observe::GLOBAL_METRICS;
-pub use mitrdb_storage::{BPlusTree, BufferPoolManager, KeyBound, KeyRange, LogRecord, WalManager};
+pub use mitrdb_storage::{
+    BPlusTree, BufferPoolManager, KeyBound, KeyRange, LogRecord, OverflowDescriptor,
+    WalManager, collect_tuple_overflow_heads, read_overflow_chain, stage_free_overflow_chain,
+    write_overflow_chain,
+};
 
 /// Detailed per-scan profiling is opt-in because console output and metric snapshots
 /// can distort benchmark results. Set MITRDB_PROFILE_SCAN=1 to enable it.
@@ -977,6 +981,9 @@ pub enum UndoAction {
         key: Vec<u8>,
         old_value: Option<Vec<u8>>,
     },
+    OverflowChain {
+        head_page_id: PageId,
+    },
 }
 
 pub struct TransactionContext {
@@ -1379,6 +1386,7 @@ impl TxnManager {
 
         let mut versions_pruned = 0usize;
         let mut keys_cleared = 0usize;
+        let mut dead_overflow_heads: Vec<PageId> = Vec::new();
 
         for versions in shards.iter_mut() {
             for chain in versions.values_mut() {
@@ -1403,12 +1411,18 @@ impl TxnManager {
 
                 let before_abort_clean = chain.len();
                 chain.retain(|v| {
-                    if v.xmin == 0 {
-                        return true;
+                    let aborted = v.xmin != 0
+                        && txns
+                            .get(&v.xmin)
+                            .is_some_and(|c| c.state == TxnState::Aborted && !c.in_rollback);
+                    if aborted {
+                        if let Some(ref val) = v.value {
+                            dead_overflow_heads.extend(collect_tuple_overflow_heads(val));
+                        }
+                        false
+                    } else {
+                        true
                     }
-                    !txns
-                        .get(&v.xmin)
-                        .is_some_and(|c| c.state == TxnState::Aborted && !c.in_rollback)
                 });
                 versions_pruned += before_abort_clean - chain.len();
 
@@ -1430,7 +1444,14 @@ impl TxnManager {
                     if let Some(deleter) = txns.get(&xmax)
                         && let TxnState::Committed { commit_ts } = deleter.state
                     {
-                        commit_ts > horizon_ts
+                        if commit_ts > horizon_ts {
+                            true
+                        } else {
+                            if let Some(ref val) = v.value {
+                                dead_overflow_heads.extend(collect_tuple_overflow_heads(val));
+                            }
+                            false
+                        }
                     } else {
                         true
                     }
@@ -1499,6 +1520,17 @@ impl TxnManager {
             referenced_txns.contains(tid)
         });
         let txns_reclaimed = before_txns - txns.len();
+
+        if !dead_overflow_heads.is_empty()
+            && let Some(ref bpm) = self.bpm
+        {
+            dead_overflow_heads.sort_unstable();
+            dead_overflow_heads.dedup();
+            for head_pid in dead_overflow_heads {
+                let _ = stage_free_overflow_chain(bpm, 0, head_pid);
+            }
+            let _ = bpm.finalize_free_pages(0);
+        }
 
         GLOBAL_METRICS.record_vacuum(
             versions_pruned as u64,
@@ -2116,6 +2148,56 @@ impl TxnManager {
             .collect();
         self.lock_manager
             .acquire_batch(txn_id, &lock_keys, LockMode::Exclusive)
+    }
+
+    pub fn alloc_overflow_chain(
+        &self,
+        txn_id: TxnId,
+        payload: &[u8],
+    ) -> Result<OverflowDescriptor> {
+        let bpm = self.bpm.as_ref().ok_or_else(|| {
+            Error::TransactionError("BufferPoolManager not attached to TxnManager".to_string())
+        })?;
+        let mut last_lsn = {
+            let txns = self.txn_shard(txn_id).lock();
+            let ctx = txns.get(&txn_id).ok_or_else(|| {
+                Error::TransactionError(format!("Unknown transaction ID {}", txn_id))
+            })?;
+            if ctx.state != TxnState::Active {
+                return Err(Error::TransactionError(format!(
+                    "Transaction {} is not active",
+                    txn_id
+                )));
+            }
+            ctx.last_lsn
+        };
+
+        let desc = write_overflow_chain(
+            bpm,
+            self.wal.as_deref(),
+            txn_id,
+            &mut last_lsn,
+            payload,
+        )?;
+
+        {
+            let mut txns = self.txn_shard(txn_id).lock();
+            let ctx = txns.get_mut(&txn_id).ok_or_else(|| {
+                Error::TransactionError(format!("Unknown transaction ID {}", txn_id))
+            })?;
+            ctx.last_lsn = last_lsn;
+            ctx.write_set.push(UndoAction::OverflowChain {
+                head_page_id: desc.head_page_id as PageId,
+            });
+        }
+        Ok(desc)
+    }
+
+    pub fn read_overflow_chain(&self, desc: &OverflowDescriptor) -> Result<Vec<u8>> {
+        let bpm = self.bpm.as_ref().ok_or_else(|| {
+            Error::TransactionError("BufferPoolManager not attached to TxnManager".to_string())
+        })?;
+        read_overflow_chain(bpm, desc)
     }
 
     pub fn put(
@@ -2822,6 +2904,13 @@ impl TxnManager {
                         "statement rollback does not support page-slice undo".to_string(),
                     ));
                 }
+                UndoAction::OverflowChain { head_page_id } => {
+                    if let Some(ref bpm) = self.bpm {
+                        let _ = stage_free_overflow_chain(bpm, txn_id, head_page_id);
+                        let _ = bpm.finalize_free_pages(txn_id);
+                    }
+                    undone = true;
+                }
                 UndoAction::BTreeKey {
                     tree,
                     key,
@@ -2989,6 +3078,11 @@ impl TxnManager {
                         }
                     } else {
                         drop(_op_guard);
+                    }
+                }
+                UndoAction::OverflowChain { head_page_id } => {
+                    if let Some(ref bpm) = self.bpm {
+                        let _ = stage_free_overflow_chain(bpm, txn_id, head_page_id);
                     }
                 }
                 UndoAction::BTreeKey {

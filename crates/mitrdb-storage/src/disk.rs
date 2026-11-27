@@ -159,7 +159,8 @@ impl DiskManager {
                         let valid_ptype = ptype == PAGE_TYPE_RAW
                             || ptype == crate::page::PAGE_TYPE_SLOTTED
                             || ptype == crate::page::PAGE_TYPE_BTREE_LEAF
-                            || ptype == crate::page::PAGE_TYPE_BTREE_INTERNAL;
+                            || ptype == crate::page::PAGE_TYPE_BTREE_INTERNAL
+                            || ptype == crate::page::PAGE_TYPE_OVERFLOW;
                         if magic == MAGIC_BYTES && valid_ptype && (flags & PAGE_FLAG_FREE) != 0 {
                             free_pages.push(pid);
                         }
@@ -291,7 +292,8 @@ impl DiskManager {
             let valid_ptype = ptype == PAGE_TYPE_RAW
                 || ptype == crate::page::PAGE_TYPE_SLOTTED
                 || ptype == crate::page::PAGE_TYPE_BTREE_LEAF
-                || ptype == crate::page::PAGE_TYPE_BTREE_INTERNAL;
+                || ptype == crate::page::PAGE_TYPE_BTREE_INTERNAL
+                || ptype == crate::page::PAGE_TYPE_OVERFLOW;
             if magic == MAGIC_BYTES && valid_ptype && (flags & PAGE_FLAG_FREE) != 0 {
                 let pending_for_active_txn = pending
                     .iter()

@@ -16,15 +16,17 @@ fn open(tag: &str) -> Server {
 }
 
 #[test]
-fn small_blob_round_trips() {
+fn small_and_16kb_blob_round_trips() {
     let server = open("small");
     let t = server.table("files");
     t.sync("id int primary key, data bytes").unwrap();
-    let blob = vec![7u8; 3900];
-    t.insert(&[("id", val(1)), ("data", val(blob.clone()))])
-        .unwrap();
-    let r = t.find().filter("id", "=", val(1)).run().unwrap();
-    assert!(matches!(&r.rows[0][1], Value::Bytes(b) if *b == blob));
+    for (id, size) in [(1, 2048usize), (2, 3900), (3, 8 * 1024), (4, 16 * 1024)] {
+        let blob: Vec<u8> = (0..size).map(|i| ((i * 31 + id as usize) & 0xff) as u8).collect();
+        t.insert(&[("id", val(id)), ("data", val(blob.clone()))])
+            .unwrap();
+        let r = t.find().filter("id", "=", val(id)).run().unwrap();
+        assert!(matches!(&r.rows[0][1], Value::Bytes(b) if *b == blob));
+    }
 }
 
 #[test]
@@ -32,7 +34,7 @@ fn huge_blob_is_refused_without_crash() {
     let server = open("huge");
     let t = server.table("files");
     t.sync("id int primary key, data bytes").unwrap();
-    for n in [8 * 1024, 100 * 1024, 1024 * 1024, 10 * 1024 * 1024] {
+    for n in [16 * 1024 + 1, 100 * 1024, 1024 * 1024, 10 * 1024 * 1024] {
         let res = t.insert(&[("id", val(1)), ("data", val(vec![7u8; n]))]);
         assert!(res.is_err(), "{n} bytes should be refused");
     }

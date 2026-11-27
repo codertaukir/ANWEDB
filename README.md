@@ -185,7 +185,7 @@ Know these before you use MITRDB.
 
 **Data**
 - Engine types: `INT`, `TEXT`, `BOOL`, `BYTES`, `TIMESTAMP`, `FLOAT` (see [docs/LIMITATIONS.md](docs/LIMITATIONS.md)).
-- A row can be about 4000 bytes in total, all columns added up (4019 ASCII bytes or 1339 Hindi characters in a one-text-column table). A bigger row gives a clean `OUT_OF_SPACE` error. Store big files outside the database and keep only the path or name in a text column.
+- Individual `TEXT` / `BYTES` values and rows up to **16 KB (16,384 bytes)** are supported natively via WAL-logged, CRC32C-verified 4 KB overflow page chains (fields <= 2,048 bytes stay inline on B+Tree leaf pages). Larger payloads return a clean `OUT_OF_SPACE` error; for multi-megabyte blobs, use `FileStore` (`files.rs`).
 - A `UNIQUE` column allows many `NULL` values; real duplicate values are rejected. All `NULL` rows share one index entry, so concurrent writes of `NULL` into the same unique column run one after another (from code reading, not measured).
 
 **SQL**

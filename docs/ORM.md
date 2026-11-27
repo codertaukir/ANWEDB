@@ -81,7 +81,7 @@ db.delete::<User>().filter(User::id.eq(1)).run()?;
 
 ## TextStore (long text)
 
-A row must fit in one page (about 4000 bytes in total, counted in bytes). For longer text use `TextStore` (`put` / `get` / `delete` / `put_and`): the text goes to a file, the row keeps a reference. A 140 KB Hindi text round-trips in a test. Not atomic with the WAL, crash orphans are not swept, in-process only.
+`TEXT` and `BYTES` values up to 16 KB (16,384 bytes) are stored natively in the database via transactional overflow page chains. For larger payloads (e.g., 140 KB+ documents or media), use `TextStore` (`put` / `get` / `delete` / `put_and`): the text goes to an external file while the row keeps a reference (not atomic with the WAL, in-process only).
 
 ## TCP clients
 
