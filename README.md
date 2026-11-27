@@ -17,7 +17,8 @@ It is currently a **single-node** engine in **early development**.
 
 **Storage**
 - B+Tree storage engine with variable-length keys and values, leaf/internal splits, merges and rebalancing
-- Fixed-size pages with CRC32C checksums (torn or corrupted pages are detected and rejected)
+- Fixed-size 4 KB pages with CRC32C checksums (torn or corrupted pages are detected and rejected)
+- Linked 4 KB overflow page chains supporting `TEXT` and `BYTES` payloads up to 16 KB (with an inline fast path up to 2,048 bytes per field)
 - Buffer pool with clock eviction and pinned-frame protection
 - Deferred page freeing, so freed pages are only reused after the owning transaction finalizes
 
@@ -140,7 +141,7 @@ Placeholders work for values in INSERT, UPDATE (`SET col = $n`, `col = col +/- $
 
 ### Big files
 
-A whole row (all columns added up) must fit in about 4000 bytes (counted in bytes, not characters). Bigger data (photos, videos) goes to disk with `FileStore`; the DB keeps only the file name in a normal `text` column.
+`TEXT` and `BYTES` fields (and total row payloads) up to **16 KB (16,384 bytes)** are stored natively in the database via transactional, CRC32C-verified overflow page chains. Bigger data (photos, videos, multi-megabyte blobs) goes to disk with `FileStore`; the DB keeps only the file name in a normal `text` column.
 
 ```rust
 let files = FileStore::open("data/files")?;
