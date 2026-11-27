@@ -607,9 +607,14 @@ impl Table<'_> {
             let mut full: Vec<(&str, Value)> = Vec::with_capacity(row.len() + 1);
             full.push((pk, Value::Int64(next)));
             full.extend(row.iter().cloned());
+            let in_explicit_txn = self.server.default_session.active_txn.lock().unwrap().is_some();
             match self.insert(&full) {
                 Ok(n) => return Ok((next, n)),
-                Err(e) if e.to_string().contains("Duplicate primary key") || seq_retryable(&e) => {
+                Err(e)
+                    if !in_explicit_txn
+                        && (e.to_string().contains("Duplicate primary key")
+                            || seq_retryable(&e)) =>
+                {
                     need_scan = true;
                     continue;
                 }

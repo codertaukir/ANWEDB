@@ -1262,12 +1262,11 @@ impl QueryEngine {
         } else {
             &self.stmt_cache
         };
-        if sql.len() <= AST_CACHE_MAX_SQL_LEN {
-            if let Ok(guard) = cache.lock()
-                && let Some(stmt) = guard.get(sql)
-            {
-                return Ok(stmt.clone());
-            }
+        if sql.len() <= AST_CACHE_MAX_SQL_LEN
+            && let Ok(guard) = cache.lock()
+            && let Some(stmt) = guard.get(sql)
+        {
+            return Ok(stmt.clone());
         }
         let stmt = if allow_params {
             let _guard = ParamsGuard::enable();
