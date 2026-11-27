@@ -1,6 +1,6 @@
 # MITRDB
 
-[![CI](https://github.com/codertaukir/ANWEDB/actions/workflows/ci.yml/badge.svg?branch=anwedb-clean)](https://github.com/codertaukir/ANWEDB/actions/workflows/ci.yml)
+[![CI](https://github.com/codertaukir/MITRDB/actions/workflows/ci.yml/badge.svg?branch=anwedb-clean)](https://github.com/codertaukir/MITRDB/actions/workflows/ci.yml)
 
 A transactional database engine written in Rust.
 
