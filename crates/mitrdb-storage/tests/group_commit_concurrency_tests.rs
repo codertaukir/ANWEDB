@@ -111,3 +111,64 @@ fn single_writer_commit_still_fsyncs_before_return() {
 
     let _ = std::fs::remove_dir_all(&temp_dir);
 }
+
+#[test]
+fn adaptive_group_commit_coalesces_burst_commits() {
+    use mitrdb_observe::GLOBAL_METRICS;
+    use std::time::Duration;
+
+    let temp_dir = std::env::temp_dir().join(format!(
+        "mitrdb_adaptive_gc_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let wal_path = temp_dir.join("test.wal");
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    std::fs::create_dir_all(&temp_dir).unwrap();
+
+    let wal = Arc::new(WalManager::open_or_create(&wal_path).unwrap());
+    wal.set_group_commit_linger(Duration::from_millis(5), 64);
+    assert_eq!(wal.group_commit_linger(), (Duration::from_millis(5), 64));
+
+    let flushes_before = GLOBAL_METRICS.snapshot().wal_flushes;
+    let writers = 12usize;
+    let commits_per = 10usize;
+    let barrier = Arc::new(Barrier::new(writers));
+    let mut handles = Vec::with_capacity(writers);
+
+    for w in 0..writers {
+        let wal = Arc::clone(&wal);
+        let barrier = Arc::clone(&barrier);
+        handles.push(thread::spawn(move || {
+            barrier.wait();
+            let mut max_lsn = 0;
+            for i in 0..commits_per {
+                let tid = 100_000 + (w as u64) * 1_000 + (i as u64) + 1;
+                let b = wal.append_record(LogRecord::new_begin(0, tid)).unwrap();
+                let c = wal.commit(tid, b).unwrap();
+                assert!(wal.flushed_lsn() >= c);
+                max_lsn = max_lsn.max(c);
+            }
+            max_lsn
+        }));
+    }
+
+    let mut global_max = 0;
+    for h in handles {
+        global_max = global_max.max(h.join().unwrap());
+    }
+    let flushes_after = GLOBAL_METRICS.snapshot().wal_flushes;
+    let total_commits = (writers * commits_per) as u64;
+    let flush_delta = flushes_after.saturating_sub(flushes_before);
+
+    assert!(
+        flush_delta < total_commits,
+        "expected adaptive group commit to coalesce {total_commits} commits into fewer flushes, got {flush_delta}"
+    );
+    assert!(wal.flushed_lsn() >= global_max);
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}

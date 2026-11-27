@@ -49,6 +49,11 @@ Status tracker. `[x]` = done and measured/tested, `[ ]` = pending.
 - [x] Bulk DML transient memory profiling: measured per-structure breakdown (~136B write_set, ~136B LockManager, ~248B MVCC store; ~520B/row total transient heap across 5k rows).
 - [x] Btree multi-write remaining edge cases: `free_btree_page`, delete merge/borrow/rebalance_internal error-path isolation aur buffer pool new_page conflict free-page leak guard completely verified across 1700+ injected fault points.
 
+## Axum & High-Concurrency Production Readiness
+- [x] Parameterized `LIMIT $n` & `OFFSET $n` binding (58a3e42): `LimitOffset::{Literal, Param}` AST support in `mitrdb-query` for `SELECT` and `UNION` with strict non-negative `Int64` validation in `execute_sql_params` (`sql_params.rs`).
+- [x] Index-assisted join execution & empty-left short-circuit (d22ee93): `NestedLoopJoin` (`mitrdb-exec`) evaluates outer side first, short-circuits inner joins when left is empty, and probes right-table PK or single-column secondary B+Tree indexes directly for small distinct key sets (<= 256) with full Serializable range-lock compliance (`join_hash.rs`).
+- [x] Adaptive WAL group-commit linger: `WalManager` coalesces concurrent burst commits up to 2ms / 64 commits (`set_group_commit_linger`) while keeping idle single-writer commits at 0ms extra latency (`group_commit_concurrency_tests.rs`).
+
 ## P1: Architecture & Concurrency
 - [x] Query Planner & Join Execution Optimization (5fa0485, cea2550): Planner predicate pushdown & zero-allocation hash join probe completed and tested.
 - [x] WalManager lock: measured, no actionable gain. Lock wait ~12% + hold ~8% of TxnPut (write_mark_real 4T), but WAL is only ~2.4% CPU in perf. txn_trackers cheap-hasher A/B (12 runs): median 355.9k vs 359.4k ops/s, noise. Atomic next_lsn alone is unsafe (arena must stay in LSN order); lock-free reservation not attempted (recovery risk, gain bounded by ~20% of put time)

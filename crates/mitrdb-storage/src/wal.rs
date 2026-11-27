@@ -21,6 +21,12 @@ const LOG_RECORD_FIXED_HEADER: usize = 4 + 8 + 8 + 8 + 1 + 4 + 2 + 8 + 2 + 2;
 const PENDING_ARENA_INITIAL_CAPACITY: usize = 64 * 1024;
 /// Above this capacity an emptied arena is shrunk back (a bulk statement can grow it to tens of MB).
 const ARENA_SHRINK_MIN_CAPACITY: usize = 4 * 1024 * 1024;
+/// Default max adaptive group-commit linger window (2 ms).
+const DEFAULT_GROUP_COMMIT_LINGER_MICROS: u64 = 2_000;
+/// Default max commit records coalesced before flushing immediately without waiting.
+const DEFAULT_GROUP_COMMIT_MAX_BATCH: usize = 64;
+/// If commits arrive within this horizon, treat traffic as an active burst eligible for linger coalescing.
+const GROUP_COMMIT_BURST_HORIZON: std::time::Duration = std::time::Duration::from_millis(10);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CheckpointMetadata {
@@ -464,6 +470,7 @@ struct PendingRecord {
     segment_id: u64,
     start: u64,
     len: u32,
+    is_commit_or_abort: bool,
 }
 
 /// Work item describing one WAL segment's pending byte range in the flushed arena.
@@ -514,6 +521,10 @@ struct WalInner {
     backup_pins: HashMap<u64, Lsn>,
     next_pin_id: u64,
     flush_in_progress: bool,
+    pending_commits: usize,
+    last_commit_at: Option<std::time::Instant>,
+    recent_commit_burst: bool,
+    quiesce_waiters: usize,
 }
 
 impl WalInner {
@@ -523,6 +534,11 @@ impl WalInner {
             return;
         }
         let total: u64 = self.pending[..count].iter().map(|p| p.len as u64).sum();
+        let drained_commits: usize = self.pending[..count]
+            .iter()
+            .filter(|p| p.is_commit_or_abort)
+            .count();
+        self.pending_commits = self.pending_commits.saturating_sub(drained_commits);
         self.pending.drain(0..count);
         self.pending_bytes.drain(0..total as usize);
         self.pending_base += total;
@@ -580,6 +596,12 @@ pub struct WalManager {
     inner: Mutex<WalInner>,
     /// Signaled when a group-commit flush completes (success or failure).
     flush_cv: Condvar,
+    /// Signaled when a lingering group-commit leader should wake early (batch full or quiesce).
+    linger_cv: Condvar,
+    /// Max linger duration in microseconds (0 = disabled).
+    group_commit_linger_us: std::sync::atomic::AtomicU64,
+    /// Max commit/abort records per coalesced group-commit batch.
+    group_commit_max_batch: std::sync::atomic::AtomicUsize,
     path: PathBuf,
     bpm_listeners: Mutex<Vec<std::sync::Weak<crate::buffer_pool::BufferPoolManager>>>,
     /// (segment_id, open_file_handle) cached for fast sequential append & flush.
@@ -628,8 +650,19 @@ impl WalManager {
                 backup_pins: HashMap::new(),
                 next_pin_id: 1,
                 flush_in_progress: false,
+                pending_commits: 0,
+                last_commit_at: None,
+                recent_commit_burst: false,
+                quiesce_waiters: 0,
             }),
             flush_cv: Condvar::new(),
+            linger_cv: Condvar::new(),
+            group_commit_linger_us: std::sync::atomic::AtomicU64::new(
+                DEFAULT_GROUP_COMMIT_LINGER_MICROS,
+            ),
+            group_commit_max_batch: std::sync::atomic::AtomicUsize::new(
+                DEFAULT_GROUP_COMMIT_MAX_BATCH,
+            ),
             path: path_buf,
             bpm_listeners: Mutex::new(Vec::new()),
             active_segment_file: Mutex::new(None),
@@ -658,10 +691,36 @@ impl WalManager {
     /// Paths that perform WAL file I/O while holding the lock (`flush_up_to_locked`
     /// callers) must use this instead of `self.inner.lock()`, otherwise they can
     /// write/truncate the same segment concurrently with the leader.
+    /// Configures adaptive group-commit coalescing parameters at runtime.
+    pub fn set_group_commit_linger(&self, max_linger: std::time::Duration, max_batch_commits: usize) {
+        let micros = max_linger.as_micros().min(u64::MAX as u128) as u64;
+        self.group_commit_linger_us
+            .store(micros, std::sync::atomic::Ordering::Relaxed);
+        self.group_commit_max_batch
+            .store(max_batch_commits.max(1), std::sync::atomic::Ordering::Relaxed);
+        self.linger_cv.notify_all();
+    }
+
+    /// Returns the current `(max_linger_duration, max_batch_commits)` setting.
+    pub fn group_commit_linger(&self) -> (std::time::Duration, usize) {
+        let micros = self
+            .group_commit_linger_us
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let max_batch = self
+            .group_commit_max_batch
+            .load(std::sync::atomic::Ordering::Relaxed);
+        (std::time::Duration::from_micros(micros), max_batch)
+    }
+
     fn lock_quiesced(&self) -> MutexGuard<'_, WalInner> {
         let mut inner = self.inner.lock();
-        while inner.flush_in_progress {
-            self.flush_cv.wait(&mut inner);
+        if inner.flush_in_progress {
+            inner.quiesce_waiters += 1;
+            self.linger_cv.notify_all();
+            while inner.flush_in_progress {
+                self.flush_cv.wait(&mut inner);
+            }
+            inner.quiesce_waiters -= 1;
         }
         inner
     }
@@ -1346,12 +1405,25 @@ impl WalManager {
                 }
                 inner.track_record(record);
             }
+            let is_commit_or_abort = matches!(
+                record.record_type,
+                LogRecordType::Commit | LogRecordType::Abort
+            );
+            if is_commit_or_abort {
+                let now = std::time::Instant::now();
+                inner.recent_commit_burst = inner
+                    .last_commit_at
+                    .is_some_and(|prev| now.duration_since(prev) <= GROUP_COMMIT_BURST_HORIZON);
+                inner.last_commit_at = Some(now);
+                inner.pending_commits += 1;
+            }
             inner.next_lsn = next_lsn;
             inner.pending.push(PendingRecord {
                 lsn: assigned_lsn,
                 segment_id: seg_id,
                 start,
                 len: rec_len as u32,
+                is_commit_or_abort,
             });
             GLOBAL_METRICS.record_wal_append();
             last_lsn = assigned_lsn;
@@ -1360,6 +1432,12 @@ impl WalManager {
             && let Some(e) = inner.txn_trackers.get_mut(&prev_tid)
         {
             e.last_lsn = prev_lsn_val;
+        }
+        let max_batch = self
+            .group_commit_max_batch
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if inner.flush_in_progress && inner.pending_commits >= max_batch {
+            self.linger_cv.notify_one();
         }
 
         if let Some(started) = append_started {
@@ -1461,13 +1539,32 @@ impl WalManager {
         });
 
         inner.track_record(record);
+        let is_commit_or_abort = matches!(
+            record.record_type,
+            LogRecordType::Commit | LogRecordType::Abort
+        );
+        if is_commit_or_abort {
+            let now = std::time::Instant::now();
+            inner.recent_commit_burst = inner
+                .last_commit_at
+                .is_some_and(|prev| now.duration_since(prev) <= GROUP_COMMIT_BURST_HORIZON);
+            inner.last_commit_at = Some(now);
+            inner.pending_commits += 1;
+        }
         inner.next_lsn = next_lsn;
         inner.pending.push(PendingRecord {
             lsn: assigned_lsn,
             segment_id: seg_id,
             start,
             len: rec_len as u32,
+            is_commit_or_abort,
         });
+        let max_batch = self
+            .group_commit_max_batch
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if inner.flush_in_progress && inner.pending_commits >= max_batch {
+            self.linger_cv.notify_one();
+        }
         GLOBAL_METRICS.record_wal_append();
         if let Some(started) = append_started {
             mitrdb_observe::record_profile_duration(
@@ -1551,6 +1648,27 @@ impl WalManager {
 
             // Become the group-commit leader.
             inner.flush_in_progress = true;
+
+            // Adaptive linger: when concurrent/burst commits are active, wait up to
+            // `linger_window` (or until `max_batch` commits accumulate) so multiple
+            // transactions share a single fsync without penalizing idle single-writer latency.
+            let (linger_window, max_batch) = self.group_commit_linger();
+            if !linger_window.is_zero()
+                && max_batch > 1
+                && inner.quiesce_waiters == 0
+                && inner.pending_commits < max_batch
+                && (inner.pending_commits > 1 || inner.recent_commit_burst)
+            {
+                let deadline = std::time::Instant::now() + linger_window;
+                while inner.pending_commits < max_batch && inner.quiesce_waiters == 0 {
+                    let rem = deadline.saturating_duration_since(std::time::Instant::now());
+                    if rem.is_zero() {
+                        break;
+                    }
+                    self.linger_cv.wait_for(&mut inner, rem);
+                }
+            }
+
             let latest_appended_lsn = inner.next_lsn.saturating_sub(1);
             let flush_target = target_lsn.max(latest_appended_lsn);
 
@@ -1586,7 +1704,13 @@ impl WalManager {
                 Err(e) => {
                     let drained_bytes: u64 =
                         batch.drained_records.iter().map(|p| p.len as u64).sum();
+                    let restored_commits: usize = batch
+                        .drained_records
+                        .iter()
+                        .filter(|p| p.is_commit_or_abort)
+                        .count();
                     inner.pending_base = inner.pending_base.saturating_sub(drained_bytes);
+                    inner.pending_commits += restored_commits;
 
                     let current_records = std::mem::take(&mut inner.pending);
                     inner.pending = batch.drained_records;
@@ -1656,6 +1780,11 @@ impl WalManager {
         std::mem::swap(&mut inner.pending_bytes, &mut batch_arena);
 
         let drained_records: Vec<PendingRecord> = inner.pending.drain(0..drained_count).collect();
+        let drained_commits: usize = drained_records
+            .iter()
+            .filter(|p| p.is_commit_or_abort)
+            .count();
+        inner.pending_commits = inner.pending_commits.saturating_sub(drained_commits);
         let total_bytes: u64 = drained_records.iter().map(|p| p.len as u64).sum();
         inner.pending_base += total_bytes;
 
