@@ -172,7 +172,7 @@ Status tracker. `[x]` = done and measured/tested, `[ ]` = pending.
   - write_mark_real 4T (measured): median OLD 148763 vs NEW 129950 ops/s (-12.6%), par spread OLD 79k-201k, NEW 54k-444k. Inconclusive (noise), regression nahi maana. Andaza: WAL lock contention se variance. Tight number ke liye T=1/T=2 + 30 round baaki.
 - [x] F4. clippy clean: cargo clippy --workspace --release: 7 warnings (6 needless_borrow in exec, 1 bool_comparison in query) fixed, now 0 warnings (measured)
 - [x] F5. DONE (docs updated, 3 unverified lines pinned by value_limit_probe2.rs + page_nonunique.rs; old note: copy the 'Limits and numbers' section above into README + docs/LIMITATIONS.md first; drop the [verified]/[unverified] tags only after checking the unverified lines) (LIMITATIONS.md stale lines 7, 12, 23: DEFAULT, cascade, mitrdb_default reserved) Docs update: README Limits (Timestamp/Float native, DEFAULT, LIKE, composite), docs/ORM.md (types, default, on_delete, unique_together, OR/IN, aggregates), docs/LIMITATIONS.md (purani lines hatao)
-- [x] F6. ROADMAP [x] + git push origin anwedb-clean
+- [x] F6. ROADMAP [x] + git push origin main
 
 ## Session 5: default-session concurrency
 - [x] Default-session autocommit lock-free (`run_default_plan`, lib.rs): plain autocommit statement ab default_session mutex ke bina local txn slot pe chalta hai; BEGIN/COMMIT/ROLLBACK/SAVEPOINT/Checkpoint aur explicit txn purane path pe. default_session_concurrency 3 tests. Real disk btrfs, 4 cores, median: multi100 1/2/4/8 threads 5460/5400/5438/5171 -> 5511/7288/11940/14005 rows/s; single 79/74/77/74 -> 77/80/138/296 rows/s. Single-thread raw insert A/B 8 rounds alternating: batch 36160 vs 35277 rows/s, autocommit 12944 vs 13051 us = noise.

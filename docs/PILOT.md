@@ -1,7 +1,7 @@
 # MITRDB pilot rules (Mittr)
 
 Status: PILOT only. Experimental, single-node. PostgreSQL / YugabyteDB ka replacement nahi.
-CI: run #180 (commit 7eca40d, branch anwedb-clean): success (audit, test, deny). Baad ke commits docs-only hain, unka CI alag dekho.
+CI: run #180 (commit 7eca40d, branch main): success (audit, test, deny). Baad ke commits docs-only hain, unka CI alag dekho.
 
 Test hua (sab ek VM / ek disk config: QEMU, virsh destroy, directsync, ext4, 4 threads; har cut ek run):
 - Power-loss INSERT-only: 10 cuts. I/U/D soak: 4 cuts + ~100 min soak 1 cut (WAL 5 segments, 65141 ids). Multi-table txn + counter: 4 cuts. DDL loop (single thread): 4 cuts. Sab mein lost=0 phantom=0 (txn: torn=0; DDL: bad=0).
