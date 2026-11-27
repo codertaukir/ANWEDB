@@ -4,7 +4,7 @@
     clippy::type_complexity,
     unused_imports
 )]
-use mitrdb_server::{Server, val};
+use mitrdb_server::{ExecutionResult, Server, val};
 use std::path::PathBuf;
 
 fn dir(tag: &str) -> PathBuf {
@@ -103,5 +103,86 @@ fn execute_sql_params_binds_and_validates_counts() {
     // plain execute_sql must not accept placeholders
     assert!(s.execute_sql("INSERT INTO t VALUES ($1, 'z')").is_err());
     assert_eq!(t.find().count().unwrap(), 2);
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+#[test]
+fn execute_sql_params_supports_limit_and_offset() {
+    let d = dir("lim_off");
+    let s = open(&d);
+    let t = s.table("msgs");
+    t.sync("id int primary key, room int, body text").unwrap();
+    for id in 1..=6 {
+        t.insert(&[
+            ("id", val(id)),
+            ("room", val(if id <= 4 { 1 } else { 2 })),
+            ("body", val(format!("m{id}"))),
+        ])
+        .unwrap();
+    }
+
+    let ids_from = |sql: &str, params: &[mitrdb_server::Value]| -> Vec<i64> {
+        match s.execute_sql_params(sql, params).unwrap() {
+            ExecutionResult::Rows { rows, .. } => rows
+                .into_iter()
+                .map(|r| match r[0] {
+                    mitrdb_server::Value::Int64(n) => n,
+                    ref other => panic!("expected Int64, got {other:?}"),
+                })
+                .collect(),
+            other => panic!("expected Rows, got {other:?}"),
+        }
+    };
+
+    assert_eq!(
+        ids_from("SELECT id FROM msgs ORDER BY id ASC LIMIT $1", &[val(2)]),
+        vec![1, 2]
+    );
+    assert_eq!(
+        ids_from("SELECT id FROM msgs ORDER BY id ASC LIMIT $1", &[val(0)]),
+        Vec::<i64>::new()
+    );
+    assert_eq!(
+        ids_from("SELECT id FROM msgs ORDER BY id ASC OFFSET $1", &[val(4)]),
+        vec![5, 6]
+    );
+    assert_eq!(
+        ids_from(
+            "SELECT id FROM msgs WHERE room = $1 ORDER BY id DESC LIMIT $2 OFFSET $3",
+            &[val(1), val(2), val(1)],
+        ),
+        vec![3, 2]
+    );
+    assert_eq!(
+        ids_from(
+            "SELECT id FROM msgs WHERE room = $1 UNION ALL SELECT id FROM msgs WHERE room = $2 ORDER BY id ASC LIMIT $3 OFFSET $4",
+            &[val(1), val(2), val(2), val(3)],
+        ),
+        vec![4, 5]
+    );
+
+    assert!(s.execute_sql("SELECT id FROM msgs LIMIT $1").is_err());
+    assert!(s.execute_sql("SELECT id FROM msgs OFFSET $1").is_err());
+    assert!(
+        s.execute_sql_params("SELECT id FROM msgs LIMIT $1", &[val(-1)])
+            .is_err()
+    );
+    assert!(
+        s.execute_sql_params("SELECT id FROM msgs OFFSET $1", &[val(-5)])
+            .is_err()
+    );
+    assert!(
+        s.execute_sql_params("SELECT id FROM msgs LIMIT $1", &[val("2")])
+            .is_err()
+    );
+    assert!(
+        s.execute_sql_params("SELECT id FROM msgs LIMIT $1 OFFSET $2", &[val(2)])
+            .is_err()
+    );
+    assert!(
+        s.execute_sql_params("SELECT id FROM msgs LIMIT $1", &[val(2), val(1)])
+            .is_err()
+    );
+
     let _ = std::fs::remove_dir_all(&d);
 }

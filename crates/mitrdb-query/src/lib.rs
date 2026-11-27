@@ -630,8 +630,8 @@ pub enum Statement {
         having: Option<Expr>,
         order_by: Option<OrderByClause>,
         order_by_list: Vec<OrderByClause>,
-        limit: Option<usize>,
-        offset: Option<usize>,
+        limit: Option<LimitOffset>,
+        offset: Option<LimitOffset>,
         distinct: bool,
         join: Option<JoinClause>,
     },
@@ -640,8 +640,8 @@ pub enum Statement {
         right: Box<Statement>,
         all: bool,
         order_by_list: Vec<OrderByClause>,
-        limit: Option<usize>,
-        offset: Option<usize>,
+        limit: Option<LimitOffset>,
+        offset: Option<LimitOffset>,
     },
     Delete {
         table_name: String,
@@ -655,6 +655,56 @@ pub enum Statement {
     Savepoint(String),
     RollbackTo(String),
     ReleaseSavepoint(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LimitOffset {
+    Literal(usize),
+    Param(usize),
+}
+
+impl LimitOffset {
+    fn into_usize(self) -> usize {
+        match self {
+            LimitOffset::Literal(n) => n,
+            LimitOffset::Param(i) => unreachable!("unbound parameter ${} in LIMIT/OFFSET", i + 1),
+        }
+    }
+}
+
+fn bind_limit_offset(
+    clause: &mut Option<LimitOffset>,
+    clause_name: &str,
+    params: &[Value],
+    used: &mut [bool],
+) -> Result<()> {
+    if let Some(LimitOffset::Param(i)) = *clause {
+        let p = params.get(i).ok_or_else(|| {
+            Error::TransactionError(format!("Missing value for parameter ${}", i + 1))
+        })?;
+        let n = match p {
+            Value::Int64(n) => *n,
+            _ => {
+                return Err(Error::TransactionError(format!(
+                    "Parameter ${} must be a non-negative integer (used in {})",
+                    i + 1,
+                    clause_name
+                )));
+            }
+        };
+        if n < 0 {
+            return Err(Error::TransactionError(format!(
+                "Invalid {} value: {} (must be non-negative)",
+                clause_name, n
+            )));
+        }
+        let val = usize::try_from(n).map_err(|_| {
+            Error::TransactionError(format!("Invalid {} value: {}", clause_name, n))
+        })?;
+        used[i] = true;
+        *clause = Some(LimitOffset::Literal(val));
+    }
+    Ok(())
 }
 
 fn bind_value(v: &mut Value, params: &[Value], used: &mut [bool]) -> Result<()> {
@@ -742,13 +792,21 @@ impl Statement {
                     bind_expr(e, params, used)?;
                 }
             }
-            Statement::Select { filter, having, .. } => {
+            Statement::Select {
+                filter,
+                having,
+                limit,
+                offset,
+                ..
+            } => {
                 if let Some(e) = filter {
                     bind_expr(e, params, used)?;
                 }
                 if let Some(e) = having {
                     bind_expr(e, params, used)?;
                 }
+                bind_limit_offset(limit, "LIMIT", params, used)?;
+                bind_limit_offset(offset, "OFFSET", params, used)?;
             }
             Statement::Delete {
                 filter: Some(e), ..
@@ -756,9 +814,17 @@ impl Statement {
                 bind_expr(e, params, used)?;
             }
             Statement::Delete { filter: None, .. } => {}
-            Statement::Union { left, right, .. } => {
+            Statement::Union {
+                left,
+                right,
+                limit,
+                offset,
+                ..
+            } => {
                 left.bind_params(params, used)?;
                 right.bind_params(params, used)?;
+                bind_limit_offset(limit, "LIMIT", params, used)?;
+                bind_limit_offset(offset, "OFFSET", params, used)?;
             }
             Statement::Explain(inner) => inner.bind_params(params, used)?,
             _ => {}
@@ -1111,16 +1177,16 @@ impl QueryEngine {
                 let mut offset = None;
                 if let Some(off_pos) = Self::find_top_level_keyword(remainder, " OFFSET ") {
                     let off_str = remainder[off_pos + 8..].trim();
-                    if let Ok(n) = off_str.parse::<usize>() {
-                        offset = Some(n);
+                    if let Ok(val) = Self::parse_limit_offset_value(off_str, "OFFSET") {
+                        offset = Some(val);
                         remainder = remainder[..off_pos].trim();
                     }
                 }
                 let mut limit = None;
                 if let Some(lim_pos) = Self::find_top_level_keyword(remainder, " LIMIT ") {
                     let lim_str = remainder[lim_pos + 7..].trim();
-                    if let Ok(n) = lim_str.parse::<usize>() {
-                        limit = Some(n);
+                    if let Ok(val) = Self::parse_limit_offset_value(lim_str, "LIMIT") {
+                        limit = Some(val);
                         remainder = remainder[..lim_pos].trim();
                     }
                 }
@@ -1496,8 +1562,8 @@ impl QueryEngine {
                     right: Box::new(right_plan),
                     all,
                     order_by_list: sort_keys,
-                    limit,
-                    offset: offset.unwrap_or(0),
+                    limit: limit.map(LimitOffset::into_usize),
+                    offset: offset.map(LimitOffset::into_usize).unwrap_or(0),
                 })
             }
             Statement::Select {
@@ -1513,6 +1579,8 @@ impl QueryEngine {
                 distinct,
                 join,
             } => {
+                let limit = limit.map(LimitOffset::into_usize);
+                let offset = offset.map(LimitOffset::into_usize);
                 if let Some(join_clause) = join {
                     let left_schema =
                         self.catalog.get_table_schema(&table_name)?.ok_or_else(|| {
@@ -3822,20 +3890,14 @@ impl QueryEngine {
         let mut offset = None;
         if let Some(off_pos) = Self::find_top_level_keyword(remainder, " OFFSET ") {
             let off_str = remainder[off_pos + 8..].trim();
-            let n = off_str.parse::<usize>().map_err(|_| {
-                Error::TransactionError(format!("Invalid OFFSET value: {}", off_str))
-            })?;
-            offset = Some(n);
+            offset = Some(Self::parse_limit_offset_value(off_str, "OFFSET")?);
             remainder = remainder[..off_pos].trim();
         }
 
         let mut limit = None;
         if let Some(lim_pos) = Self::find_top_level_keyword(remainder, " LIMIT ") {
             let lim_str = remainder[lim_pos + 7..].trim();
-            let n = lim_str.parse::<usize>().map_err(|_| {
-                Error::TransactionError(format!("Invalid LIMIT value: {}", lim_str))
-            })?;
-            limit = Some(n);
+            limit = Some(Self::parse_limit_offset_value(lim_str, "LIMIT")?);
             remainder = remainder[..lim_pos].trim();
         }
 
@@ -4249,26 +4311,7 @@ impl QueryEngine {
             return Ok(Value::Bool(false));
         }
         if let Some(digits) = token.strip_prefix('$') {
-            if !PARAMS_ALLOWED.with(|f| f.get()) {
-                return Err(Error::TransactionError(
-                    "Parameter placeholders ($n) need parameter binding (execute_sql_params)"
-                        .to_string(),
-                ));
-            }
-            if digits.is_empty() || digits.len() > 6 || !digits.bytes().all(|b| b.is_ascii_digit())
-            {
-                return Err(Error::TransactionError(format!(
-                    "Invalid parameter placeholder: {}",
-                    token
-                )));
-            }
-            let n: usize = digits.parse().unwrap_or(0);
-            if n == 0 {
-                return Err(Error::TransactionError(
-                    "Parameters are numbered from $1".to_string(),
-                ));
-            }
-            return Ok(Value::Param(n - 1));
+            return Ok(Value::Param(Self::parse_param_index(token, digits)?));
         }
         if token.starts_with('\'') || token.starts_with('"') {
             let quote = token.chars().next().unwrap();
@@ -4311,5 +4354,39 @@ impl QueryEngine {
             "Invalid SQL literal: {}",
             token
         )))
+    }
+
+    fn parse_param_index(token: &str, digits: &str) -> Result<usize> {
+        if !PARAMS_ALLOWED.with(|f| f.get()) {
+            return Err(Error::TransactionError(
+                "Parameter placeholders ($n) need parameter binding (execute_sql_params)"
+                    .to_string(),
+            ));
+        }
+        if digits.is_empty() || digits.len() > 6 || !digits.bytes().all(|b| b.is_ascii_digit()) {
+            return Err(Error::TransactionError(format!(
+                "Invalid parameter placeholder: {}",
+                token
+            )));
+        }
+        let n: usize = digits.parse().unwrap_or(0);
+        if n == 0 {
+            return Err(Error::TransactionError(
+                "Parameters are numbered from $1".to_string(),
+            ));
+        }
+        Ok(n - 1)
+    }
+
+    fn parse_limit_offset_value(raw: &str, clause_name: &str) -> Result<LimitOffset> {
+        let trimmed = raw.trim();
+        if let Some(digits) = trimmed.strip_prefix('$') {
+            let idx = Self::parse_param_index(trimmed, digits)?;
+            return Ok(LimitOffset::Param(idx));
+        }
+        let n = trimmed.parse::<usize>().map_err(|_| {
+            Error::TransactionError(format!("Invalid {} value: {}", clause_name, trimmed))
+        })?;
+        Ok(LimitOffset::Literal(n))
     }
 }
