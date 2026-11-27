@@ -1896,19 +1896,20 @@ impl Executor {
                 offset,
             } => {
                 let left_res = self.exec_read_plan(*left, catalog, txn_mgr, tid)?;
-                let right_res = self.exec_read_plan(*right, catalog, txn_mgr, tid)?;
                 let left_rows = match left_res {
-                    ExecutionResult::Rows { rows, .. } => rows,
-                    _ => Vec::new(),
-                };
-                let right_rows = match right_res {
                     ExecutionResult::Rows { rows, .. } => rows,
                     _ => Vec::new(),
                 };
 
                 let columns: Vec<String> =
                     projection.iter().map(|p| p.output_name.clone()).collect();
-                let mut result_tuples = Vec::new();
+
+                if left_rows.is_empty() && join_type == JoinType::Inner {
+                    return Ok(ExecutionResult::Rows {
+                        columns,
+                        rows: Vec::new(),
+                    });
+                }
 
                 let eq_pairs: Vec<(usize, usize)> = join_conditions
                     .iter()
@@ -1921,6 +1922,34 @@ impl Executor {
                         .filter(|(_, _, op)| *op != mitrdb_query::CompareOp::Eq)
                         .copied()
                         .collect();
+
+                let right_rows = if eq_pairs.len() == 1 {
+                    let (l_col, r_col) = eq_pairs[0];
+                    if let Some(indexed_rows) = self.try_index_lookup_join_right(
+                        catalog,
+                        txn_mgr,
+                        tid,
+                        &right_schema,
+                        &right,
+                        &left_rows,
+                        l_col,
+                        r_col,
+                    )? {
+                        indexed_rows
+                    } else {
+                        match self.exec_read_plan(*right, catalog, txn_mgr, tid)? {
+                            ExecutionResult::Rows { rows, .. } => rows,
+                            _ => Vec::new(),
+                        }
+                    }
+                } else {
+                    match self.exec_read_plan(*right, catalog, txn_mgr, tid)? {
+                        ExecutionResult::Rows { rows, .. } => rows,
+                        _ => Vec::new(),
+                    }
+                };
+
+                let mut result_tuples = Vec::new();
 
                 let all_idx: Vec<usize> = (0..right_rows.len()).collect();
                 let no_match: [usize; 0] = [];
@@ -3285,6 +3314,157 @@ impl Executor {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
+    fn try_index_lookup_join_right(
+        &self,
+        catalog: &Catalog,
+        txn_mgr: &TxnManager,
+        txn_id: TxnId,
+        right_schema: &TableSchema,
+        right_plan: &PhysicalPlan,
+        left_rows: &[Vec<Value>],
+        l_col: usize,
+        r_col: usize,
+    ) -> Result<Option<Vec<Vec<Value>>>> {
+        const INDEX_JOIN_MAX_KEYS: usize = 256;
+
+        let right_filter = match right_plan {
+            PhysicalPlan::SeqScan {
+                schema,
+                filter,
+                sort_keys,
+                limit: None,
+                offset: 0,
+                ..
+            } if schema.table_id == right_schema.table_id && sort_keys.is_empty() => {
+                filter.as_ref()
+            }
+            _ => return Ok(None),
+        };
+
+        let pk_idx = Self::primary_key_index(right_schema);
+        let is_pk = r_col == pk_idx;
+        let sec_index = if is_pk {
+            None
+        } else {
+            let col_name = &right_schema.columns[r_col].name;
+            let mut indexes = catalog.get_table_indexes(right_schema.table_id);
+            indexes.sort_by_key(|i| i.index_id);
+            indexes
+                .into_iter()
+                .find(|idx| &idx.column_name == col_name)
+        };
+
+        if !is_pk && sec_index.is_none() {
+            return Ok(None);
+        }
+
+        let mut unique_keys: Vec<Value> = Vec::new();
+        let mut seen_keys: HashSet<Value> = HashSet::new();
+        for lrow in left_rows {
+            let val = &lrow[l_col];
+            if matches!(val, Value::Null) {
+                continue;
+            }
+            if seen_keys.insert(val.clone()) {
+                if unique_keys.len() >= INDEX_JOIN_MAX_KEYS {
+                    return Ok(None);
+                }
+                unique_keys.push(val.clone());
+            }
+        }
+
+        Self::acquire_table_shared(txn_mgr, txn_id, right_schema.table_id)?;
+        if unique_keys.is_empty() {
+            return Ok(Some(Vec::new()));
+        }
+
+        let table_tree = catalog.table_tree(right_schema.table_id).ok_or_else(|| {
+            Error::TransactionError("Table storage B+Tree not initialized".to_string())
+        })?;
+        let is_serializable = txn_mgr.isolation_level(txn_id) == Some(IsolationLevel::Serializable);
+
+        let mut matched_rows: Vec<(Vec<u8>, Vec<Value>)> = Vec::new();
+        let mut result_rows: Vec<Vec<Value>> = Vec::new();
+        let mut seen_pks: HashSet<Vec<u8>> = HashSet::new();
+
+        if is_pk {
+            for key in &unique_keys {
+                let range = KeyRange::point(key.to_key_bytes());
+                if is_serializable {
+                    txn_mgr.lock_range(txn_id, &table_tree, &range)?;
+                }
+                let entries = txn_mgr.range_scan(txn_id, &table_tree, &range)?;
+                for (pk_bytes, row_bytes) in entries {
+                    if !seen_pks.insert(pk_bytes.clone()) {
+                        continue;
+                    }
+                    let tuple =
+                        Tuple::deserialize_for_table(&row_bytes, right_schema.columns.len())?;
+                    if right_filter.is_none_or(|bf| bf.evaluate(&tuple)) {
+                        if is_serializable {
+                            matched_rows.push((pk_bytes, tuple.clone()));
+                        }
+                        result_rows.push(tuple);
+                    }
+                }
+            }
+        } else if let Some(idx_meta) = sec_index {
+            let idx_tree = catalog.index_tree(idx_meta.index_id).ok_or_else(|| {
+                Error::TransactionError("Secondary index B+Tree not initialized".to_string())
+            })?;
+            for key in &unique_keys {
+                let range = KeyRange::point(key.to_key_bytes());
+                if is_serializable {
+                    txn_mgr.lock_range(txn_id, &idx_tree, &range)?;
+                }
+                let idx_entries = txn_mgr.range_scan(txn_id, &idx_tree, &range)?;
+                for (idx_key, encoded_pks) in idx_entries {
+                    if idx_key.first() == Some(&OVERFLOW_KEY_TAG) {
+                        continue;
+                    }
+                    let pks = Self::idx_decode_entry(
+                        txn_mgr,
+                        txn_id,
+                        &idx_tree,
+                        &idx_key,
+                        &encoded_pks,
+                        None,
+                    )?;
+                    for pk_bytes in pks {
+                        if !seen_pks.insert(pk_bytes.clone()) {
+                            continue;
+                        }
+                        if let Some(row_bytes) = txn_mgr.get(txn_id, &table_tree, &pk_bytes)? {
+                            let tuple = Tuple::deserialize_for_table(
+                                &row_bytes,
+                                right_schema.columns.len(),
+                            )?;
+                            if right_filter.is_none_or(|bf| bf.evaluate(&tuple)) {
+                                if is_serializable {
+                                    matched_rows.push((pk_bytes, tuple.clone()));
+                                }
+                                result_rows.push(tuple);
+                            }
+                        }
+                    }
+                }
+            }
+            if is_serializable && !matched_rows.is_empty() {
+                Self::lock_matched_row_keys(
+                    catalog,
+                    txn_mgr,
+                    txn_id,
+                    right_schema,
+                    &table_tree,
+                    &matched_rows,
+                )?;
+            }
+        }
+
+        Ok(Some(result_rows))
+    }
+
     fn exec_index_scan(
         &self,
         catalog: &Catalog,

@@ -113,3 +113,72 @@ fn probe_join_timing() {
         println!("PROBE n={n} left rows={r} took={:?}", t.elapsed());
     }
 }
+
+#[test]
+fn index_assisted_join_pk_and_secondary_index_with_pushdown() {
+    let d = std::env::temp_dir().join(format!("mitrdb_idx_join_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(&d).unwrap();
+    let s = Server::open(d.join("t.db"), d.join("t.wal"), 256)
+        .unwrap()
+        .0;
+
+    s.execute_sql("CREATE TABLE users (id INT PRIMARY KEY, org INT, active INT, name TEXT)")
+        .unwrap();
+    s.execute_sql("CREATE INDEX idx_users_org ON users (org)").unwrap();
+    s.execute_sql("CREATE TABLE msgs (id INT PRIMARY KEY, room INT, user_id INT, org INT, body TEXT)")
+        .unwrap();
+
+    // Populate 400 users so outer query with <= 256 distinct keys exercises index-lookup join
+    for chunk in (1..=400i64).collect::<Vec<_>>().chunks(100) {
+        let vals: Vec<String> = chunk
+            .iter()
+            .map(|id| format!("({id}, {}, {}, 'u{id}')", id % 50, if id % 2 == 0 { 1 } else { 0 }))
+            .collect();
+        s.execute_sql(&format!("INSERT INTO users VALUES {}", vals.join(",")))
+            .unwrap();
+    }
+
+    s.execute_sql(
+        "INSERT INTO msgs VALUES          (1, 10, 2, 2, 'm1'),          (2, 10, 3, 3, 'm2'),          (3, 10, 999, 99, 'orphan'),          (4, 10, NULL, NULL, 'null_fk'),          (5, 20, 4, 4, 'other_room')",
+    )
+    .unwrap();
+
+    // 1. PK index-assisted INNER JOIN + pushed-down left & right filters
+    assert_eq!(
+        rows(
+            &s,
+            "SELECT msgs.id, users.name FROM msgs JOIN users ON msgs.user_id = users.id WHERE msgs.room = 10 AND users.active = 1"
+        ),
+        1
+    );
+
+    // 2. PK index-assisted LEFT JOIN keeps orphan & NULL foreign key rows
+    assert_eq!(
+        rows(
+            &s,
+            "SELECT msgs.id, users.name FROM msgs LEFT JOIN users ON msgs.user_id = users.id WHERE msgs.room = 10"
+        ),
+        4
+    );
+
+    // 3. Secondary index-assisted INNER JOIN (multiple users per org) + pushed-down right filter
+    assert_eq!(
+        rows(
+            &s,
+            "SELECT msgs.id, users.name FROM msgs JOIN users ON msgs.org = users.org WHERE msgs.room = 10 AND users.active = 1"
+        ),
+        8
+    );
+
+    // 4. Empty outer result short-circuits cleanly
+    assert_eq!(
+        rows(
+            &s,
+            "SELECT msgs.id, users.name FROM msgs JOIN users ON msgs.user_id = users.id WHERE msgs.room = 9999"
+        ),
+        0
+    );
+
+    let _ = std::fs::remove_dir_all(&d);
+}
