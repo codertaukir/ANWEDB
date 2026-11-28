@@ -1407,6 +1407,90 @@ impl BPlusTree {
         Ok(out)
     }
 
+    pub fn range_scan_bounds_limited(&self, range: &KeyRange, limit: usize) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        if range.is_empty() || limit == 0 {
+            return Ok(Vec::new());
+        }
+        let root_wait_started = std::time::Instant::now();
+        let root_guard = self.root_page_id.read();
+        GLOBAL_METRICS.record_btree_root_wait_ns(
+            root_wait_started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
+        );
+        let mut leaf = match &range.start {
+            KeyBound::Included(sk) | KeyBound::Excluded(sk) => {
+                self.find_leaf_page(*root_guard, sk)?
+            }
+            KeyBound::Unbounded => self.find_leftmost_leaf(*root_guard)?,
+        };
+        let mut out = Vec::new();
+        loop {
+            let next_id = leaf.next_leaf_page_id;
+            for (k, v) in leaf.keys.into_iter().zip(leaf.values) {
+                match &range.start {
+                    KeyBound::Included(sk) if k.as_slice() < sk.as_slice() => continue,
+                    KeyBound::Excluded(sk) if k.as_slice() <= sk.as_slice() => continue,
+                    _ => {}
+                }
+                match &range.end {
+                    KeyBound::Included(ek) if k.as_slice() > ek.as_slice() => return Ok(out),
+                    KeyBound::Excluded(ek) if k.as_slice() >= ek.as_slice() => return Ok(out),
+                    _ => {}
+                }
+                out.push((k, v));
+                if out.len() >= limit {
+                    return Ok(out);
+                }
+            }
+            if next_id == INVALID_PAGE_ID {
+                break;
+            }
+            leaf = self.read_node(next_id)?;
+        }
+        Ok(out)
+    }
+
+    pub fn range_scan_bounds_rev_limited(&self, range: &KeyRange, limit: usize) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        if range.is_empty() || limit == 0 {
+            return Ok(Vec::new());
+        }
+        let root_wait_started = std::time::Instant::now();
+        let root_guard = self.root_page_id.read();
+        GLOBAL_METRICS.record_btree_root_wait_ns(
+            root_wait_started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
+        );
+        let mut leaf = match &range.end {
+            KeyBound::Included(ek) | KeyBound::Excluded(ek) => {
+                self.find_leaf_page(*root_guard, ek)?
+            }
+            KeyBound::Unbounded => self.find_rightmost_leaf(*root_guard)?,
+        };
+        let mut out = Vec::new();
+        loop {
+            let prev_id = leaf.prev_leaf_page_id;
+            for (k, v) in leaf.keys.into_iter().zip(leaf.values).rev() {
+                match &range.end {
+                    KeyBound::Included(ek) if k.as_slice() > ek.as_slice() => continue,
+                    KeyBound::Excluded(ek) if k.as_slice() >= ek.as_slice() => continue,
+                    _ => {}
+                }
+                match &range.start {
+                    KeyBound::Included(sk) if k.as_slice() < sk.as_slice() => return Ok(out),
+                    KeyBound::Excluded(sk) if k.as_slice() <= sk.as_slice() => return Ok(out),
+                    _ => {}
+                }
+                out.push((k, v));
+                if out.len() >= limit {
+                    return Ok(out);
+                }
+            }
+            if prev_id == INVALID_PAGE_ID {
+                break;
+            }
+            leaf = self.read_node(prev_id)?;
+        }
+        Ok(out)
+    }
+
     pub fn insert(&self, key: &[u8], value: &[u8]) -> Result<()> {
         let mut prev_lsn = INVALID_LSN;
         self.insert_logged(0, &mut prev_lsn, key, value)

@@ -1742,6 +1742,34 @@ impl TxnManager {
         self.range_scan_directed(txn_id, tree, range, false)
     }
 
+    pub fn range_scan_directed_limited(
+        &self,
+        txn_id: TxnId,
+        tree: &Arc<BPlusTree>,
+        range: &KeyRange,
+        descending: bool,
+        limit: usize,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let cutoff = if descending {
+            tree.range_scan_bounds_rev_limited(range, limit)?
+        } else {
+            tree.range_scan_bounds_limited(range, limit)?
+        };
+        if cutoff.len() < limit {
+            return self.range_scan_directed(txn_id, tree, range, descending);
+        }
+        let last_key = cutoff.last().unwrap().0.clone();
+        let truncated = if descending {
+            KeyRange::new(KeyBound::Included(last_key), range.end.clone())
+        } else {
+            KeyRange::new(range.start.clone(), KeyBound::Included(last_key))
+        };
+        self.range_scan_directed(txn_id, tree, &truncated, descending)
+    }
+
     pub fn range_scan_directed(
         &self,
         txn_id: TxnId,

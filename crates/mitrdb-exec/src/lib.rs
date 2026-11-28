@@ -3941,7 +3941,12 @@ impl Executor {
         let mut skipped = 0usize;
 
         'range_loop: for range in ordered_ranges {
-            let idx_entries = txn_mgr.range_scan_directed(txn_id, &idx_tree, range, descending)?;
+            let limit_for_scan = limit.map(|l| l.saturating_add(offset).saturating_add(512));
+            let idx_entries = if let Some(l) = limit_for_scan {
+                txn_mgr.range_scan_directed_limited(txn_id, &idx_tree, range, descending, l)?
+            } else {
+                txn_mgr.range_scan_directed(txn_id, &idx_tree, range, descending)?
+            };
             for (idx_key, encoded_pks) in idx_entries {
                 if idx_key.first() == Some(&OVERFLOW_KEY_TAG) {
                     continue;
