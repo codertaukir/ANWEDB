@@ -14,6 +14,7 @@ use mitrdb_exec::ExecutionResult;
 use mitrdb_query::Value;
 
 use crate::{Error, Result, Server};
+use mitrdb_storage::OverflowDescriptorV2;
 
 const PROTOCOL_VERSION: &str = "MITRDB/1";
 const DEFAULT_MAX_CONNECTIONS: usize = 128;
@@ -550,6 +551,65 @@ fn serve_stream<S: Read + Write>(
                 Err(err) => {
                     write_response(stream, error_json("SQL_ERROR", &err.to_string()), config.max_frame_bytes)?;
                 }
+            }
+            continue;
+        }
+        if request.to_ascii_uppercase().starts_with("BLOB_DOWNLOAD_RANGE ") || request.to_ascii_uppercase().starts_with("BLOB_DOWNLOAD_STREAM ") {
+            let parts: Vec<&str> = request.split_whitespace().collect();
+            let parsed: Option<(u64, u64, u64, u64, u64)> = if parts[0].eq_ignore_ascii_case("BLOB_DOWNLOAD_RANGE") && parts.len() == 6 {
+                match (parts[1].parse::<u64>().ok(), parts[2].parse::<u64>().ok(), parts[3].parse::<u64>().ok(), parts[4].parse::<u64>().ok(), parts[5].parse::<u64>().ok()) {
+                    (Some(h), Some(tot), Some(crc), Some(off), Some(ln)) => Some((h, tot, crc, off, ln)),
+                    _ => None,
+                }
+            } else if parts[0].eq_ignore_ascii_case("BLOB_DOWNLOAD_STREAM") && parts.len() == 4 {
+                match (parts[1].parse::<u64>().ok(), parts[2].parse::<u64>().ok(), parts[3].parse::<u64>().ok()) {
+                    (Some(h), Some(tot), Some(crc)) => Some((h, tot, crc, 0, tot)),
+                    _ => None,
+                }
+            } else { None };
+            let (head, total, crc64, off, len) = match parsed {
+                Some(v) => v,
+                None => {
+                    write_response(stream, error_json("BAD_DOWNLOAD_ARGS", "expected BLOB_DOWNLOAD_RANGE head total crc offset len or BLOB_DOWNLOAD_STREAM head total crc"), config.max_frame_bytes)?;
+                    continue;
+                }
+            };
+            if crc64 > u32::MAX as u64 {
+                write_response(stream, error_json("BAD_DOWNLOAD_ARGS", "crc out of range"), config.max_frame_bytes)?;
+                continue;
+            }
+            if off.checked_add(len).is_none_or(|end| end > total) {
+                write_response(stream, error_json("OUT_OF_RANGE", "offset+len exceeds total_len"), config.max_frame_bytes)?;
+                continue;
+            }
+            let desc = OverflowDescriptorV2 { head_page_id: head, total_len: total, payload_crc32c: crc64 as u32 };
+            if let Err(err) = server.open_blob_read(session_id, desc) {
+                write_response(stream, error_json("SQL_ERROR", &err.to_string()), config.max_frame_bytes)?;
+                continue;
+            }
+            let chunks = len.div_ceil(65536);
+            write_response(stream, format!(r#"{{"status":"ok","result":"BLOB_DOWNLOAD_START","bytes":{},"chunks":{}}}"#, len, chunks), config.max_frame_bytes)?;
+            let mut cur = off;
+            let mut remain = len;
+            let mut dl_err: Option<String> = None;
+            while remain > 0 {
+                let step = std::cmp::min(remain, 65536) as usize;
+                match server.read_blob_range(session_id, cur, step) {
+                    Ok(bytes) => {
+                        if let Err(e) = write_frame(stream, &bytes, config.max_frame_bytes) {
+                            dl_err = Some(e.to_string());
+                            break;
+                        }
+                        cur += step as u64;
+                        remain -= step as u64;
+                    }
+                    Err(err) => { dl_err = Some(err.to_string()); break; }
+                }
+            }
+            if let Some(msg) = dl_err {
+                write_response(stream, error_json("SQL_ERROR", &msg), config.max_frame_bytes)?;
+            } else {
+                write_response(stream, format!(r#"{{"status":"ok","result":"BLOB_DOWNLOAD_END","bytes":{}}}"#, len), config.max_frame_bytes)?;
             }
             continue;
         }
