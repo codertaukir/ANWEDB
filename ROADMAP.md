@@ -124,7 +124,7 @@ Base: local main d7f096d + uncommitted (overflow cap 256 KB, chain hop limit 128
 
 ### Phase A: Streaming BLOB engine (doc M1, size 256 KB -> 100 MB+)
 - [x] A1. `TUPLE_TAG_OVERFLOW_BLOB = 9` + 20-byte `OverflowDescriptor` v2 (`total_len` u64). Purane tags 6/7/8 aur 16-byte format untouched (backward compat test). Done: `OverflowDescriptorV2` (20 B, u64 len) + tag 9, `collect_tuple_overflow_heads` v2 aware, 5 unit tests (`blob_descriptor_tests`); saaf HEAD par storage/exec/txn tests pass (storage lib 59). Tag 9 abhi koi likhta nahi (A2/A9)
-- [ ] A2. `BlobWriter` (`io::Write`): 64 KB chunks, exact-fit 4 KB pages, har page WAL-logged (full body + zero undo), 4-byte next-pointer patch record, running CRC32C, flat RAM (< 1 MB heap)
+- [x] A2. `BlobWriter` (`io::Write`): 64 KB chunks, exact-fit 4 KB pages, har page WAL-logged (full body + zero undo), 4-byte next-pointer patch record, running CRC32C, flat RAM (< 1 MB heap). Done: `blob.rs` `BlobWriter` (1 page buffered, WAL full-body + zero-undo per page, 4-byte next patch record, running CRC32C, max_len guard, `finish()`/`abandon()` return page list for rollback). 6 unit tests incl. 4 MB through a 32-frame pool, exact-fit page count, WAL path. RSS NOT measured yet (B5). Page 0 is the chain terminator (writer refuses it)
 - [ ] A3. `BlobReader` (`Read` + `Seek`) + `read_range(offset, len)`: per-page CRC + end-to-end CRC32C, hop limit hatao (length based check)
 - [ ] A4. `UndoAction::OverflowPages(Vec<PageId>)`: rollback / `rollback_to_mark` / `abort` par adhuri chain free; `stage_free_overflow_chain` + `collect_overflow_chain_pages` hop limit fix
 - [ ] A5. Small value proof: <= 2048 byte TEXT/BYTES = 0 overflow pages (test: 30-byte message, page count before/after)
