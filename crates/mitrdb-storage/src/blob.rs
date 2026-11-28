@@ -4,7 +4,7 @@
 //! the previous page. Rollback is the caller's job: use `BlobFinished::pages` / `abandon`.
 
 use std::io::{self, Read, Seek, SeekFrom, Write};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use mitrdb_common::{Error, INVALID_LSN, Lsn, PAGE_HEADER_SIZE, PAGE_SIZE, PageId, Result, TxnId};
 
@@ -37,6 +37,8 @@ pub struct BlobWriter {
     total: u64,
     max_len: u64,
     failed: bool,
+    start_lsn: Lsn,
+    tracker: Option<Arc<Mutex<Vec<PageId>>>>,
 }
 
 fn to_io(e: Error) -> io::Error {
@@ -62,7 +64,20 @@ impl BlobWriter {
             total: 0,
             max_len,
             failed: false,
+            start_lsn,
+            tracker: None,
         }
+    }
+
+    /// Share the list of allocated pages with the transaction, so rollback / abort can
+    /// free them even if the writer is dropped mid-stream.
+    pub fn with_tracker(mut self, tracker: Arc<Mutex<Vec<PageId>>>) -> Self {
+        self.tracker = Some(tracker);
+        self
+    }
+
+    pub fn start_lsn(&self) -> Lsn {
+        self.start_lsn
     }
 
     pub fn bytes_written(&self) -> u64 {
@@ -80,6 +95,26 @@ impl BlobWriter {
     /// Give up: returns every allocated page so the caller can free them.
     pub fn abandon(self) -> Vec<PageId> {
         self.pages
+    }
+
+    /// Like `finish` but keeps the writer (and its `last_lsn`) readable afterwards, even
+    /// when the last page fails. Call it once.
+    pub fn finish_descriptor(&mut self) -> Result<OverflowDescriptorV2> {
+        if self.failed {
+            return Err(Error::Io("blob writer already failed".to_string()));
+        }
+        if !self.buf.is_empty() {
+            if let Err(e) = self.flush_page() {
+                self.failed = true;
+                return Err(e);
+            }
+        }
+        let crc = std::mem::take(&mut self.crc).finalize();
+        Ok(OverflowDescriptorV2 {
+            head_page_id: self.pages.first().copied().map_or(0, u64::from),
+            total_len: self.total,
+            payload_crc32c: crc,
+        })
     }
 
     /// Flush the last partial page. An empty blob returns head 0, len 0, crc 0.
@@ -131,6 +166,9 @@ impl BlobWriter {
         // Track first: from here on rollback must be able to free this page.
         let prev = self.pages.last().copied();
         self.pages.push(pid);
+        if let Some(t) = &self.tracker {
+            t.lock().unwrap_or_else(|e| e.into_inner()).push(pid);
+        }
 
         let mut body = vec![0u8; BODY_LEN];
         body[0] = NODE_KIND_OVERFLOW;
@@ -187,6 +225,30 @@ impl BlobWriter {
             Ok(())
         })
     }
+}
+
+/// Mark blob pages free and stage them for reuse (same effect as `stage_free_overflow_chain`,
+/// but from an explicit page list: no chain walk, no hop limit, works for half-written chains).
+pub fn free_blob_pages(bpm: &BufferPoolManager, txn_id: TxnId, pages: &[PageId]) -> Result<usize> {
+    let mut freed = 0;
+    for &pid in pages {
+        if pid == 0 {
+            continue;
+        }
+        if bpm.fetch_page(pid).is_ok() {
+            let _ = bpm.update_page_data(pid, |page| {
+                page.set_page_type(crate::page::PAGE_TYPE_RAW);
+                page.set_flags(crate::page::PAGE_FLAG_FREE);
+                page.data[PAGE_HEADER_SIZE] = crate::btree::NODE_KIND_FREE;
+                page.update_checksum();
+                Ok(())
+            });
+            let _ = bpm.unpin_page(pid, true);
+        }
+        bpm.stage_free_page(txn_id, pid)?;
+        freed += 1;
+    }
+    Ok(freed)
 }
 
 impl Write for BlobWriter {
@@ -818,6 +880,41 @@ mod reader_tests {
         assert!(BlobReader::open(bpm.clone(), bad(0, 10)).is_err());
         assert!(BlobReader::open(bpm.clone(), bad(5, 0)).is_err());
         assert!(BlobReader::open(bpm.clone(), bad(u64::MAX, 10)).is_err());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+#[cfg(test)]
+mod tracker_tests {
+    use super::*;
+    use crate::disk::DiskManager;
+    use crate::page::{PAGE_FLAG_FREE, PAGE_TYPE_RAW};
+
+    #[test]
+    fn tracker_sees_every_page_and_free_marks_them() {
+        let dir = std::env::temp_dir().join(format!("mitrdb_blob_trk_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let disk = Arc::new(DiskManager::open_or_create(dir.join("t.db")).unwrap());
+        let bpm = Arc::new(BufferPoolManager::new(disk, 64));
+        let (p0, _) = bpm.new_page(PAGE_TYPE_RAW).unwrap();
+        bpm.unpin_page(p0, true).unwrap();
+        assert_eq!(p0, 0);
+
+        let tracker = Arc::new(Mutex::new(Vec::new()));
+        let mut w = BlobWriter::new(bpm.clone(), None, 1, INVALID_LSN, u64::MAX)
+            .with_tracker(tracker.clone());
+        w.write_all(&vec![7u8; 20_000]).unwrap(); // 4 full pages flushed, rest buffered
+        assert_eq!(tracker.lock().unwrap().as_slice(), w.pages());
+        drop(w);
+        let pages = tracker.lock().unwrap().clone();
+        assert_eq!(pages.len(), 4);
+        assert_eq!(free_blob_pages(&bpm, 1, &pages).unwrap(), 4);
+        for pid in pages {
+            let p = bpm.fetch_page(pid).unwrap();
+            bpm.unpin_page(pid, false).unwrap();
+            assert!(p.flags() & PAGE_FLAG_FREE != 0);
+            assert_eq!(p.page_type(), PAGE_TYPE_RAW);
+        }
         let _ = std::fs::remove_dir_all(dir);
     }
 }

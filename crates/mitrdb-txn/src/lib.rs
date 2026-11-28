@@ -7,8 +7,8 @@ use std::sync::{Arc, OnceLock};
 use mitrdb_common::{Error, INVALID_LSN, Lsn, PAGE_HEADER_SIZE, PAGE_SIZE, PageId, Result, TxnId};
 use mitrdb_observe::GLOBAL_METRICS;
 pub use mitrdb_storage::{
-    BPlusTree, BufferPoolManager, KeyBound, KeyRange, LogRecord, OverflowDescriptor,
-    WalManager, collect_tuple_overflow_heads, read_overflow_chain, stage_free_overflow_chain,
+    BPlusTree, BufferPoolManager, KeyBound, KeyRange, LogRecord, OverflowDescriptor, WalManager,
+    collect_tuple_overflow_heads, read_overflow_chain, stage_free_overflow_chain,
     write_overflow_chain,
 };
 
@@ -983,6 +983,10 @@ pub enum UndoAction {
     },
     OverflowChain {
         head_page_id: PageId,
+    },
+    /// Pages of a streaming blob, shared with the `BlobWriter` that is filling them.
+    OverflowPages {
+        pages: Arc<std::sync::Mutex<Vec<PageId>>>,
     },
 }
 
@@ -2172,13 +2176,7 @@ impl TxnManager {
             ctx.last_lsn
         };
 
-        let desc = write_overflow_chain(
-            bpm,
-            self.wal.as_deref(),
-            txn_id,
-            &mut last_lsn,
-            payload,
-        )?;
+        let desc = write_overflow_chain(bpm, self.wal.as_deref(), txn_id, &mut last_lsn, payload)?;
 
         {
             let mut txns = self.txn_shard(txn_id).lock();
@@ -2191,6 +2189,73 @@ impl TxnManager {
             });
         }
         Ok(desc)
+    }
+
+    /// Start a streaming BLOB write inside `txn_id`. Its pages are registered for undo
+    /// right away, so rollback, abort and statement rollback free them even when the writer
+    /// is dropped mid-stream. The writer continues the transaction's `prev_lsn` chain, so the
+    /// transaction must not log other records until `finish_blob_write`.
+    pub fn begin_blob_write(
+        &self,
+        txn_id: TxnId,
+        max_len: u64,
+    ) -> Result<mitrdb_storage::BlobWriter> {
+        let bpm = self.bpm.as_ref().ok_or_else(|| {
+            Error::TransactionError("BufferPoolManager not attached to TxnManager".to_string())
+        })?;
+        let tracker = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let start_lsn = {
+            let mut txns = self.txn_shard(txn_id).lock();
+            let ctx = txns.get_mut(&txn_id).ok_or_else(|| {
+                Error::TransactionError(format!("Unknown transaction ID {}", txn_id))
+            })?;
+            if ctx.state != TxnState::Active {
+                return Err(Error::TransactionError(format!(
+                    "Transaction {} is not active",
+                    txn_id
+                )));
+            }
+            ctx.write_set.push(UndoAction::OverflowPages {
+                pages: tracker.clone(),
+            });
+            ctx.last_lsn
+        };
+        Ok(
+            mitrdb_storage::BlobWriter::new(
+                bpm.clone(),
+                self.wal.clone(),
+                txn_id,
+                start_lsn,
+                max_len,
+            )
+            .with_tracker(tracker),
+        )
+    }
+
+    /// Flush the last page and return the descriptor. Errors if the transaction logged
+    /// other records while the writer was open (the caller must roll back).
+    pub fn finish_blob_write(
+        &self,
+        txn_id: TxnId,
+        mut writer: mitrdb_storage::BlobWriter,
+    ) -> Result<mitrdb_storage::OverflowDescriptorV2> {
+        let start_lsn = writer.start_lsn();
+        let result = writer.finish_descriptor();
+        let end_lsn = writer.last_lsn();
+        let mut txns = self.txn_shard(txn_id).lock();
+        let ctx = txns.get_mut(&txn_id).ok_or_else(|| {
+            Error::TransactionError(format!("Unknown transaction ID {}", txn_id))
+        })?;
+        if end_lsn != start_lsn {
+            if ctx.last_lsn != start_lsn {
+                return Err(Error::TransactionError(
+                    "transaction logged other records while a blob write was open; roll it back"
+                        .to_string(),
+                ));
+            }
+            ctx.last_lsn = end_lsn;
+        }
+        result
     }
 
     pub fn read_overflow_chain(&self, desc: &OverflowDescriptor) -> Result<Vec<u8>> {
@@ -2904,6 +2969,14 @@ impl TxnManager {
                         "statement rollback does not support page-slice undo".to_string(),
                     ));
                 }
+                UndoAction::OverflowPages { pages } => {
+                    if let Some(ref bpm) = self.bpm {
+                        let list = pages.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                        let _ = mitrdb_storage::free_blob_pages(bpm, txn_id, &list);
+                        let _ = bpm.finalize_free_pages(txn_id);
+                    }
+                    undone = true;
+                }
                 UndoAction::OverflowChain { head_page_id } => {
                     if let Some(ref bpm) = self.bpm {
                         let _ = stage_free_overflow_chain(bpm, txn_id, head_page_id);
@@ -3078,6 +3151,12 @@ impl TxnManager {
                         }
                     } else {
                         drop(_op_guard);
+                    }
+                }
+                UndoAction::OverflowPages { pages } => {
+                    if let Some(ref bpm) = self.bpm {
+                        let list = pages.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                        let _ = mitrdb_storage::free_blob_pages(bpm, txn_id, &list);
                     }
                 }
                 UndoAction::OverflowChain { head_page_id } => {

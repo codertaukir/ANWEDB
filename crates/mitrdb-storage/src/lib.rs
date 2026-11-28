@@ -28,7 +28,9 @@ pub use wal::{
     WalManager,
 };
 
-pub use blob::{BlobFinished, BlobReader, BlobWriter, MAX_READ_RANGE_BYTES};
+pub use blob::{
+    BlobFinished, BlobReader, BlobWriter, MAX_READ_RANGE_BYTES, free_blob_pages,
+};
 pub use overflow::{
     INLINE_BLOB_MAX_BYTES, MAX_INLINE_TUPLE_BYTES, MAX_OVERFLOW_PAYLOAD_BYTES, NODE_KIND_OVERFLOW,
     OVERFLOW_CHUNK_CAPACITY, OVERFLOW_DESCRIPTOR_LEN, OVERFLOW_DESCRIPTOR_V2_LEN, OverflowDescriptor,
