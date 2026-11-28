@@ -6,10 +6,13 @@ A transactional database engine written in Rust.
 
 MITRDB is built from the storage layer up: a B+Tree storage engine, a write-ahead log with
 crash recovery, MVCC transactions with serializable range locking, and online backup.
-It is currently a **single-node** engine in **early development**.
+It is a **single-node, Linux-only** embedded and networked SQL/ORM engine (`v0.1.0`).
 
-> **Status:** early development. APIs, on-disk formats and behaviour may change.
-> Not production ready.
+### `v0.1.0` Production & Operational Guidelines
+- **Daily online backups:** Schedule `server.backup(dir)` followed by `Server::validate_backup(dir)` (and periodic `Server::restore` drills to a fresh directory).
+- **Restrictive file permissions:** Run the server under `umask 077` (systemd: `UMask=0077`) so `.db`, `.wal`, checkpoint metadata, and backup files remain owner-only (`0600` / `0700`).
+- **Disk space monitoring:** Keep ample free disk space on the WAL volume; WAL segments are reclaimed on `server.checkpoint()`, and a full disk fails writes cleanly without silent data loss.
+- **Per-request sessions in web servers:** For concurrent request handlers (such as Axum), create one session per task (`create_session`) and use `Server::session_table(session_id, ...)` or `Server::session_orm(session_id)`.
 
 ---
 
@@ -18,7 +21,7 @@ It is currently a **single-node** engine in **early development**.
 **Storage**
 - B+Tree storage engine with variable-length keys and values, leaf/internal splits, merges and rebalancing
 - Fixed-size 4 KB pages with CRC32C checksums (torn or corrupted pages are detected and rejected)
-- Linked 4 KB overflow page chains supporting `TEXT` and `BYTES` payloads up to 16 KB (with an inline fast path up to 2,048 bytes per field)
+- Linked 4 KB overflow page chains + streaming BLOBs for `TEXT` / `BYTES`: inline fast path up to 2,048 bytes per field, SQL literal / inline row payloads up to 256 KiB + 1 byte, streaming BLOBs up to 128 MiB by default (configurable)
 - Buffer pool with clock eviction and pinned-frame protection
 - Deferred page freeing, so freed pages are only reused after the owning transaction finalizes
 
@@ -58,10 +61,16 @@ The project is a Cargo workspace. Each crate has one responsibility:
 | `mitrdb-exec` | Query execution |
 | `mitrdb-server` | Server and benchmark examples |
 
+## Linux Quick Install
+
+```bash
+cargo install --git https://github.com/codertaukir/MITRDB mitrdb-server
+```
+
 ## Getting started
 
 ### Requirements
-- A recent stable Rust toolchain (the code uses let-chains, so a current release is needed)
+- A recent stable Rust toolchain (Rust 2024 edition / let-chains support)
 - Linux only. Other platforms are not supported.
 
 ### Build
@@ -141,7 +150,13 @@ Placeholders work for values in INSERT, UPDATE (`SET col = $n`, `col = col +/- $
 
 ### Big files
 
-`TEXT` and `BYTES` fields (and total row payloads) up to **16 KB (16,384 bytes)** are stored natively in the database via transactional, CRC32C-verified overflow page chains. Bigger data (photos, videos, multi-megabyte blobs) goes to disk with `FileStore`; the DB keeps only the file name in a normal `text` column.
+`TEXT` / `BYTES` payloads go through three tiers, all transactional and CRC32C-verified:
+
+- **Inline:** fields up to 2,048 bytes (rows up to 3,800 bytes) stay on the B+Tree leaf page.
+- **SQL literal / inline row:** up to **256 KiB + 1 byte** per row payload via WAL-logged 4 KB overflow page chains. Larger SQL literals fail fast with `OUT_OF_SPACE`.
+- **Streaming BLOB:** up to **128 MiB by default** (per-server configurable via `Server::set_max_blob_bytes`), written in 64 KB chunks with flat RAM (measured: 25 MB direct + 60 MB over TCP, HWM delta 0 MB). Direct API: `begin_blob_write_default` / `write_blob_chunk` / `finish_blob_write` returns a `BlobRef` to store in a row. Over TCP (incl. TLS + auth): `BLOB_UPLOAD_START` -> binary chunks (<= 64 KB, each `CHUNK_OK`) -> `BLOB_UPLOAD_FINISH` -> `blob_ref`; download via `BLOB_DOWNLOAD_RANGE head total crc offset len` or `BLOB_DOWNLOAD_STREAM head total crc`, in 64 KB frames. Idle timeout 30 s, total timeout 10 min (both close the connection, roll back, free pages); max 8 concurrent uploads per server, 1 per connection; exceeding the max aborts the transaction, no truncated blob.
+
+`FileStore` is for files that live outside the database, WAL and transactions (see below); the DB keeps only the file name in a normal `text` column.
 
 ```rust
 let files = FileStore::open("data/files")?;
@@ -176,6 +191,29 @@ let adults = db.find(User::age.gt(18)).order_by(User::id).run()?;
 db.update::<User>().set(User::age, 31).filter(User::id.eq(id)).run()?;
 ```
 
+### Per-request sessions (`session_table` & `session_orm`)
+
+For concurrent async workers (e.g., Axum handlers) running explicit transactions without contending on `default_session`, bind a dedicated `SessionId` per task:
+
+```rust
+let sid = db.create_session();
+
+// Typed Table API scoped to `sid`
+let users = db.session_table(sid, "users");
+db.execute_in_session(sid, "BEGIN")?;
+users.insert(&[("id", val(10)), ("email", val("dev@example.com")), ("age", val(28))])?;
+db.execute_in_session(sid, "COMMIT")?;
+
+// Typed Struct ORM scoped to `sid`
+let orm = db.session_orm(sid);
+db.execute_in_session(sid, "BEGIN")?;
+let id = orm.insert_get_id(&user)?;
+let found = orm.find_by_id::<User, i64>(id)?;
+db.execute_in_session(sid, "COMMIT")?;
+
+db.close_session(sid)?;
+```
+
 Supports auto-increment ids, `created_at`/`updated_at`, `like`, foreign keys (`references = "table.col"`), CHECK, and savepoints.
 See [docs/ORM.md](docs/ORM.md), [docs/LIMITATIONS.md](docs/LIMITATIONS.md) and
 `cargo run --release -p mitrdb-orm --example quickstart`.
@@ -186,7 +224,7 @@ Know these before you use MITRDB.
 
 **Data**
 - Engine types: `INT`, `TEXT`, `BOOL`, `BYTES`, `TIMESTAMP`, `FLOAT` (see [docs/LIMITATIONS.md](docs/LIMITATIONS.md)).
-- Individual `TEXT` / `BYTES` values and rows up to **16 KB (16,384 bytes)** are supported natively via WAL-logged, CRC32C-verified 4 KB overflow page chains (fields <= 2,048 bytes stay inline on B+Tree leaf pages). Larger payloads return a clean `OUT_OF_SPACE` error; for multi-megabyte blobs, use `FileStore` (`files.rs`).
+- Individual `TEXT` / `BYTES` values: fields <= 2,048 bytes stay inline on B+Tree leaf pages; SQL literal / inline row payloads up to **256 KiB + 1 byte** via WAL-logged, CRC32C-verified 4 KB overflow page chains; larger payloads use the streaming BLOB API (default max 128 MiB, configurable) — see [Big files](#big-files). Oversize / over-max payloads return a clean `OUT_OF_SPACE` error with nothing half-written. `FileStore` (`files.rs`) is for files outside the DB, WAL and transactions.
 - A `UNIQUE` column allows many `NULL` values; real duplicate values are rejected. All `NULL` rows share one index entry, so concurrent writes of `NULL` into the same unique column run one after another (from code reading, not measured).
 
 **SQL**
@@ -224,15 +262,15 @@ Know these before you use MITRDB.
 
 ## Benchmarks
 
-All numbers are single runs on one development machine (4 cores, Linux). Real-disk numbers are on btrfs, where one fsync takes about 12 ms (measured with `dd oflag=dsync`). Run-to-run spread on real disk is large, so treat them as indicative only.
+All numbers are measured on Linux (4 cores) using release builds. Real-disk numbers are on btrfs, where one fsync takes about 12 ms (measured with `dd oflag=dsync`). Run-to-run spread on real disk is large, so treat them as indicative only.
 
 | Workload | Storage | Result |
 |---|---|---|
-| Insert, one explicit transaction, row by row (`perf_bench batch`) | tmpfs | about 50,000 rows/s |
-| Same | real disk | about 36,000 - 40,000 rows/s |
+| Insert, one explicit transaction, row by row (`./scripts/bench.sh`, 10k rows) | tmpfs | ~42,000 - 57,000 rows/s (full-scan p50 26 - 31 ms) |
+| Same (`perf_bench batch`) | real disk | about 36,000 - 40,000 rows/s |
 | Autocommit, 1000 rows per `INSERT ... VALUES`, 1M rows | real disk | about 16,000 - 28,000 rows/s (3 runs) |
 | Autocommit, 1 row per statement, 1 thread | real disk | about 77 rows/s (fsync-bound) |
-| Autocommit, 1 row per statement, 8 threads | real disk | about 300 rows/s (group commit) |
+| Autocommit, 1 row per statement, 8 threads (adaptive group commit) | real disk | about 300 rows/s |
 | Autocommit, 100 rows per statement, 1 to 8 threads (default session) | real disk | about 5,500 to 14,000 rows/s |
 
 Other measured points (1M rows, about 50 bytes per row, real disk): full scan 3.9 s, point lookup about 300 us, `CREATE INDEX` 20 s, peak memory about 960 MB, reopen about 1.5 s after the open-time checkpoint.
@@ -241,33 +279,23 @@ Reproduce with `./scripts/bench.sh` and the examples in `crates/mitrdb-server/ex
 
 ## Verified checks
 
-Every item was run a small number of times on one machine; counts are listed. This is
-test evidence for a pilot, not a guarantee. See docs/LIMITATIONS.md and docs/PILOT.md.
+Every item was run a small number of times on one machine; counts and exact scopes are listed. See [docs/LIMITATIONS.md](docs/LIMITATIONS.md) and [docs/PILOT.md](docs/PILOT.md).
 
-**Power loss** (QEMU VM, hard `virsh destroy`, `cache=directsync`, ext4, 4 writer threads;
-each cut verified: acked rows present, no phantom rows, no duplicates, DB accepts new
-writes after recovery):
+**Hardware power loss** (QEMU VM, hard `virsh destroy`, `cache=directsync`, ext4, 4 writer threads; each cut verified: acked rows present, no phantom rows, no duplicates, DB accepts new writes after recovery):
 - INSERT only: 10 cuts
 - INSERT/UPDATE/DELETE soak: 4 cuts, plus one ~100 min soak (WAL rotated through 5 segments) with 1 cut
 - Multi-table `BEGIN..COMMIT` + counter `UPDATE n = n + 1`: 4 cuts, atomicity held
 - DDL loop (CREATE TABLE, INSERT, CREATE INDEX, ALTER ADD COLUMN, DROP TABLE), single thread: 4 cuts
 
-**Process crash (`kill -9`, host):** online backup with concurrent writers (each backup
-restored and verified); TCP + TLS with 100 and 200 clients (wrong token refused,
-connection limit refused cleanly).
+**Process crash (`SIGKILL` / `kill -9`, host):**
+- Active checkpoint storm + concurrent group-commit and 16 KB overflow writers (`crash_recovery_concurrent.rs`): acknowledged rows durable, uncommitted transactions rolled back, B+Tree roots consistent after recovery
+- Online backup with concurrent I/U/D writers (each backup restored and verified)
+- TCP + TLS with 100 and 200 clients, plus default connection limit (128) under 220 concurrent clients, oversized frame rejection, slow-client timeouts, and auth IP rate limiting (`network_limits.rs`)
+- Concurrent DDL + DML sessions (`concurrent_ddl_dml.rs`), 16-worker Axum pooled SQL sessions (`axum_concurrency_stress.rs`), 24-worker Axum ORM sessions (`axum_orm_concurrency_stress.rs`), and continuous I/U/D + vacuum + checkpoint soak (`scripts/soak_test.sh`)
 
-**Earlier process-crash checks (one run each):** disk full on an 8 MB tmpfs fails inserts
-with a clean `No space left on device` error, and after restart every acknowledged row is
-present (lost=0, phantom=0, duplicates=0); 1M rows insert, scan, point lookups and index
-creation give correct results; a 1M-row database backed up in 2.8 s under 4 inserting
-threads and restored with no missing, corrupt or duplicate rows.
+**Earlier process-crash checks (one run each):** disk full on an 8 MB tmpfs fails inserts with a clean `No space left on device` error, and after restart every acknowledged row is present (`lost=0`, `phantom=0`, `duplicates=0`); 1M rows insert, scan, point lookups and index creation give correct results; a 1M-row database backed up in 2.8 s under 4 inserting threads and restored with no missing, corrupt or duplicate rows.
 
-**Bugs found and fixed by these drills:** recovered page frame overwritten after
-recovery, no exclusive directory lock (two processes corrupted the WAL), torn WAL tail
-rejected instead of truncated, rotated WAL segments created world-readable.
-
-**Not tested:** other filesystems/hardware, concurrent DDL, DDL together with DML,
-default connection limit with 200 clients, runs longer than ~100 min.
+**Not tested:** other filesystems/hardware, VM hardware power cut (`virsh destroy`) mid-checkpoint or during online backup, runs longer than ~100 min.
 
 ## Design notes
 
@@ -293,7 +321,7 @@ Out of scope: NoSQL/document store, replication, consensus, sharding. MITRDB sta
 
 ## Contributing
 
-The project is in early development and the internals are still changing quickly. Issues and discussion are welcome.
+MITRDB is at `v0.1.0` (single-node, Linux-only). Issues, benchmarks, and discussion are welcome.
 
 ## License
 

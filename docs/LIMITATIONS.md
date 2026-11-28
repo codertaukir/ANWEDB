@@ -4,7 +4,8 @@
 - **Streaming BLOB (large payloads ka sahi rasta):** default max **128 MiB** (`DEFAULT_MAX_BLOB_BYTES`), per-server configurable via `Server::set_max_blob_bytes(n)` / read via `Server::max_blob_bytes()`. Configured max exceed karne pe `OUT_OF_SPACE` (`Error::OutOfSpace`) aata hai aur writer failed rehta hai — kuch half-written commit nahi hota. `Server::begin_blob_write_default(session)` server ke configured max pe cap karta hai; `begin_blob_write(session, max_len)` explicit per-call max leta hai.
 - **SQL literal / inline row path bounded hai:** SQL me `TEXT`/`BYTES` literal inline Tuple + overflow path se jata hai, capped at **256 KiB + 1 byte** (`MAX_OVERFLOW_PAYLOAD_BYTES`) per row payload. Isse bada SQL literal fast fail hota hai `OUT_OF_SPACE` se — usse bada payload likhna hai to streaming BLOB API (`begin_blob_write_default` / `write_blob_chunk` / `finish_blob_write`) use karo. Fields up to 2,048 bytes stay inline in the B+Tree leaf; limit bytes me ginta hai, characters me nahi.
 - An oversized row is refused with `OUT_OF_SPACE` (`Error::OutOfSpace`) and nothing is half-written. The table stays usable.
-- `FileStore` has no size limit. Files live on disk, outside the database, WAL and transactions. Saving a file and inserting its row are not atomic: save the file first, insert the row second, delete the file if the insert fails. Orphan files after a crash are not swept. `FileStore` and `TextStore` are in-process only (no upload/download over TCP).
+- **Streaming BLOB over TCP (chunked protocol):** `BLOB_UPLOAD_START` -> binary chunks (<= 64 KB each, server replies `CHUNK_OK`) -> `BLOB_UPLOAD_FINISH` returns `blob_ref` (`head_page_id`, `total_len`, `payload_crc32c`). Download: `BLOB_DOWNLOAD_RANGE head total crc offset len` (one range, `OUT_OF_RANGE` if `offset + len > total`, `len = 0` returns header + footer, 0 frames) or `BLOB_DOWNLOAD_STREAM head total crc` (full blob), both as header + 64 KB frames + footer. Works over TLS with auth. Timeouts: idle 30 s (`blob_idle_timeout`), total 10 min (`blob_total_timeout`) — either closes the connection, rolls back, frees pages. Concurrency: max 8 concurrent uploads per server (`max_concurrent_uploads`), 1 per connection; exceeding the max aborts the transaction, no truncated blob. `BlobReader::read_range` caps at 16 MiB per call — chunk big reads (e.g. 64 KB frames).
+- `FileStore` has no size limit. Files live on disk, outside the database, WAL and transactions. Saving a file and inserting its row are not atomic: save the file first, insert the row second, delete the file if the insert fails. Orphan files after a crash are not swept. `FileStore` and `TextStore` are in-process only — the streaming BLOB protocol above is the TCP path for large payloads.
 - One TCP frame is at most 1 MB (requests and responses).
 
 **Types**
@@ -39,7 +40,7 @@
 - Engine `ALTER COLUMN TYPE`: int, text, bool, bytes, and int to timestamp work. int to float is refused.
 
 **Network**
-- Protocol: 4-byte big-endian length + payload. First frame `MITRDB/1`, then optional `AUTH <token>`, then plain SQL.
+- Protocol: 4-byte big-endian length + payload. First frame `MITRDB/1`, then optional `AUTH <token>`, then plain SQL text or BLOB frames (see Size: streaming BLOB over TCP). One TCP frame is at most 1 MB by default (`max_frame_bytes`); BLOB binary chunks are capped at 64 KB inside that.
 - Auth failures are rate limited: 5 per 60 s per IP.
 - Clients must set `TCP_NODELAY` and send length + payload in ONE write. Measured: 41163 us per statement without, 431 us with nodelay, 95 us in-process (small sample).
 
