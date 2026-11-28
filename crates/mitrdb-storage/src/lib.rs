@@ -29,7 +29,8 @@ pub use wal::{
 };
 
 pub use blob::{
-    BlobFinished, BlobReader, BlobWriter, MAX_READ_RANGE_BYTES, free_blob_pages,
+    BlobFinished, BlobReader, BlobWriter, DEFAULT_MAX_BLOB_BYTES, MAX_READ_RANGE_BYTES,
+    free_blob_pages,
 };
 pub use overflow::{
     INLINE_BLOB_MAX_BYTES, MAX_INLINE_TUPLE_BYTES, MAX_OVERFLOW_PAYLOAD_BYTES, NODE_KIND_OVERFLOW,

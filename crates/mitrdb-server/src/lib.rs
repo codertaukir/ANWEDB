@@ -82,6 +82,7 @@ pub struct Server {
     auto_ckpt_tick: AtomicU64,
     auto_ckpt_floor: AtomicU64,
     auto_ckpt_running: std::sync::atomic::AtomicBool,
+    max_blob_bytes: AtomicU64,
     _dir_lock: Option<std::fs::File>,
 }
 
@@ -108,6 +109,7 @@ impl Server {
             auto_ckpt_tick: AtomicU64::new(0),
             auto_ckpt_floor: AtomicU64::new(0),
             auto_ckpt_running: std::sync::atomic::AtomicBool::new(false),
+            max_blob_bytes: AtomicU64::new(mitrdb_storage::DEFAULT_MAX_BLOB_BYTES),
             _dir_lock: None,
         }
     }
@@ -220,6 +222,7 @@ impl Server {
                 auto_ckpt_tick: AtomicU64::new(0),
                 auto_ckpt_floor: AtomicU64::new(0),
                 auto_ckpt_running: std::sync::atomic::AtomicBool::new(false),
+            max_blob_bytes: AtomicU64::new(mitrdb_storage::DEFAULT_MAX_BLOB_BYTES),
                 _dir_lock: Some(lock_file),
             },
             report,
@@ -297,12 +300,30 @@ impl Server {
         *sess.blob_writer.lock().unwrap() = Some(w);
         Ok(())
     }
+    pub fn max_blob_bytes(&self) -> u64 {
+        self.max_blob_bytes.load(std::sync::atomic::Ordering::Relaxed)
+    }
+    pub fn set_max_blob_bytes(&self, n: u64) {
+        self.max_blob_bytes.store(n, std::sync::atomic::Ordering::Relaxed);
+    }
+    /// Begin a streaming BLOB write capped at the server configured max (default 128 MiB).
+    pub fn begin_blob_write_default(&self, session_id: SessionId) -> Result<()> {
+        self.begin_blob_write(session_id, self.max_blob_bytes())
+    }
     pub fn write_blob_chunk(&self, session_id: SessionId, chunk: &[u8]) -> Result<()> {
         use std::io::Write;
         let sess = self.session_or_err(session_id)?;
         let mut g = sess.blob_writer.lock().unwrap();
         let w = g.as_mut().ok_or_else(|| Error::TransactionError("no blob write open in this session".to_string()))?;
-        w.write_all(chunk).map_err(|e| Error::Io(e.to_string()))?;
+        w.write_all(chunk).map_err(|e| {
+            if e.kind() == std::io::ErrorKind::StorageFull
+                || e.to_string().contains("blob exceeds configured max length")
+            {
+                Error::OutOfSpace
+            } else {
+                Error::Io(e.to_string())
+            }
+        })?;
         Ok(())
     }
     pub fn finish_blob_write(&self, session_id: SessionId) -> Result<OverflowDescriptorV2> {

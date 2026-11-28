@@ -14,6 +14,9 @@ use crate::overflow::{NODE_KIND_OVERFLOW, OVERFLOW_CHUNK_CAPACITY, OverflowDescr
 use crate::page::{PAGE_FLAG_FREE, PAGE_TYPE_OVERFLOW};
 use crate::wal::{LogRecord, WalManager};
 
+/// Default streaming BLOB max: 128 MiB. Configurable via Server::set_max_blob_bytes.
+pub const DEFAULT_MAX_BLOB_BYTES: u64 = 128 * 1024 * 1024;
+
 const BODY_LEN: usize = PAGE_SIZE - PAGE_HEADER_SIZE;
 const BODY_HEADER_LEN: usize = 8;
 const NEXT_OFFSET: usize = PAGE_HEADER_SIZE + 4;
@@ -262,8 +265,8 @@ impl Write for BlobWriter {
         if (data.len() as u64) > self.max_len.saturating_sub(self.total) {
             self.failed = true;
             return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "blob exceeds configured max length",
+                io::ErrorKind::StorageFull,
+                "OUT_OF_SPACE: blob exceeds configured max length",
             ));
         }
         let mut rest = data;
