@@ -140,7 +140,7 @@ Base: local main d7f096d + uncommitted (overflow cap 256 KB, chain hop limit 128
 - [x] B3. `blob_idle_timeout` (do chunks ke beech) + total upload deadline; timeout / disconnect par rollback, pages free (slow-loris test) (probe ee17798 + fix 6b87b77)
 - [x] B4. Auth / limits: max blob size, max concurrent uploads per connection / server, TLS par bhi test (probe 37e380f + TLS probe e5d7e11 + fix b20e52f)
 - [x] B5. Integration tests `tests/streaming_blobs.rs`: 30 B, 4 MB, 25 MB, 60 MB (writer/reader + TCP), CRC32C exact, range reads, RSS flat, mid-stream ROLLBACK (probe 0c04c96; 25MB direct HWM delta 0MB, 60MB TCP HWM delta 0MB, 1 test)
-- [ ] B6. Docs: README, `docs/LIMITATIONS.md`, ROADMAP limits section (proportional inline + streaming BLOB + chunked protocol)
+- [x] B6. Docs: README, `docs/LIMITATIONS.md`, ROADMAP limits section (proportional inline + streaming BLOB + chunked protocol) (docs e0959d2)
 
 ### Phase C: Probe pehle, fix baad mein (doc ke "already there" claims verify karo)
 - [x] C1. Pattern 3/4: [DONE probe+fix C1 d527b85, C1b-1 62d588c, C1b-2 0c1b89c; t10 6ms vs t100k 2.7s] `WHERE conv = ? AND created_at > ? ORDER BY created_at LIMIT N` composite `(conv, created_at)` par: plan kya hai (IndexRangeScan / sort?) + N=100k latency. Doc M5/S4
