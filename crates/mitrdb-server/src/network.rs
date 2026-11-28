@@ -487,6 +487,7 @@ fn serve_stream<S: Read + Write>(
     }
 
     let session_id = server.create_session();
+    let mut uploading = false;
     let result = loop {
         if shutdown.load(Ordering::Acquire) {
             break Ok(());
@@ -501,6 +502,33 @@ fn serve_stream<S: Read + Write>(
             Ok(None) => break Ok(()),
             Err(err) => break Err(err),
         };
+        if uploading {
+            if request.as_slice() == b"BLOB_UPLOAD_FINISH" {
+                uploading = false;
+                match server.finish_blob_write(session_id) {
+                    Ok(desc) => {
+                        write_response(stream, format!(r#"{{"status":"ok","result":{{"type":"blob_ref","head_page_id":{},"total_len":{},"payload_crc32c":{}}}}}"#, desc.head_page_id, desc.total_len, desc.payload_crc32c), config.max_frame_bytes)?;
+                    }
+                    Err(err) => {
+                        write_response(stream, error_json("SQL_ERROR", &err.to_string()), config.max_frame_bytes)?;
+                    }
+                }
+                continue;
+            }
+            if request.len() > 65536 {
+                write_response(stream, error_json("CHUNK_TOO_LARGE", "chunk frame must be <= 64KB"), config.max_frame_bytes)?;
+                continue;
+            }
+            match server.write_blob_chunk(session_id, &request) {
+                Ok(()) => {
+                    write_response(stream, format!(r#"{{"status":"ok","result":"CHUNK_OK","bytes":{}}}"#, request.len()), config.max_frame_bytes)?;
+                }
+                Err(err) => {
+                    write_response(stream, error_json("SQL_ERROR", &err.to_string()), config.max_frame_bytes)?;
+                }
+            }
+            continue;
+        }
         let request = match std::str::from_utf8(&request) {
             Ok(request) => request.trim(),
             Err(_) => {
@@ -513,6 +541,18 @@ fn serve_stream<S: Read + Write>(
             }
         };
 
+        if request.eq_ignore_ascii_case("BLOB_UPLOAD_START") {
+            match server.begin_blob_write_default(session_id) {
+                Ok(()) => {
+                    uploading = true;
+                    write_response(stream, r#"{"status":"ok","result":"BLOB_UPLOAD_STARTED"}"#.to_string(), config.max_frame_bytes)?;
+                }
+                Err(err) => {
+                    write_response(stream, error_json("SQL_ERROR", &err.to_string()), config.max_frame_bytes)?;
+                }
+            }
+            continue;
+        }
         if request.eq_ignore_ascii_case("PING") {
             write_response(
                 stream,
@@ -843,7 +883,9 @@ fn value_json(value: &Value) -> String {
             format!(r#"{{"type":"bytes","hex":{}}}"#, json_string(&hex))
         }
         Value::BlobRef(head, total, crc) => {
-            format!(r#"{{"type":"blob_ref","head_page_id":{head},"total_len":{total},"payload_crc32c":{crc}}}"#)
+            format!(
+                r#"{{"type":"blob_ref","head_page_id":{head},"total_len":{total},"payload_crc32c":{crc}}}"#
+            )
         }
     }
 }
