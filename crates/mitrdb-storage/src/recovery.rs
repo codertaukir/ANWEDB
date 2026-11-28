@@ -5,9 +5,12 @@ use mitrdb_common::{Error, INVALID_LSN, Lsn, PAGE_HEADER_SIZE, PAGE_SIZE, PageId
 use mitrdb_observe::GLOBAL_METRICS;
 
 use crate::btree::{NODE_KIND_FREE, NODE_KIND_INTERNAL, NODE_KIND_LEAF};
-use crate::overflow::NODE_KIND_OVERFLOW;
 use crate::buffer_pool::BufferPoolManager;
-use crate::page::{PAGE_FLAG_FREE, PAGE_TYPE_BTREE_INTERNAL, PAGE_TYPE_BTREE_LEAF, PAGE_TYPE_OVERFLOW, PAGE_TYPE_RAW};
+use crate::overflow::NODE_KIND_OVERFLOW;
+use crate::page::{
+    PAGE_FLAG_FREE, PAGE_TYPE_BTREE_INTERNAL, PAGE_TYPE_BTREE_LEAF, PAGE_TYPE_OVERFLOW,
+    PAGE_TYPE_RAW,
+};
 use crate::wal::{CheckpointMetadata, LogRecord, LogRecordType, WalManager};
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -16,6 +19,7 @@ pub struct SkippedUndo {
     pub page_id: PageId,
     pub offset: usize,
     pub redo_data: Vec<u8>,
+    pub undo_data: Vec<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -26,6 +30,7 @@ pub struct RecoveryReport {
     pub redone_records: usize,
     pub undone_records: usize,
     pub skipped_undos: Vec<SkippedUndo>,
+    pub uncommitted_leaf_keys: Vec<(TxnId, Vec<u8>)>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -245,6 +250,7 @@ impl RecoveryManager {
         let mut undone_count = 0;
         let mut generated_clrs = std::collections::HashSet::new();
         let mut skipped_undos = Vec::new();
+        let mut uncommitted_leaf_keys: Vec<(TxnId, Vec<u8>)> = Vec::new();
         while !active_txns.is_empty() {
             let max_txn = *active_txns
                 .iter()
@@ -292,7 +298,12 @@ impl RecoveryManager {
                         && len == PAGE_SIZE - PAGE_HEADER_SIZE
                         && matches!(
                             rec.redo_data.first().copied(),
-                            Some(NODE_KIND_LEAF | NODE_KIND_INTERNAL | NODE_KIND_FREE | NODE_KIND_OVERFLOW)
+                            Some(
+                                NODE_KIND_LEAF
+                                    | NODE_KIND_INTERNAL
+                                    | NODE_KIND_FREE
+                                    | NODE_KIND_OVERFLOW
+                            )
                         );
                     if is_full_btree_payload
                         && rec.page_id > 0
@@ -323,12 +334,31 @@ impl RecoveryManager {
                     generated_clrs.insert(clr_lsn);
 
                     self.bpm.unmark_page_free(rec.page_id);
+                    if rec.redo_data.first().copied() == Some(NODE_KIND_LEAF) {
+                        let parse_keys = |buf: &[u8]| -> Vec<Vec<u8>> {
+                            let mut tmp =
+                                crate::page::Page::new_empty(rec.page_id, PAGE_TYPE_BTREE_LEAF);
+                            let end = offset + buf.len();
+                            if end <= tmp.data.len() {
+                                tmp.data[offset..end].copy_from_slice(buf);
+                            }
+                            crate::btree::BTreeNode::from_page(&tmp)
+                                .map(|n| n.keys)
+                                .unwrap_or_default()
+                        };
+                        let rkeys = parse_keys(&rec.redo_data);
+                        let ukeys = parse_keys(&undo_payload);
+                        for rk in rkeys {
+                            if !ukeys.iter().any(|uk| uk == &rk) {
+                                uncommitted_leaf_keys.push((max_txn, rk));
+                            }
+                        }
+                    }
                     let curr_page = self.bpm.fetch_page(rec.page_id)?;
                     let curr_page_lsn = curr_page.page_lsn();
                     self.bpm.unpin_page(rec.page_id, false)?;
-                    let is_stale = curr_page_lsn > cur_lsn
-                        && !generated_clrs.contains(&curr_page_lsn)
-                        && (is_full_btree_payload || curr_page_lsn - cur_lsn > 500);
+                    let is_stale =
+                        curr_page_lsn > cur_lsn && !generated_clrs.contains(&curr_page_lsn);
                     if !is_stale {
                         self.bpm.update_page_data(rec.page_id, |p| {
                             p.data[offset..offset + len].copy_from_slice(&undo_payload);
@@ -347,8 +377,60 @@ impl RecoveryManager {
                                         p.set_flags(0);
                                     }
                                     NODE_KIND_FREE => {
-                                        p.set_page_type(PAGE_TYPE_RAW);
-                                        p.set_flags(PAGE_FLAG_FREE);
+                                        let kind = rec.redo_data.first().copied();
+                                        if offset == PAGE_HEADER_SIZE
+                                            && len == PAGE_SIZE - PAGE_HEADER_SIZE
+                                            && kind == Some(NODE_KIND_OVERFLOW)
+                                        {
+                                            p.data[offset..offset + len]
+                                                .copy_from_slice(&rec.redo_data);
+                                            p.set_page_type(PAGE_TYPE_OVERFLOW);
+                                            p.set_flags(0);
+                                        } else if offset == PAGE_HEADER_SIZE
+                                            && len == PAGE_SIZE - PAGE_HEADER_SIZE
+                                            && matches!(
+                                                kind,
+                                                Some(NODE_KIND_LEAF | NODE_KIND_INTERNAL)
+                                            )
+                                        {
+                                            let mut tmp = crate::page::Page::new_empty(
+                                                rec.page_id,
+                                                PAGE_TYPE_BTREE_LEAF,
+                                            );
+                                            tmp.data[offset..offset + len]
+                                                .copy_from_slice(&rec.redo_data);
+                                            if let Ok(mut empty_leaf) =
+                                                crate::btree::BTreeNode::from_page(&tmp)
+                                            {
+                                                let is_leaf = empty_leaf.is_leaf;
+                                                if is_leaf {
+                                                    empty_leaf.keys.clear();
+                                                    empty_leaf.values.clear();
+                                                }
+                                                if empty_leaf
+                                                    .encode_payload_into(
+                                                        &mut p.data[PAGE_HEADER_SIZE..PAGE_SIZE],
+                                                    )
+                                                    .is_ok()
+                                                {
+                                                    p.set_page_type(if is_leaf {
+                                                        PAGE_TYPE_BTREE_LEAF
+                                                    } else {
+                                                        PAGE_TYPE_BTREE_INTERNAL
+                                                    });
+                                                    p.set_flags(0);
+                                                } else {
+                                                    p.set_page_type(PAGE_TYPE_RAW);
+                                                    p.set_flags(PAGE_FLAG_FREE);
+                                                }
+                                            } else {
+                                                p.set_page_type(PAGE_TYPE_RAW);
+                                                p.set_flags(PAGE_FLAG_FREE);
+                                            }
+                                        } else {
+                                            p.set_page_type(PAGE_TYPE_RAW);
+                                            p.set_flags(PAGE_FLAG_FREE);
+                                        }
                                     }
                                     0 if rec.page_id == 0 => {
                                         p.set_page_type(PAGE_TYPE_RAW);
@@ -361,11 +443,32 @@ impl RecoveryManager {
                             Ok(())
                         })?;
                     } else {
+                        if rec.redo_data.first().copied() == Some(NODE_KIND_LEAF) {
+                            let parse_keys = |buf: &[u8]| -> Vec<Vec<u8>> {
+                                let mut tmp =
+                                    crate::page::Page::new_empty(rec.page_id, PAGE_TYPE_BTREE_LEAF);
+                                let end = offset + buf.len();
+                                if end <= tmp.data.len() {
+                                    tmp.data[offset..end].copy_from_slice(buf);
+                                }
+                                crate::btree::BTreeNode::from_page(&tmp)
+                                    .map(|n| n.keys)
+                                    .unwrap_or_default()
+                            };
+                            let rkeys = parse_keys(&rec.redo_data);
+                            let ukeys = parse_keys(&undo_payload);
+                            for rk in rkeys {
+                                if !ukeys.iter().any(|uk| uk == &rk) {
+                                    uncommitted_leaf_keys.push((max_txn, rk));
+                                }
+                            }
+                        }
                         skipped_undos.push(SkippedUndo {
                             txn_id: max_txn,
                             page_id: rec.page_id,
                             offset,
                             redo_data: rec.redo_data.clone(),
+                            undo_data: undo_payload,
                         });
                     }
 
@@ -443,6 +546,7 @@ impl RecoveryManager {
             redone_records: redone_count,
             undone_records: undone_count,
             skipped_undos,
+            uncommitted_leaf_keys,
         })
     }
 
@@ -519,7 +623,12 @@ impl RecoveryManager {
                         && len == PAGE_SIZE - PAGE_HEADER_SIZE
                         && matches!(
                             rec.redo_data.first().copied(),
-                            Some(NODE_KIND_LEAF | NODE_KIND_INTERNAL | NODE_KIND_FREE | NODE_KIND_OVERFLOW)
+                            Some(
+                                NODE_KIND_LEAF
+                                    | NODE_KIND_INTERNAL
+                                    | NODE_KIND_FREE
+                                    | NODE_KIND_OVERFLOW
+                            )
                         );
                     if is_full_btree_payload
                         && rec.page_id > 0
