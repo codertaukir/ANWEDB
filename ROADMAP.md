@@ -118,6 +118,52 @@ Status tracker. `[x]` = done and measured/tested, `[ ]` = pending.
 - [x] 10. LIKE literal-prefix index range scan: `like_prefix_range` + Like arm in `extract_column_ranges` (query/lib.rs). Range is a superset, every caller re-applies the filter (verified in code: exec_index_range_scan, narrow_dml_entries via exec_update/exec_delete, IndexOrderedScan, PK path). like_prefix.rs 14 patterns (incl. Hindi) correct, like_explain.rs pins plans (`ab%`, `ab_c%` IndexRangeScan; `%bc`, `_bc`, unindexed SeqScan). Probe N=20000: prefix 131 us vs full scan 76733 us (different queries, order of magnitude only)
 - [x] 11. Value limit: row ~4000 bytes total (measured, value_limit_probe.rs). ORM TextStore (put/get/delete/put_and): long text in FileStore, row keeps body_ref; 140 KB Hindi round-trip, failed insert leaves no orphan file (9c9725a). Limit: not atomic with WAL, crash orphans not swept, in-process only
 
+## Plan: MITRLY backend + Streaming BLOBs (Nov 2026)
+Source: `MITRDB_FULL_UPGRADE_AND_SCHEMA.md` (M/S/N list) + streaming BLOB prompt. Ek step = ek commit. Har step ke baad tick karo (`[x]`) aur numbers measured/tested hone chahiye. Push sirf maintainer bole tab.
+Base: `main` d7f096d. Baseline: 16 KB overflow cap (`MAX_OVERFLOW_PAYLOAD_BYTES`), 16-byte descriptor (`total_len` u32), hop limit 16, WAL ~2x (full-body zero undo).
+
+### Phase A: Streaming BLOB engine (doc M1, size 16 KB -> 100 MB+)
+- [ ] A1. `TUPLE_TAG_OVERFLOW_BLOB = 9` + 20-byte `OverflowDescriptor` v2 (`total_len` u64). Purane tags 6/7/8 aur 16-byte format untouched (backward compat test)
+- [ ] A2. `BlobWriter` (`io::Write`): 64 KB chunks, exact-fit 4 KB pages, har page WAL-logged (full body + zero undo), 4-byte next-pointer patch record, running CRC32C, flat RAM (< 1 MB heap)
+- [ ] A3. `BlobReader` (`Read` + `Seek`) + `read_range(offset, len)`: per-page CRC + end-to-end CRC32C, hop limit hatao (length based check)
+- [ ] A4. `UndoAction::OverflowPages(Vec<PageId>)`: rollback / `rollback_to_mark` / `abort` par adhuri chain free; `stage_free_overflow_chain` + `collect_overflow_chain_pages` hop limit fix
+- [ ] A5. Small value proof: <= 2048 byte TEXT/BYTES = 0 overflow pages (test: 30-byte message, page count before/after)
+- [ ] A6. Server session API: `begin_blob_write(session)`, `open_blob_read(session, blob_ref)`, `read_blob_range(...)`; session close / drop par rollback
+- [ ] A7. Crash test: SIGKILL at 50% upload -> recovery reclaim (zero-undo path in `recovery.rs`), no leaked pages; MVCC `vacuum` delete ke baad pages wapas
+- [ ] A8. `Server::backup()` / restore multi-MB chain: validate bina poora BLOB RAM mein load kiye
+- [ ] A9. Row <-> BLOB link: INSERT/UPDATE/DELETE mein blob ref (SQL/Table API), overflow heads `collect_tuple_overflow_heads` v2 aware
+- [ ] A10. Limits doc: `OUT_OF_SPACE` ab sirf configured max (default 128 MB, configurable); SQL literal inline path bounded rahe
+
+### Phase B: Chunked wire protocol (TCP/TLS, 1 MB frame cap intact)
+- [ ] B1. Frame design: `BLOB_UPLOAD_START` (text) -> binary chunk frames (<= 64 KB) -> `BLOB_UPLOAD_FINISH` (reply `BlobRef`); upload state mein UTF-8 check bypass sirf chunk frames ke liye
+- [ ] B2. `BLOB_DOWNLOAD_RANGE offset len` / `BLOB_DOWNLOAD_STREAM`: 64 KB frames wapas
+- [ ] B3. `blob_idle_timeout` (do chunks ke beech) + total upload deadline; timeout / disconnect par rollback, pages free (slow-loris test)
+- [ ] B4. Auth / limits: max blob size, max concurrent uploads per connection / server, TLS par bhi test
+- [ ] B5. Integration tests `tests/streaming_blobs.rs`: 30 B, 4 MB, 25 MB, 60 MB (writer/reader + TCP), CRC32C exact, range reads, RSS flat, mid-stream ROLLBACK
+- [ ] B6. Docs: README, `docs/LIMITATIONS.md`, ROADMAP limits section (proportional inline + streaming BLOB + chunked protocol)
+
+### Phase C: Probe pehle, fix baad mein (doc ke "already there" claims verify karo)
+- [ ] C1. Pattern 3/4: `WHERE conv = ? AND created_at > ? ORDER BY created_at LIMIT N` composite `(conv, created_at)` par: plan kya hai (IndexRangeScan / sort?) + N=100k latency. Doc M5/S4
+- [ ] C2. Pending fetch: `WHERE device = ? AND state = 'pending' ORDER BY created_at LIMIT N` composite `(device, state, created_at)`
+- [ ] C3. Multi-session concurrent DML (Tokio-style: 1 session per request, 8-32 threads) exact counts + no deadlock. Doc M2/M9. Note: default session ek mutex hai
+- [ ] C4. `sync()` boot cost 70+ tables (idempotent re-run, O(n) ya O(n^2)). Doc M10
+- [ ] C5. Unique + NULL: bahut saare NULL allowed (`unique_null.rs` hai, composite unique par bhi). Doc M3
+- [ ] C6. Atomic multi-row insert in txn: 1 message + N envelopes + N deliveries (rollback pura). Doc M7
+- [ ] C7. Expiry purge: `DELETE ... WHERE expires_at < now` on 100k+ rows (WAL/memory bounded). Doc S6
+- [ ] C8. `COUNT(*) WHERE` filter (unread badge) on indexed col. Doc S9
+
+### Phase D: Naye features (sirf jo C probes mein fail ho ya missing hain)
+- [ ] D1. UPSERT: `INSERT ... ON CONFLICT (cols) DO UPDATE / DO NOTHING` + Table API `upsert()`. Abhi parser mein nahi hai (grep). Doc S8, push registrations / privacy settings
+- [ ] D2. Partial unique index: `CREATE UNIQUE INDEX ... WHERE col IS NULL` (revoked_at IS NULL). Doc S3. Warna app-enforced document karo
+- [ ] D3. ENUM: CHECK `IN ('a','b')` on TEXT (abhi CHECK sirf `col op literal`). Doc S2
+- [ ] D4. Native UUID (16-byte BYTES + helpers) — LOW, app TEXT UUID use karegi. Doc S1
+- [ ] D5. Composite FK: SKIP (doc mein nahi chahiye). FK CASCADE already done (Session 2)
+
+### Phase E: Release
+- [ ] E1. `docs/LIMITATIONS.md` update: max BLOB size, row size, concurrency model, partial unique / upsert / composite max cols
+- [ ] E2. Git tag (pin-able) + reply template (doc section 10): max BYTES, concurrent sessions, partial unique, composite max cols, upsert, FK CASCADE
+- [ ] E3. Final gate: `cargo test --workspace` + `cargo clippy --workspace` 0 warnings, insert A/B noise (< 3%)
+
 ## Limits and numbers (source for README + docs/LIMITATIONS.md, English)
 [verified] = read in code or measured by a test. [unverified] = reasoning only, check before publishing.
 
