@@ -361,7 +361,7 @@ impl BlobReader {
     }
 
     fn note_stride(&mut self, idx: u64, pid: PageId) {
-        if pid != 0 && idx % STRIDE == 0 && (idx / STRIDE) as usize == self.stride.len() {
+        if pid != 0 && idx.is_multiple_of(STRIDE) && (idx / STRIDE) as usize == self.stride.len() {
             self.stride.push(pid);
         }
     }
