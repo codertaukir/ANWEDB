@@ -139,7 +139,7 @@ Base: local main d7f096d + uncommitted (overflow cap 256 KB, chain hop limit 128
 - [x] B2. `BLOB_DOWNLOAD_RANGE offset len` / `BLOB_DOWNLOAD_STREAM`: 64 KB frames wapas — probe be73628 + fix 58da3c6, 2 tests pass
 - [x] B3. `blob_idle_timeout` (do chunks ke beech) + total upload deadline; timeout / disconnect par rollback, pages free (slow-loris test) (probe ee17798 + fix 6b87b77)
 - [x] B4. Auth / limits: max blob size, max concurrent uploads per connection / server, TLS par bhi test (probe 37e380f + TLS probe e5d7e11 + fix b20e52f)
-- [ ] B5. Integration tests `tests/streaming_blobs.rs`: 30 B, 4 MB, 25 MB, 60 MB (writer/reader + TCP), CRC32C exact, range reads, RSS flat, mid-stream ROLLBACK
+- [x] B5. Integration tests `tests/streaming_blobs.rs`: 30 B, 4 MB, 25 MB, 60 MB (writer/reader + TCP), CRC32C exact, range reads, RSS flat, mid-stream ROLLBACK (probe 0c04c96; 25MB direct HWM delta 0MB, 60MB TCP HWM delta 0MB, 1 test)
 - [ ] B6. Docs: README, `docs/LIMITATIONS.md`, ROADMAP limits section (proportional inline + streaming BLOB + chunked protocol)
 
 ### Phase C: Probe pehle, fix baad mein (doc ke "already there" claims verify karo)
