@@ -2021,7 +2021,31 @@ impl QueryEngine {
                     if let Some((im2, r)) = Self::composite_prefix_range(&schema, &indexes, &bf.predicate, 1) {
                         let parts: Vec<&str> = im2.column_name.split(',').collect();
                         if parts.len() >= 2 && parts[1] == sc {
-                            return PhysicalPlan::IndexOrderedScan { schema, index: im2, ranges: vec![r], descending, pk_descending: pk_desc, filter: Some(bf.clone()), projection, limit, offset };
+                            let ordered_ranges = {
+                                let (prefix, succ) = match (&r.start, &r.end) {
+                                    (KeyBound::Included(p), KeyBound::Excluded(s)) => (p.clone(), s.clone()),
+                                    _ => (Vec::new(), Vec::new()),
+                                };
+                                if prefix.is_empty() { vec![r] } else {
+                                    match Self::extract_column_ranges(&bf.predicate, first_sort_col) {
+                                        None => vec![r],
+                                        Some(trs) => trs.into_iter().map(|tr| {
+                                            let start = match tr.start {
+                                                KeyBound::Included(b) => { let mut k = prefix.clone(); k.extend_from_slice(&(b.len() as u32).to_be_bytes()); k.extend_from_slice(&b); KeyBound::Included(k) },
+                                                KeyBound::Excluded(b) => { let mut k = prefix.clone(); k.extend_from_slice(&(b.len() as u32).to_be_bytes()); k.extend_from_slice(&b); KeyBound::Excluded(k) },
+                                                KeyBound::Unbounded => KeyBound::Included(prefix.clone()),
+                                            };
+                                            let end = match tr.end {
+                                                KeyBound::Included(b) => { let mut k = prefix.clone(); k.extend_from_slice(&(b.len() as u32).to_be_bytes()); k.extend_from_slice(&b); KeyBound::Included(k) },
+                                                KeyBound::Excluded(b) => { let mut k = prefix.clone(); k.extend_from_slice(&(b.len() as u32).to_be_bytes()); k.extend_from_slice(&b); KeyBound::Excluded(k) },
+                                                KeyBound::Unbounded => KeyBound::Excluded(succ.clone()),
+                                            };
+                                            KeyRange::new(start, end)
+                                        }).collect()
+                                    }
+                                }
+                            };
+                            return PhysicalPlan::IndexOrderedScan { schema, index: im2, ranges: ordered_ranges, descending, pk_descending: pk_desc, filter: Some(bf.clone()), projection, limit, offset };
                         }
                     }
                 }
