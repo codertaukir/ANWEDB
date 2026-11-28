@@ -28,12 +28,15 @@ use mitrdb_storage::{
 pub use mitrdb_txn::{
     IsolationLevel, KeyBound, KeyRange, LockKey, LockMode, TxnManager, VacuumReport,
 };
+use mitrdb_storage::{BlobReader, BlobWriter, OverflowDescriptorV2};
 
 pub type SessionId = u64;
 
 pub struct DatabaseSession {
     active_txn: Mutex<Option<TxnId>>,
     isolation: Mutex<IsolationLevel>,
+    blob_writer: Mutex<Option<BlobWriter>>,
+    blob_reader: Mutex<Option<BlobReader>>,
 }
 
 impl DatabaseSession {
@@ -45,6 +48,8 @@ impl DatabaseSession {
         DatabaseSession {
             active_txn: Mutex::new(None),
             isolation: Mutex::new(isolation),
+            blob_writer: Mutex::new(None),
+            blob_reader: Mutex::new(None),
         }
     }
 }
@@ -184,24 +189,11 @@ impl Server {
         let catalog = Arc::new(Catalog::with_storage(bpm.clone(), Some(wal.clone())));
 
         // Post-recovery reconciliation: prune uncommitted keys whose physical undo was skipped
-        if !report.skipped_undos.is_empty() {
-            let trees = catalog.all_table_trees();
-            for tree in trees {
-                if let Ok(records) =
-                    tree.range_scan_bounds(&mitrdb_storage::btree::KeyRange::full())
-                {
-                    for (k, _) in records {
-                        for skipped in &report.skipped_undos {
-                            if skipped
-                                .redo_data
-                                .windows(k.len())
-                                .any(|window| window == k.as_slice())
-                            {
-                                let mut dummy_lsn = 0;
-                                let _ = tree.delete_logged(skipped.txn_id, &mut dummy_lsn, &k);
-                            }
-                        }
-                    }
+        if !report.uncommitted_leaf_keys.is_empty() {
+            for tree in catalog.all_table_trees() {
+                for (tid, uk) in &report.uncommitted_leaf_keys {
+                    let mut dummy_lsn = 0;
+                    let _ = tree.delete_logged(*tid, &mut dummy_lsn, uk);
                 }
             }
         }
@@ -286,6 +278,53 @@ impl Server {
         Ok(())
     }
 
+    fn session_or_err(&self, session_id: SessionId) -> Result<Arc<DatabaseSession>> {
+        self.sessions.read().unwrap().get(&session_id).cloned()
+            .ok_or_else(|| Error::TransactionError(format!("Unknown session {}", session_id)))
+    }
+    fn ensure_session_txn(&self, session: &DatabaseSession) -> Result<TxnId> {
+        let mut slot = session.active_txn.lock().unwrap();
+        if let Some(t) = *slot { return Ok(t); }
+        let iso = *session.isolation.lock().unwrap();
+        let t = self.txn_mgr.begin_with_isolation(iso)?;
+        *slot = Some(t);
+        Ok(t)
+    }
+    pub fn begin_blob_write(&self, session_id: SessionId, max_len: u64) -> Result<()> {
+        let sess = self.session_or_err(session_id)?;
+        let txn = self.ensure_session_txn(&sess)?;
+        let w = self.txn_mgr.begin_blob_write(txn, max_len)?;
+        *sess.blob_writer.lock().unwrap() = Some(w);
+        Ok(())
+    }
+    pub fn write_blob_chunk(&self, session_id: SessionId, chunk: &[u8]) -> Result<()> {
+        use std::io::Write;
+        let sess = self.session_or_err(session_id)?;
+        let mut g = sess.blob_writer.lock().unwrap();
+        let w = g.as_mut().ok_or_else(|| Error::TransactionError("no blob write open in this session".to_string()))?;
+        w.write_all(chunk).map_err(|e| Error::Io(e.to_string()))?;
+        Ok(())
+    }
+    pub fn finish_blob_write(&self, session_id: SessionId) -> Result<OverflowDescriptorV2> {
+        let sess = self.session_or_err(session_id)?;
+        let mut g = sess.blob_writer.lock().unwrap();
+        let w = g.take().ok_or_else(|| Error::TransactionError("no blob write open in this session".to_string()))?;
+        let txn = sess.active_txn.lock().unwrap().ok_or_else(|| Error::TransactionError("session has no active transaction".to_string()))?;
+        self.txn_mgr.finish_blob_write(txn, w)
+    }
+    pub fn open_blob_read(&self, session_id: SessionId, desc: OverflowDescriptorV2) -> Result<()> {
+        let sess = self.session_or_err(session_id)?;
+        let bpm = self.bpm.as_ref().ok_or_else(|| Error::Io("server has no buffer pool".to_string()))?;
+        let r = BlobReader::open(bpm.clone(), desc)?;
+        *sess.blob_reader.lock().unwrap() = Some(r);
+        Ok(())
+    }
+    pub fn read_blob_range(&self, session_id: SessionId, offset: u64, len: usize) -> Result<Vec<u8>> {
+        let sess = self.session_or_err(session_id)?;
+        let mut g = sess.blob_reader.lock().unwrap();
+        let r = g.as_mut().ok_or_else(|| Error::TransactionError("no blob read open in this session".to_string()))?;
+        r.read_range(offset, len)
+    }
     pub fn close_session(&self, session_id: SessionId) -> Result<()> {
         let session_opt = self.sessions.write().unwrap().remove(&session_id);
         if let Some(session) = session_opt
