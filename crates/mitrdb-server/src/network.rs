@@ -25,6 +25,7 @@ const DEFAULT_FRAME_TIMEOUT: Duration = Duration::from_secs(10);
 const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const DEFAULT_BLOB_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_BLOB_TOTAL_TIMEOUT: Duration = Duration::from_secs(600);
+const DEFAULT_MAX_CONCURRENT_UPLOADS: usize = 8;
 const AUTH_FAILURE_LIMIT: usize = 5;
 const AUTH_FAILURE_WINDOW: Duration = Duration::from_secs(60);
 const AUTH_FAILURE_TRACKED_IP_LIMIT: usize = 4096;
@@ -46,6 +47,8 @@ pub struct TcpServerConfig {
     pub blob_idle_timeout: Duration,
     /// Max total time for one BLOB upload from START to FINISH.
     pub blob_total_timeout: Duration,
+    /// Max concurrent BLOB uploads across all connections. START over limit -> TOO_MANY_UPLOADS.
+    pub max_concurrent_uploads: usize,
     /// Optional shared secret required before any session commands.
     /// Never transmit this token over a plaintext connection on an untrusted network.
     pub auth_token: Option<Zeroizing<String>>,
@@ -66,6 +69,7 @@ impl std::fmt::Debug for TcpServerConfig {
             .field("handshake_timeout", &self.handshake_timeout)
             .field("blob_idle_timeout", &self.blob_idle_timeout)
             .field("blob_total_timeout", &self.blob_total_timeout)
+            .field("max_concurrent_uploads", &self.max_concurrent_uploads)
             .field(
                 "auth_token",
                 &self.auth_token.as_ref().map(|_| "[REDACTED]"),
@@ -87,6 +91,7 @@ impl Default for TcpServerConfig {
             handshake_timeout: DEFAULT_HANDSHAKE_TIMEOUT,
             blob_idle_timeout: DEFAULT_BLOB_IDLE_TIMEOUT,
             blob_total_timeout: DEFAULT_BLOB_TOTAL_TIMEOUT,
+            max_concurrent_uploads: DEFAULT_MAX_CONCURRENT_UPLOADS,
             auth_token: None,
             tls_cert_path: None,
             tls_key_path: None,
@@ -177,6 +182,11 @@ impl Server {
                 "blob_total_timeout must be greater than zero".to_string(),
             ));
         }
+        if config.max_concurrent_uploads == 0 {
+            return Err(Error::Io(
+                "max_concurrent_uploads must be greater than zero".to_string(),
+            ));
+        }
 
         if config.tls_cert_path.is_some() != config.tls_key_path.is_some() {
             return Err(Error::Io(
@@ -222,6 +232,7 @@ fn accept_loop(
     shutdown: Arc<AtomicBool>,
 ) -> Result<()> {
     let active = Arc::new(AtomicUsize::new(0));
+    let active_uploads = Arc::new(AtomicUsize::new(0));
     let auth_failures: AuthFailureMap = Arc::new(Mutex::new(HashMap::new()));
     let mut workers: Vec<JoinHandle<()>> = Vec::new();
     let outcome = loop {
@@ -249,6 +260,7 @@ fn accept_loop(
                 let worker_server = Arc::clone(&server);
                 let worker_shutdown = Arc::clone(&shutdown);
                 let worker_active = Arc::clone(&active);
+                let worker_uploads = Arc::clone(&active_uploads);
                 let worker_config = config.clone();
                 let worker_tls = tls_config.clone();
                 let worker_auth_failures = Arc::clone(&auth_failures);
@@ -265,6 +277,7 @@ fn accept_loop(
                             worker_tls,
                             worker_shutdown,
                             worker_auth_failures,
+                            worker_uploads,
                         );
                     }) {
                     Ok(worker) => workers.push(worker),
@@ -325,6 +338,7 @@ fn serve_connection(
     tls_config: Option<Arc<RustlsServerConfig>>,
     shutdown: Arc<AtomicBool>,
     auth_failures: AuthFailureMap,
+    active_uploads: Arc<AtomicUsize>,
 ) -> io::Result<()> {
     tcp_stream.set_nodelay(true)?;
     tcp_stream.set_read_timeout(Some(config.io_timeout))?;
@@ -341,6 +355,7 @@ fn serve_connection(
             &shutdown,
             peer_ip,
             &auth_failures,
+            &active_uploads,
         )
     } else {
         let mut stream = ClientStream::Plain(tcp_stream);
@@ -351,6 +366,7 @@ fn serve_connection(
             &shutdown,
             peer_ip,
             &auth_failures,
+            &active_uploads,
         )
     }
 }
@@ -437,6 +453,7 @@ fn serve_stream<S: Read + Write>(
     shutdown: &AtomicBool,
     peer_ip: IpAddr,
     auth_failures: &AuthFailureMap,
+    active_uploads: &Arc<AtomicUsize>,
 ) -> io::Result<()> {
     let conn_started = Instant::now();
     let handshake_limits = FrameLimits {
@@ -533,6 +550,7 @@ fn serve_stream<S: Read + Write>(
                 uploading = false;
                 upload_started = None;
                 upload_last = None;
+                active_uploads.fetch_sub(1, Ordering::AcqRel);
                 match server.finish_blob_write(session_id) {
                     Ok(desc) => {
                         write_response(stream, format!(r#"{{"status":"ok","result":{{"type":"blob_ref","head_page_id":{},"total_len":{},"payload_crc32c":{}}}}}"#, desc.head_page_id, desc.total_len, desc.payload_crc32c), config.max_frame_bytes)?;
@@ -552,6 +570,11 @@ fn serve_stream<S: Read + Write>(
                     write_response(stream, format!(r#"{{"status":"ok","result":"CHUNK_OK","bytes":{}}}"#, request.len()), config.max_frame_bytes)?;
                 }
                 Err(err) => {
+                    let _ = server.abort_blob_write(session_id);
+                    uploading = false;
+                    upload_started = None;
+                    upload_last = None;
+                    active_uploads.fetch_sub(1, Ordering::AcqRel);
                     write_response(stream, error_json("SQL_ERROR", &err.to_string()), config.max_frame_bytes)?;
                 }
             }
@@ -570,6 +593,10 @@ fn serve_stream<S: Read + Write>(
         };
 
         if request.eq_ignore_ascii_case("BLOB_UPLOAD_START") {
+            if !reserve_connection(active_uploads, config.max_concurrent_uploads) {
+                write_response(stream, error_json("TOO_MANY_UPLOADS", "max concurrent blob uploads reached"), config.max_frame_bytes)?;
+                continue;
+            }
             match server.begin_blob_write_default(session_id) {
                 Ok(()) => {
                     uploading = true;
@@ -578,6 +605,7 @@ fn serve_stream<S: Read + Write>(
                     write_response(stream, r#"{"status":"ok","result":"BLOB_UPLOAD_STARTED"}"#.to_string(), config.max_frame_bytes)?;
                 }
                 Err(err) => {
+                    active_uploads.fetch_sub(1, Ordering::AcqRel);
                     write_response(stream, error_json("SQL_ERROR", &err.to_string()), config.max_frame_bytes)?;
                 }
             }
@@ -682,6 +710,9 @@ fn serve_stream<S: Read + Write>(
         write_response(stream, response, config.max_frame_bytes)?;
     };
 
+    if uploading {
+        active_uploads.fetch_sub(1, Ordering::AcqRel);
+    }
     let _ = server.close_session(session_id);
     result
 }

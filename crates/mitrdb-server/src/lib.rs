@@ -21,6 +21,7 @@ pub use mitrdb_query::{F64, PhysicalPlan, QueryEngine, TableSchema, Value};
 pub use mitrdb_storage::{
     BackupFileMeta, BackupManager, BackupManifest, CheckpointMetadata, RestoreReport,
 };
+use mitrdb_storage::{BlobReader, BlobWriter, OverflowDescriptorV2};
 use mitrdb_storage::{
     BufferPoolManager, DEFAULT_WAL_SEGMENT_BYTES, DiskManager, RecoveryManager, RecoveryReport,
     WalManager,
@@ -28,7 +29,6 @@ use mitrdb_storage::{
 pub use mitrdb_txn::{
     IsolationLevel, KeyBound, KeyRange, LockKey, LockMode, TxnManager, VacuumReport,
 };
-use mitrdb_storage::{BlobReader, BlobWriter, OverflowDescriptorV2};
 
 pub type SessionId = u64;
 
@@ -222,7 +222,7 @@ impl Server {
                 auto_ckpt_tick: AtomicU64::new(0),
                 auto_ckpt_floor: AtomicU64::new(0),
                 auto_ckpt_running: std::sync::atomic::AtomicBool::new(false),
-            max_blob_bytes: AtomicU64::new(mitrdb_storage::DEFAULT_MAX_BLOB_BYTES),
+                max_blob_bytes: AtomicU64::new(mitrdb_storage::DEFAULT_MAX_BLOB_BYTES),
                 _dir_lock: Some(lock_file),
             },
             report,
@@ -282,12 +282,18 @@ impl Server {
     }
 
     fn session_or_err(&self, session_id: SessionId) -> Result<Arc<DatabaseSession>> {
-        self.sessions.read().unwrap().get(&session_id).cloned()
+        self.sessions
+            .read()
+            .unwrap()
+            .get(&session_id)
+            .cloned()
             .ok_or_else(|| Error::TransactionError(format!("Unknown session {}", session_id)))
     }
     fn ensure_session_txn(&self, session: &DatabaseSession) -> Result<TxnId> {
         let mut slot = session.active_txn.lock().unwrap();
-        if let Some(t) = *slot { return Ok(t); }
+        if let Some(t) = *slot {
+            return Ok(t);
+        }
         let iso = *session.isolation.lock().unwrap();
         let t = self.txn_mgr.begin_with_isolation(iso)?;
         *slot = Some(t);
@@ -301,10 +307,12 @@ impl Server {
         Ok(())
     }
     pub fn max_blob_bytes(&self) -> u64 {
-        self.max_blob_bytes.load(std::sync::atomic::Ordering::Relaxed)
+        self.max_blob_bytes
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
     pub fn set_max_blob_bytes(&self, n: u64) {
-        self.max_blob_bytes.store(n, std::sync::atomic::Ordering::Relaxed);
+        self.max_blob_bytes
+            .store(n, std::sync::atomic::Ordering::Relaxed);
     }
     /// Begin a streaming BLOB write capped at the server configured max (default 128 MiB).
     pub fn begin_blob_write_default(&self, session_id: SessionId) -> Result<()> {
@@ -314,7 +322,9 @@ impl Server {
         use std::io::Write;
         let sess = self.session_or_err(session_id)?;
         let mut g = sess.blob_writer.lock().unwrap();
-        let w = g.as_mut().ok_or_else(|| Error::TransactionError("no blob write open in this session".to_string()))?;
+        let w = g.as_mut().ok_or_else(|| {
+            Error::TransactionError("no blob write open in this session".to_string())
+        })?;
         w.write_all(chunk).map_err(|e| {
             if e.kind() == std::io::ErrorKind::StorageFull
                 || e.to_string().contains("blob exceeds configured max length")
@@ -329,21 +339,51 @@ impl Server {
     pub fn finish_blob_write(&self, session_id: SessionId) -> Result<OverflowDescriptorV2> {
         let sess = self.session_or_err(session_id)?;
         let mut g = sess.blob_writer.lock().unwrap();
-        let w = g.take().ok_or_else(|| Error::TransactionError("no blob write open in this session".to_string()))?;
-        let txn = sess.active_txn.lock().unwrap().ok_or_else(|| Error::TransactionError("session has no active transaction".to_string()))?;
+        let w = g.take().ok_or_else(|| {
+            Error::TransactionError("no blob write open in this session".to_string())
+        })?;
+        let txn = sess.active_txn.lock().unwrap().ok_or_else(|| {
+            Error::TransactionError("session has no active transaction".to_string())
+        })?;
         self.txn_mgr.finish_blob_write(txn, w)
+    }
+    /// Abort an in-progress BLOB upload: drop writer + abort its txn, keep session alive.
+    /// Used when a chunk exceeds max_blob_bytes or any chunk write fails, so FINISH
+    /// cannot return a truncated blob.
+    pub fn abort_blob_write(&self, session_id: SessionId) -> Result<()> {
+        let sess = self.session_or_err(session_id)?;
+        let _ = sess.blob_writer.lock().unwrap().take();
+        let mut slot = sess.active_txn.lock().unwrap();
+        if let Some(tid) = slot.take() {
+            let abort_res = self.txn_mgr.abort(tid);
+            let sync_res = self.catalog.sync_roots();
+            GLOBAL_METRICS.record_txn_abort();
+            abort_res?;
+            sync_res?;
+        }
+        Ok(())
     }
     pub fn open_blob_read(&self, session_id: SessionId, desc: OverflowDescriptorV2) -> Result<()> {
         let sess = self.session_or_err(session_id)?;
-        let bpm = self.bpm.as_ref().ok_or_else(|| Error::Io("server has no buffer pool".to_string()))?;
+        let bpm = self
+            .bpm
+            .as_ref()
+            .ok_or_else(|| Error::Io("server has no buffer pool".to_string()))?;
         let r = BlobReader::open(bpm.clone(), desc)?;
         *sess.blob_reader.lock().unwrap() = Some(r);
         Ok(())
     }
-    pub fn read_blob_range(&self, session_id: SessionId, offset: u64, len: usize) -> Result<Vec<u8>> {
+    pub fn read_blob_range(
+        &self,
+        session_id: SessionId,
+        offset: u64,
+        len: usize,
+    ) -> Result<Vec<u8>> {
         let sess = self.session_or_err(session_id)?;
         let mut g = sess.blob_reader.lock().unwrap();
-        let r = g.as_mut().ok_or_else(|| Error::TransactionError("no blob read open in this session".to_string()))?;
+        let r = g.as_mut().ok_or_else(|| {
+            Error::TransactionError("no blob read open in this session".to_string())
+        })?;
         r.read_range(offset, len)
     }
     pub fn close_session(&self, session_id: SessionId) -> Result<()> {
