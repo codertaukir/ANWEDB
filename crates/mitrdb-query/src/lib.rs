@@ -2010,6 +2010,23 @@ impl QueryEngine {
             .position(|c| c.is_primary_key)
             .unwrap_or(0);
 
+        // Composite ORDER BY: (a,b) with a Eq, sort by b -> IndexOrderedScan, early stop.
+        if !sort_keys.is_empty() {
+            let (first_sort_col, descending) = sort_keys[0];
+            let compat = sort_keys.len() == 1 || (sort_keys.len() == 2 && sort_keys[1].0 == pk_idx);
+            if compat {
+                let sc = &schema.columns[first_sort_col].name;
+                let pk_desc = if sort_keys.len() == 2 { sort_keys[1].1 } else { false };
+                if let Some(bf) = &bound_filter {
+                    if let Some((im2, r)) = Self::composite_prefix_range(&schema, &indexes, &bf.predicate, 1) {
+                        let parts: Vec<&str> = im2.column_name.split(',').collect();
+                        if parts.len() >= 2 && parts[1] == sc {
+                            return PhysicalPlan::IndexOrderedScan { schema, index: im2, ranges: vec![r], descending, pk_descending: pk_desc, filter: Some(bf.clone()), projection, limit, offset };
+                        }
+                    }
+                }
+            }
+        }
         // Check if an existing secondary B+Tree index can directly satisfy ORDER BY
         if !sort_keys.is_empty() {
             let (first_sort_col, descending) = sort_keys[0];
