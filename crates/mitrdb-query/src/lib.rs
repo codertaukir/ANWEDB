@@ -53,6 +53,9 @@ pub enum Value {
     Bool(bool),
     Bytes(Vec<u8>),
     Float(F64),
+    /// Streaming BLOB ref (TUPLE_TAG_OVERFLOW_BLOB=9). Plain fields, no storage dep — avoids query->storage cycle.
+    /// (head_page_id, total_len, payload_crc32c) — same layout as OverflowDescriptorV2::to_bytes.
+    BlobRef(u64, u64, u32),
     /// Placeholder `$n` (stored 0-based). Exists only between parse and bind.
     Param(usize),
 }
@@ -83,6 +86,13 @@ impl Value {
                 let k = if b >> 63 == 1 { !b } else { b ^ (1u64 << 63) };
                 let mut out = vec![5];
                 out.extend_from_slice(&k.to_be_bytes());
+                out
+            }
+            Value::BlobRef(head, total, crc) => {
+                let mut out = vec![6];
+                out.extend_from_slice(&head.to_be_bytes());
+                out.extend_from_slice(&total.to_be_bytes());
+                out.extend_from_slice(&crc.to_be_bytes());
                 out
             }
             Value::Param(_) => vec![255],
@@ -1248,6 +1258,7 @@ impl QueryEngine {
             Value::Text(_) if col.data_type == DataType::Text => Ok(()),
             Value::Bool(_) if col.data_type == DataType::Bool => Ok(()),
             Value::Bytes(_) if col.data_type == DataType::Bytes => Ok(()),
+            Value::BlobRef(_, _, _) if col.data_type == DataType::Bytes => Ok(()),
             Value::Float(f) if col.data_type == DataType::Float && !f.0.is_nan() => Ok(()),
             _ => Err(Error::TransactionError(format!(
                 "Type mismatch for column '{}.{}': expected {:?}",

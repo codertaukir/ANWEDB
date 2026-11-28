@@ -6,8 +6,9 @@
 )]
 use mitrdb_storage::{
     INLINE_BLOB_MAX_BYTES, MAX_INLINE_TUPLE_BYTES, MAX_OVERFLOW_PAYLOAD_BYTES,
-    OVERFLOW_DESCRIPTOR_LEN, OverflowDescriptor, TUPLE_TAG_BOOL, TUPLE_TAG_BYTES, TUPLE_TAG_FLOAT,
-    TUPLE_TAG_INT64, TUPLE_TAG_NULL, TUPLE_TAG_OVERFLOW_BYTES, TUPLE_TAG_OVERFLOW_TEXT,
+    OVERFLOW_DESCRIPTOR_LEN, OVERFLOW_DESCRIPTOR_V2_LEN, OverflowDescriptor, TUPLE_TAG_BOOL,
+    TUPLE_TAG_BYTES, TUPLE_TAG_FLOAT, TUPLE_TAG_INT64, TUPLE_TAG_NULL,
+    TUPLE_TAG_OVERFLOW_BLOB, TUPLE_TAG_OVERFLOW_BYTES, TUPLE_TAG_OVERFLOW_TEXT,
     TUPLE_TAG_OVERFLOW_TUPLE, TUPLE_TAG_TEXT,
 };
 use std::cmp::Ordering;
@@ -383,6 +384,12 @@ impl Tuple {
                     buf.push(5);
                     buf.extend_from_slice(&f.0.to_bits().to_le_bytes());
                 }
+                Value::BlobRef(head, total, crc) => {
+                    buf.push(TUPLE_TAG_OVERFLOW_BLOB);
+                    buf.extend_from_slice(&head.to_le_bytes());
+                    buf.extend_from_slice(&total.to_le_bytes());
+                    buf.extend_from_slice(&crc.to_le_bytes());
+                }
                 Value::Param(_) => unreachable!("unbound parameter reached the row codec"),
             }
         }
@@ -457,6 +464,16 @@ impl Tuple {
                     pos += 8;
                     values.push(Value::Float(mitrdb_query::F64(f64::from_bits(bits))));
                 }
+                TUPLE_TAG_OVERFLOW_BLOB => {
+                    if pos + OVERFLOW_DESCRIPTOR_V2_LEN > buf.len() {
+                        return Err(Error::PageCorrupted("Truncated overflow Blob descriptor".to_string()));
+                    }
+                    let head = u64::from_le_bytes(buf[pos..pos + 8].try_into().unwrap());
+                    let total = u64::from_le_bytes(buf[pos + 8..pos + 16].try_into().unwrap());
+                    let crc = u32::from_le_bytes(buf[pos + 16..pos + 20].try_into().unwrap());
+                    pos += OVERFLOW_DESCRIPTOR_V2_LEN;
+                    values.push(Value::BlobRef(head, total, crc));
+                }
                 other => {
                     return Err(Error::PageCorrupted(format!(
                         "Unknown tuple value tag: {}",
@@ -476,11 +493,7 @@ impl Tuple {
         Ok(values)
     }
 
-    pub fn serialize_txn(
-        values: &[Value],
-        txn_mgr: &TxnManager,
-        txn_id: TxnId,
-    ) -> Result<Vec<u8>> {
+    pub fn serialize_txn(values: &[Value], txn_mgr: &TxnManager, txn_id: TxnId) -> Result<Vec<u8>> {
         let logical_size: usize = 2 + values
             .iter()
             .map(|v| match v {
@@ -489,6 +502,7 @@ impl Tuple {
                 Value::Int64(_) | Value::Float(_) => 9,
                 Value::Text(s) => 3 + s.len(),
                 Value::Bytes(b) => 3 + b.len(),
+                Value::BlobRef(_, _, _) => 21,
                 Value::Param(_) => 0,
             })
             .sum::<usize>();
@@ -535,6 +549,12 @@ impl Tuple {
                 Value::Float(f) => {
                     buf.push(TUPLE_TAG_FLOAT);
                     buf.extend_from_slice(&f.0.to_bits().to_le_bytes());
+                }
+                Value::BlobRef(head, total, crc) => {
+                    buf.push(TUPLE_TAG_OVERFLOW_BLOB);
+                    buf.extend_from_slice(&head.to_le_bytes());
+                    buf.extend_from_slice(&total.to_le_bytes());
+                    buf.extend_from_slice(&crc.to_le_bytes());
                 }
                 Value::Param(_) => unreachable!("unbound parameter reached the row codec"),
             }
@@ -626,13 +646,12 @@ impl Tuple {
                             "Truncated overflow Text descriptor".to_string(),
                         ));
                     }
-                    let desc = OverflowDescriptor::from_bytes(
-                        &buf[pos..pos + OVERFLOW_DESCRIPTOR_LEN],
-                    )?;
+                    let desc =
+                        OverflowDescriptor::from_bytes(&buf[pos..pos + OVERFLOW_DESCRIPTOR_LEN])?;
                     pos += OVERFLOW_DESCRIPTOR_LEN;
                     let raw = txn_mgr.read_overflow_chain(&desc)?;
-                    let s = String::from_utf8(raw)
-                        .map_err(|e| Error::PageCorrupted(e.to_string()))?;
+                    let s =
+                        String::from_utf8(raw).map_err(|e| Error::PageCorrupted(e.to_string()))?;
                     values.push(Value::Text(s));
                 }
                 TUPLE_TAG_OVERFLOW_BYTES => {
@@ -641,9 +660,8 @@ impl Tuple {
                             "Truncated overflow Bytes descriptor".to_string(),
                         ));
                     }
-                    let desc = OverflowDescriptor::from_bytes(
-                        &buf[pos..pos + OVERFLOW_DESCRIPTOR_LEN],
-                    )?;
+                    let desc =
+                        OverflowDescriptor::from_bytes(&buf[pos..pos + OVERFLOW_DESCRIPTOR_LEN])?;
                     pos += OVERFLOW_DESCRIPTOR_LEN;
                     let raw = txn_mgr.read_overflow_chain(&desc)?;
                     values.push(Value::Bytes(raw));
@@ -654,11 +672,22 @@ impl Tuple {
                             "Truncated overflow Tuple descriptor".to_string(),
                         ));
                     }
-                    let desc = OverflowDescriptor::from_bytes(
-                        &buf[pos..pos + OVERFLOW_DESCRIPTOR_LEN],
-                    )?;
+                    let desc =
+                        OverflowDescriptor::from_bytes(&buf[pos..pos + OVERFLOW_DESCRIPTOR_LEN])?;
                     let inner = txn_mgr.read_overflow_chain(&desc)?;
                     return Self::deserialize(&inner);
+                }
+                TUPLE_TAG_OVERFLOW_BLOB => {
+                    if pos + OVERFLOW_DESCRIPTOR_V2_LEN > buf.len() {
+                        return Err(Error::PageCorrupted(
+                            "Truncated overflow Blob descriptor".to_string(),
+                        ));
+                    }
+                    let head = u64::from_le_bytes(buf[pos..pos + 8].try_into().unwrap());
+                    let total = u64::from_le_bytes(buf[pos + 8..pos + 16].try_into().unwrap());
+                    let crc = u32::from_le_bytes(buf[pos + 16..pos + 20].try_into().unwrap());
+                    pos += OVERFLOW_DESCRIPTOR_V2_LEN;
+                    values.push(Value::BlobRef(head, total, crc));
                 }
                 other => {
                     return Err(Error::PageCorrupted(format!(
@@ -1239,8 +1268,11 @@ impl Executor {
                         let mut key_map: std::collections::BTreeMap<Vec<u8>, Vec<Vec<u8>>> =
                             std::collections::BTreeMap::new();
                         for (_pk, row_bytes) in table_tree.range_scan(None, None)? {
-                            let tuple =
-                                Tuple::deserialize_for_table_txn(&row_bytes, schema.columns.len(), txn_mgr)?;
+                            let tuple = Tuple::deserialize_for_table_txn(
+                                &row_bytes,
+                                schema.columns.len(),
+                                txn_mgr,
+                            )?;
                             let pk_bytes = tuple[pk_idx].to_key_bytes();
                             let idx_key = Self::ikey(&col_pos, &tuple);
                             let pks = key_map.entry(idx_key).or_default();
@@ -1486,8 +1518,11 @@ impl Executor {
                 let res: Result<()> = (|| {
                     let mut updates = Vec::new();
                     for (pk, row_bytes) in txn_mgr.scan_unlocked(tid, &tree)? {
-                        let mut tuple =
-                            Tuple::deserialize_for_table_txn(&row_bytes, schema.columns.len(), txn_mgr)?;
+                        let mut tuple = Tuple::deserialize_for_table_txn(
+                            &row_bytes,
+                            schema.columns.len(),
+                            txn_mgr,
+                        )?;
                         if matches!(tuple.get(col_pos), Some(Value::Null)) {
                             if let Some(ref def_val) = default_value {
                                 tuple[col_pos] = def_val.clone();
@@ -1558,8 +1593,11 @@ impl Executor {
                 let tid = txn_mgr.begin_with_isolation(default_isolation)?;
                 let fill: Result<()> = (|| {
                     for (pk, row_bytes) in txn_mgr.scan_unlocked(tid, &tree)? {
-                        let mut tuple =
-                            Tuple::deserialize_for_table_txn(&row_bytes, schema.columns.len(), txn_mgr)?;
+                        let mut tuple = Tuple::deserialize_for_table_txn(
+                            &row_bytes,
+                            schema.columns.len(),
+                            txn_mgr,
+                        )?;
                         match Self::cast_value(&tuple[src_pos], &new_type) {
                             Ok(v) => tuple[shadow_pos] = v,
                             Err(m) => {
@@ -1572,7 +1610,12 @@ impl Executor {
                                 )));
                             }
                         }
-                        txn_mgr.put(tid, &tree, &pk, &Tuple::serialize_txn(&tuple, txn_mgr, tid)?)?;
+                        txn_mgr.put(
+                            tid,
+                            &tree,
+                            &pk,
+                            &Tuple::serialize_txn(&tuple, txn_mgr, tid)?,
+                        )?;
                     }
                     Ok(())
                 })();
@@ -1588,7 +1631,11 @@ impl Executor {
                 let vtid = txn_mgr.begin_with_isolation(default_isolation)?;
                 let verify: Result<()> = (|| {
                     for (_pk, row_bytes) in txn_mgr.scan_unlocked(vtid, &tree)? {
-                        let tuple = Tuple::deserialize_for_table_txn(&row_bytes, schema.columns.len(), txn_mgr)?;
+                        let tuple = Tuple::deserialize_for_table_txn(
+                            &row_bytes,
+                            schema.columns.len(),
+                            txn_mgr,
+                        )?;
                         if !matches!(tuple[src_pos], Value::Null)
                             && matches!(tuple[shadow_pos], Value::Null)
                         {
@@ -2988,6 +3035,7 @@ impl Executor {
             Value::Text(_) if col.data_type == DataType::Text => Ok(()),
             Value::Bool(_) if col.data_type == DataType::Bool => Ok(()),
             Value::Bytes(_) if col.data_type == DataType::Bytes => Ok(()),
+            Value::BlobRef(_, _, _) if col.data_type == DataType::Bytes => Ok(()),
             Value::Float(f) if col.data_type == DataType::Float && !f.0.is_nan() => Ok(()),
             _ => Err(Error::TransactionError(format!(
                 "Type mismatch for column '{}.{}': expected {:?}",
@@ -3262,7 +3310,8 @@ impl Executor {
         let mut matched_rows = Vec::new();
 
         for (old_pk_bytes, row_bytes) in entries {
-            let mut tuple = Tuple::deserialize_for_table_txn(&row_bytes, schema.columns.len(), txn_mgr)?;
+            let mut tuple =
+                Tuple::deserialize_for_table_txn(&row_bytes, schema.columns.len(), txn_mgr)?;
             if let Some(bf) = filter
                 && !bf.evaluate(&tuple)
             {
@@ -3479,8 +3528,11 @@ impl Executor {
                             if !seen_pks.insert(pk_bytes.clone()) {
                                 continue;
                             }
-                            let tuple =
-                                Tuple::deserialize_for_table_txn(&row_bytes, schema.columns.len(), txn_mgr)?;
+                            let tuple = Tuple::deserialize_for_table_txn(
+                                &row_bytes,
+                                schema.columns.len(),
+                                txn_mgr,
+                            )?;
                             if bf.evaluate(&tuple) {
                                 matched_rows.push((pk_bytes, tuple.clone()));
                                 matched_tuples.push(tuple);
@@ -3499,7 +3551,11 @@ impl Executor {
                     let entries = txn_mgr.scan_unlocked(txn_id, &tree)?;
                     let mut matched_rows = Vec::new();
                     for (pk_bytes, row_bytes) in entries {
-                        let tuple = Tuple::deserialize_for_table_txn(&row_bytes, schema.columns.len(), txn_mgr)?;
+                        let tuple = Tuple::deserialize_for_table_txn(
+                            &row_bytes,
+                            schema.columns.len(),
+                            txn_mgr,
+                        )?;
                         if bf.evaluate(&tuple) {
                             matched_rows.push((pk_bytes, tuple.clone()));
                             matched_tuples.push(tuple);
@@ -3565,9 +3621,7 @@ impl Executor {
             let col_name = &right_schema.columns[r_col].name;
             let mut indexes = catalog.get_table_indexes(right_schema.table_id);
             indexes.sort_by_key(|i| i.index_id);
-            indexes
-                .into_iter()
-                .find(|idx| &idx.column_name == col_name)
+            indexes.into_iter().find(|idx| &idx.column_name == col_name)
         };
 
         if !is_pk && sec_index.is_none() {
@@ -3614,8 +3668,11 @@ impl Executor {
                     if !seen_pks.insert(pk_bytes.clone()) {
                         continue;
                     }
-                    let tuple =
-                        Tuple::deserialize_for_table_txn(&row_bytes, right_schema.columns.len(), txn_mgr)?;
+                    let tuple = Tuple::deserialize_for_table_txn(
+                        &row_bytes,
+                        right_schema.columns.len(),
+                        txn_mgr,
+                    )?;
                     if right_filter.is_none_or(|bf| bf.evaluate(&tuple)) {
                         if is_serializable {
                             matched_rows.push((pk_bytes, tuple.clone()));
@@ -3774,7 +3831,11 @@ impl Executor {
                         continue;
                     }
                     if let Some(row_bytes) = txn_mgr.get(txn_id, &table_tree, &pk_bytes)? {
-                        let tuple = Tuple::deserialize_for_table_txn(&row_bytes, schema.columns.len(), txn_mgr)?;
+                        let tuple = Tuple::deserialize_for_table_txn(
+                            &row_bytes,
+                            schema.columns.len(),
+                            txn_mgr,
+                        )?;
                         if filter.is_none_or(|bf| bf.evaluate(&tuple)) {
                             matched_rows.push((pk_bytes, tuple.clone()));
                             matched_tuples.push(tuple);
@@ -3901,7 +3962,11 @@ impl Executor {
                         continue;
                     }
                     if let Some(row_bytes) = txn_mgr.get(txn_id, &table_tree, &pk_bytes)? {
-                        let tuple = Tuple::deserialize_for_table_txn(&row_bytes, schema.columns.len(), txn_mgr)?;
+                        let tuple = Tuple::deserialize_for_table_txn(
+                            &row_bytes,
+                            schema.columns.len(),
+                            txn_mgr,
+                        )?;
                         if filter.is_none_or(|bf| bf.evaluate(&tuple)) {
                             matched_rows.push((pk_bytes, tuple.clone()));
                             if skipped < offset {
@@ -4047,7 +4112,8 @@ impl Executor {
 
         let mut to_delete = Vec::new();
         for (pk_bytes, row_bytes) in entries {
-            let tuple = Tuple::deserialize_for_table_txn(&row_bytes, schema.columns.len(), txn_mgr)?;
+            let tuple =
+                Tuple::deserialize_for_table_txn(&row_bytes, schema.columns.len(), txn_mgr)?;
             if let Some(bf) = filter
                 && !bf.evaluate(&tuple)
             {

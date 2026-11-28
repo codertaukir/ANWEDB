@@ -842,6 +842,9 @@ fn value_json(value: &Value) -> String {
             let hex: String = b.iter().map(|byte| format!("{byte:02x}")).collect();
             format!(r#"{{"type":"bytes","hex":{}}}"#, json_string(&hex))
         }
+        Value::BlobRef(head, total, crc) => {
+            format!(r#"{{"type":"blob_ref","head_page_id":{head},"total_len":{total},"payload_crc32c":{crc}}}"#)
+        }
     }
 }
 

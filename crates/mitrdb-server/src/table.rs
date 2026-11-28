@@ -506,6 +506,7 @@ fn check_value(table: &str, col: &ColumnDef, v: &Value) -> Result<()> {
         Value::Text(_) if col.data_type == DataType::Text => Ok(()),
         Value::Bool(_) if col.data_type == DataType::Bool => Ok(()),
         Value::Bytes(_) if col.data_type == DataType::Bytes => Ok(()),
+        Value::BlobRef(_, _, _) if col.data_type == DataType::Bytes => Ok(()),
         Value::Float(f) if col.data_type == DataType::Float && !f.0.is_nan() => Ok(()),
         _ => Err(bad(format!(
             "type mismatch for column '{}.{}': expected {:?}",
@@ -1214,6 +1215,7 @@ fn lit(v: &Value) -> Result<String> {
         Value::Bool(b) => Ok(if *b { "TRUE" } else { "FALSE" }.to_string()),
         Value::Text(s) => Ok(format!("'{}'", s.replace('\'', "''"))),
         Value::Bytes(_) => Err(bad("bytes values cannot be used in a filter")),
+        Value::BlobRef(_, _, _) => Err(bad("blob_ref values cannot be used in a filter")),
         Value::Float(f) if !f.0.is_nan() => Ok(format!("{:?}", f.0)),
         Value::Float(_) => Err(bad("NaN cannot be used")),
         Value::Param(_) => Err(bad("parameter placeholders are not allowed here")),
@@ -1492,7 +1494,9 @@ impl Update<'_> {
                 return Err(bad(format!("column '{}' set twice", name)));
             }
             check_value(&self.table, col, v)?;
-            lit(v)?;
+            if !matches!(v, Value::BlobRef(_, _, _)) {
+                lit(v)?;
+            }
             params.push(v.clone());
             assigns.push(format!("{} = ${}", name, params.len()));
         }
