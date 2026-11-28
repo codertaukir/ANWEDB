@@ -23,6 +23,8 @@ const MIN_FRAME_BYTES: usize = 256;
 const DEFAULT_IO_TIMEOUT: Duration = Duration::from_millis(250);
 const DEFAULT_FRAME_TIMEOUT: Duration = Duration::from_secs(10);
 const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+const DEFAULT_BLOB_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+const DEFAULT_BLOB_TOTAL_TIMEOUT: Duration = Duration::from_secs(600);
 const AUTH_FAILURE_LIMIT: usize = 5;
 const AUTH_FAILURE_WINDOW: Duration = Duration::from_secs(60);
 const AUTH_FAILURE_TRACKED_IP_LIMIT: usize = 4096;
@@ -40,6 +42,10 @@ pub struct TcpServerConfig {
     /// Time allowed from connection start (including the TLS handshake) until the
     /// protocol hello (and the AUTH frame, when enabled) has been received.
     pub handshake_timeout: Duration,
+    /// Max idle time between BLOB upload chunks. Exceeded -> conn closes + rollback.
+    pub blob_idle_timeout: Duration,
+    /// Max total time for one BLOB upload from START to FINISH.
+    pub blob_total_timeout: Duration,
     /// Optional shared secret required before any session commands.
     /// Never transmit this token over a plaintext connection on an untrusted network.
     pub auth_token: Option<Zeroizing<String>>,
@@ -58,6 +64,8 @@ impl std::fmt::Debug for TcpServerConfig {
             .field("io_timeout", &self.io_timeout)
             .field("frame_timeout", &self.frame_timeout)
             .field("handshake_timeout", &self.handshake_timeout)
+            .field("blob_idle_timeout", &self.blob_idle_timeout)
+            .field("blob_total_timeout", &self.blob_total_timeout)
             .field(
                 "auth_token",
                 &self.auth_token.as_ref().map(|_| "[REDACTED]"),
@@ -77,6 +85,8 @@ impl Default for TcpServerConfig {
             io_timeout: DEFAULT_IO_TIMEOUT,
             frame_timeout: DEFAULT_FRAME_TIMEOUT,
             handshake_timeout: DEFAULT_HANDSHAKE_TIMEOUT,
+            blob_idle_timeout: DEFAULT_BLOB_IDLE_TIMEOUT,
+            blob_total_timeout: DEFAULT_BLOB_TOTAL_TIMEOUT,
             auth_token: None,
             tls_cert_path: None,
             tls_key_path: None,
@@ -155,6 +165,16 @@ impl Server {
         if config.handshake_timeout.is_zero() {
             return Err(Error::Io(
                 "handshake_timeout must be greater than zero".to_string(),
+            ));
+        }
+        if config.blob_idle_timeout.is_zero() {
+            return Err(Error::Io(
+                "blob_idle_timeout must be greater than zero".to_string(),
+            ));
+        }
+        if config.blob_total_timeout.is_zero() {
+            return Err(Error::Io(
+                "blob_total_timeout must be greater than zero".to_string(),
             ));
         }
 
@@ -423,10 +443,6 @@ fn serve_stream<S: Read + Write>(
         frame_timeout: Some(config.frame_timeout),
         deadline: conn_started.checked_add(config.handshake_timeout),
     };
-    let request_limits = FrameLimits {
-        frame_timeout: Some(config.frame_timeout),
-        deadline: None,
-    };
     let hello =
         match read_frame_with_limits(stream, config.max_frame_bytes, shutdown, handshake_limits)? {
             Some(frame) => frame,
@@ -489,23 +505,34 @@ fn serve_stream<S: Read + Write>(
 
     let session_id = server.create_session();
     let mut uploading = false;
+    let mut upload_started: Option<Instant> = None;
+    let mut upload_last: Option<Instant> = None;
     let result = loop {
         if shutdown.load(Ordering::Acquire) {
             break Ok(());
         }
+        let upload_deadline = if uploading {
+            let idle = upload_last.and_then(|last| last.checked_add(config.blob_idle_timeout));
+            let total = upload_started.and_then(|start| start.checked_add(config.blob_total_timeout));
+            match (idle, total) { (Some(i), Some(tt)) => Some(std::cmp::min(i, tt)), (Some(i), None) => Some(i), (None, Some(tt)) => Some(tt), (None, None) => None }
+        } else { None };
+        let cur_limits = FrameLimits { frame_timeout: Some(config.frame_timeout), deadline: upload_deadline };
         let request = match read_frame_with_limits(
             stream,
             config.max_frame_bytes,
             shutdown,
-            request_limits,
+            cur_limits,
         ) {
             Ok(Some(frame)) => frame,
             Ok(None) => break Ok(()),
             Err(err) => break Err(err),
         };
         if uploading {
+            upload_last = Some(Instant::now());
             if request.as_slice() == b"BLOB_UPLOAD_FINISH" {
                 uploading = false;
+                upload_started = None;
+                upload_last = None;
                 match server.finish_blob_write(session_id) {
                     Ok(desc) => {
                         write_response(stream, format!(r#"{{"status":"ok","result":{{"type":"blob_ref","head_page_id":{},"total_len":{},"payload_crc32c":{}}}}}"#, desc.head_page_id, desc.total_len, desc.payload_crc32c), config.max_frame_bytes)?;
@@ -546,6 +573,8 @@ fn serve_stream<S: Read + Write>(
             match server.begin_blob_write_default(session_id) {
                 Ok(()) => {
                     uploading = true;
+                    upload_started = Some(Instant::now());
+                    upload_last = Some(Instant::now());
                     write_response(stream, r#"{"status":"ok","result":"BLOB_UPLOAD_STARTED"}"#.to_string(), config.max_frame_bytes)?;
                 }
                 Err(err) => {
