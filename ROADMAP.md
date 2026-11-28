@@ -123,7 +123,7 @@ Source: `MITRDB_FULL_UPGRADE_AND_SCHEMA.md` (M/S/N list) + streaming BLOB prompt
 Base: local main d7f096d + uncommitted (overflow cap 256 KB, chain hop limit 128; GitHub main par abhi 16 KB). Baseline: 16-byte descriptor (`total_len` u32), WAL ~2x (full-body zero undo).
 
 ### Phase A: Streaming BLOB engine (doc M1, size 256 KB -> 100 MB+)
-- [ ] A1. `TUPLE_TAG_OVERFLOW_BLOB = 9` + 20-byte `OverflowDescriptor` v2 (`total_len` u64). Purane tags 6/7/8 aur 16-byte format untouched (backward compat test)
+- [x] A1. `TUPLE_TAG_OVERFLOW_BLOB = 9` + 20-byte `OverflowDescriptor` v2 (`total_len` u64). Purane tags 6/7/8 aur 16-byte format untouched (backward compat test). Done: `OverflowDescriptorV2` (20 B, u64 len) + tag 9, `collect_tuple_overflow_heads` v2 aware, 5 unit tests (`blob_descriptor_tests`); saaf HEAD par storage/exec/txn tests pass (storage lib 59). Tag 9 abhi koi likhta nahi (A2/A9)
 - [ ] A2. `BlobWriter` (`io::Write`): 64 KB chunks, exact-fit 4 KB pages, har page WAL-logged (full body + zero undo), 4-byte next-pointer patch record, running CRC32C, flat RAM (< 1 MB heap)
 - [ ] A3. `BlobReader` (`Read` + `Seek`) + `read_range(offset, len)`: per-page CRC + end-to-end CRC32C, hop limit hatao (length based check)
 - [ ] A4. `UndoAction::OverflowPages(Vec<PageId>)`: rollback / `rollback_to_mark` / `abort` par adhuri chain free; `stage_free_overflow_chain` + `collect_overflow_chain_pages` hop limit fix

@@ -21,6 +21,9 @@ pub const TUPLE_TAG_FLOAT: u8 = 5;
 pub const TUPLE_TAG_OVERFLOW_TEXT: u8 = 6;
 pub const TUPLE_TAG_OVERFLOW_BYTES: u8 = 7;
 pub const TUPLE_TAG_OVERFLOW_TUPLE: u8 = 8;
+pub const TUPLE_TAG_OVERFLOW_BLOB: u8 = 9;
+/// v2 descriptor: head_page_id u64 + total_len u64 + payload_crc32c u32.
+pub const OVERFLOW_DESCRIPTOR_V2_LEN: usize = 20;
 
 const OVERFLOW_PAGE_HEADER_LEN: usize = 8;
 pub const OVERFLOW_CHUNK_CAPACITY: usize = PAGE_SIZE - PAGE_HEADER_SIZE - OVERFLOW_PAGE_HEADER_LEN;
@@ -56,6 +59,49 @@ impl OverflowDescriptor {
             total_len,
             payload_crc32c,
         })
+    }
+}
+
+/// Descriptor for streaming BLOBs (`TUPLE_TAG_OVERFLOW_BLOB`). `total_len` is u64 so
+/// payloads above 4 GiB are representable. The 16-byte `OverflowDescriptor` (tags 6/7/8)
+/// is unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OverflowDescriptorV2 {
+    pub head_page_id: u64,
+    pub total_len: u64,
+    pub payload_crc32c: u32,
+}
+
+impl OverflowDescriptorV2 {
+    pub fn to_bytes(&self) -> [u8; OVERFLOW_DESCRIPTOR_V2_LEN] {
+        let mut out = [0u8; OVERFLOW_DESCRIPTOR_V2_LEN];
+        out[0..8].copy_from_slice(&self.head_page_id.to_le_bytes());
+        out[8..16].copy_from_slice(&self.total_len.to_le_bytes());
+        out[16..20].copy_from_slice(&self.payload_crc32c.to_le_bytes());
+        out
+    }
+
+    pub fn from_bytes(buf: &[u8]) -> Result<Self> {
+        if buf.len() < OVERFLOW_DESCRIPTOR_V2_LEN {
+            return Err(Error::PageCorrupted(
+                "Truncated overflow descriptor v2".to_string(),
+            ));
+        }
+        Ok(Self {
+            head_page_id: u64::from_le_bytes(buf[0..8].try_into().unwrap()),
+            total_len: u64::from_le_bytes(buf[8..16].try_into().unwrap()),
+            payload_crc32c: u32::from_le_bytes(buf[16..20].try_into().unwrap()),
+        })
+    }
+}
+
+impl From<OverflowDescriptor> for OverflowDescriptorV2 {
+    fn from(d: OverflowDescriptor) -> Self {
+        Self {
+            head_page_id: d.head_page_id,
+            total_len: u64::from(d.total_len),
+            payload_crc32c: d.payload_crc32c,
+        }
     }
 }
 
@@ -333,6 +379,19 @@ pub fn collect_tuple_overflow_heads(buf: &[u8]) -> Vec<PageId> {
                 }
                 pos += len;
             }
+            TUPLE_TAG_OVERFLOW_BLOB => {
+                if pos + OVERFLOW_DESCRIPTOR_V2_LEN > buf.len() {
+                    break;
+                }
+                if let Ok(desc) =
+                    OverflowDescriptorV2::from_bytes(&buf[pos..pos + OVERFLOW_DESCRIPTOR_V2_LEN])
+                    && let Ok(pid) = u32::try_from(desc.head_page_id)
+                    && pid != 0
+                {
+                    heads.push(pid);
+                }
+                pos += OVERFLOW_DESCRIPTOR_V2_LEN;
+            }
             TUPLE_TAG_OVERFLOW_TEXT | TUPLE_TAG_OVERFLOW_BYTES | TUPLE_TAG_OVERFLOW_TUPLE => {
                 if pos + OVERFLOW_DESCRIPTOR_LEN > buf.len() {
                     break;
@@ -352,4 +411,88 @@ pub fn collect_tuple_overflow_heads(buf: &[u8]) -> Vec<PageId> {
         }
     }
     heads
+}
+
+#[cfg(test)]
+mod blob_descriptor_tests {
+    use super::*;
+
+    #[test]
+    fn v2_roundtrip_len_above_u32() {
+        let d = OverflowDescriptorV2 {
+            head_page_id: 42,
+            total_len: 5_000_000_000,
+            payload_crc32c: 0xDEAD_BEEF,
+        };
+        let b = d.to_bytes();
+        assert_eq!(OVERFLOW_DESCRIPTOR_V2_LEN, 20);
+        assert_eq!(b.len(), 20);
+        assert_eq!(OverflowDescriptorV2::from_bytes(&b).unwrap(), d);
+    }
+
+    #[test]
+    fn v2_truncated_rejected() {
+        assert!(OverflowDescriptorV2::from_bytes(&[0u8; 19]).is_err());
+    }
+
+    #[test]
+    fn v1_layout_unchanged() {
+        let d = OverflowDescriptor {
+            head_page_id: 7,
+            total_len: 100,
+            payload_crc32c: 0x0102_0304,
+        };
+        let b = d.to_bytes();
+        assert_eq!(OVERFLOW_DESCRIPTOR_LEN, 16);
+        assert_eq!(b.len(), 16);
+        assert_eq!(&b[0..8], &7u64.to_le_bytes());
+        assert_eq!(&b[8..12], &100u32.to_le_bytes());
+        assert_eq!(&b[12..16], &0x0102_0304u32.to_le_bytes());
+        assert_eq!(OverflowDescriptor::from_bytes(&b).unwrap(), d);
+        assert_eq!(TUPLE_TAG_OVERFLOW_TEXT, 6);
+        assert_eq!(TUPLE_TAG_OVERFLOW_BYTES, 7);
+        assert_eq!(TUPLE_TAG_OVERFLOW_TUPLE, 8);
+        assert_eq!(TUPLE_TAG_OVERFLOW_BLOB, 9);
+    }
+
+    #[test]
+    fn v1_converts_to_v2() {
+        let v1 = OverflowDescriptor {
+            head_page_id: 5,
+            total_len: 123,
+            payload_crc32c: 9,
+        };
+        let v2 = OverflowDescriptorV2::from(v1);
+        assert_eq!(v2.head_page_id, 5);
+        assert_eq!(v2.total_len, 123);
+        assert_eq!(v2.payload_crc32c, 9);
+    }
+
+    #[test]
+    fn collect_heads_mixed_v1_v2() {
+        let v1 = OverflowDescriptor {
+            head_page_id: 7,
+            total_len: 100,
+            payload_crc32c: 1,
+        }
+        .to_bytes();
+        let v2 = OverflowDescriptorV2 {
+            head_page_id: 9,
+            total_len: 70_000_000,
+            payload_crc32c: 2,
+        }
+        .to_bytes();
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&3u16.to_le_bytes());
+        buf.push(TUPLE_TAG_OVERFLOW_BYTES);
+        buf.extend_from_slice(&v1);
+        buf.push(TUPLE_TAG_OVERFLOW_BLOB);
+        buf.extend_from_slice(&v2);
+        buf.push(TUPLE_TAG_INT64);
+        buf.extend_from_slice(&5i64.to_le_bytes());
+        assert_eq!(collect_tuple_overflow_heads(&buf), vec![7, 9]);
+        // truncated inside the v2 descriptor: no panic, only the first head
+        let cut = &buf[..2 + 1 + 16 + 1 + 10];
+        assert_eq!(collect_tuple_overflow_heads(cut), vec![7]);
+    }
 }
