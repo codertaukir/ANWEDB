@@ -143,12 +143,12 @@ Base: local main d7f096d + uncommitted (overflow cap 256 KB, chain hop limit 128
 - [ ] B6. Docs: README, `docs/LIMITATIONS.md`, ROADMAP limits section (proportional inline + streaming BLOB + chunked protocol)
 
 ### Phase C: Probe pehle, fix baad mein (doc ke "already there" claims verify karo)
-- [ ] C1. Pattern 3/4: `WHERE conv = ? AND created_at > ? ORDER BY created_at LIMIT N` composite `(conv, created_at)` par: plan kya hai (IndexRangeScan / sort?) + N=100k latency. Doc M5/S4
-- [ ] C2. Pending fetch: `WHERE device = ? AND state = 'pending' ORDER BY created_at LIMIT N` composite `(device, state, created_at)`
+- [x] C1. Pattern 3/4: [DONE probe+fix C1 d527b85, C1b-1 62d588c, C1b-2 0c1b89c; t10 6ms vs t100k 2.7s] `WHERE conv = ? AND created_at > ? ORDER BY created_at LIMIT N` composite `(conv, created_at)` par: plan kya hai (IndexRangeScan / sort?) + N=100k latency. Doc M5/S4
+- [ ] C2. Pending fetch: [NOTE DESC probe f418c5e C1 ka extension tha, roadmap C2 nahi] `WHERE device = ? AND state = 'pending' ORDER BY created_at LIMIT N` composite `(device, state, created_at)`
 - [ ] C3. Multi-session concurrent DML (Tokio-style: 1 session per request, 8-32 threads) exact counts + no deadlock. Doc M2/M9. Note: default session ek mutex hai
 - [ ] C4. `sync()` boot cost 70+ tables (idempotent re-run, O(n) ya O(n^2)). Doc M10
 - [ ] C5. Unique + NULL: bahut saare NULL allowed (`unique_null.rs` hai, composite unique par bhi). Doc M3
-- [ ] C6. Atomic multi-row insert in txn: 1 message + N envelopes + N deliveries (rollback pura). Doc M7
+- [x] C6. Atomic multi-row [DONE probe 370c011, fix nahi chahiye tha, rollback pura] insert in txn: 1 message + N envelopes + N deliveries (rollback pura). Doc M7
 - [ ] C7. Expiry purge: `DELETE ... WHERE expires_at < now` on 100k+ rows (WAL/memory bounded). Doc S6
 - [ ] C8. `COUNT(*) WHERE` filter (unread badge) on indexed col. Doc S9
 
