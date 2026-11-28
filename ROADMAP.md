@@ -135,7 +135,7 @@ Base: local main d7f096d + uncommitted (overflow cap 256 KB, chain hop limit 128
 - [x] A10. Limits doc: `OUT_OF_SPACE` ab sirf configured max (default 128 MB, configurable); SQL literal inline path bounded rahe. Done: `DEFAULT_MAX_BLOB_BYTES` 128 MiB in storage, `Server::max_blob_bytes/set_max_blob_bytes/begin_blob_write_default` (AtomicU64, default 128 MiB), BlobWriter max exceed `InvalidInput` -> `StorageFull` (`OUT_OF_SPACE: blob exceeds configured max length`), `Server::write_blob_chunk` maps StorageFull/max-message -> `Error::OutOfSpace`. SQL literal inline path bounded at 256 KiB+1, LIMITATIONS.md 16KB jhooth fixed. 3 tests.
 
 ### Phase B: Chunked wire protocol (TCP/TLS, 1 MB frame cap intact)
-- [ ] B1. Frame design: `BLOB_UPLOAD_START` (text) -> binary chunk frames (<= 64 KB) -> `BLOB_UPLOAD_FINISH` (reply `BlobRef`); upload state mein UTF-8 check bypass sirf chunk frames ke liye
+- [x] B1. Frame design: `BLOB_UPLOAD_START` (text) -> binary chunk frames (<= 64 KB) -> `BLOB_UPLOAD_FINISH` (reply `BlobRef`); upload state mein UTF-8 check bypass sirf chunk frames ke liye — probe 8e86cee + fix 65a8349, 2 tests pass
 - [ ] B2. `BLOB_DOWNLOAD_RANGE offset len` / `BLOB_DOWNLOAD_STREAM`: 64 KB frames wapas
 - [ ] B3. `blob_idle_timeout` (do chunks ke beech) + total upload deadline; timeout / disconnect par rollback, pages free (slow-loris test)
 - [ ] B4. Auth / limits: max blob size, max concurrent uploads per connection / server, TLS par bhi test
