@@ -3,7 +3,7 @@
 //! turns into a free page for losers), plus a 4-byte `next_page_id` patch record linking
 //! the previous page. Rollback is the caller's job: use `BlobFinished::pages` / `abandon`.
 
-use std::io::{self, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::sync::Arc;
 
 use mitrdb_common::{Error, INVALID_LSN, Lsn, PAGE_HEADER_SIZE, PAGE_SIZE, PageId, Result, TxnId};
@@ -11,7 +11,7 @@ use mitrdb_common::{Error, INVALID_LSN, Lsn, PAGE_HEADER_SIZE, PAGE_SIZE, PageId
 use crate::buffer_pool::BufferPoolManager;
 use crate::crc32c::Crc32cHasher;
 use crate::overflow::{NODE_KIND_OVERFLOW, OVERFLOW_CHUNK_CAPACITY, OverflowDescriptorV2};
-use crate::page::PAGE_TYPE_OVERFLOW;
+use crate::page::{PAGE_FLAG_FREE, PAGE_TYPE_OVERFLOW};
 use crate::wal::{LogRecord, WalManager};
 
 const BODY_LEN: usize = PAGE_SIZE - PAGE_HEADER_SIZE;
@@ -227,6 +227,265 @@ impl Write for BlobWriter {
     }
 }
 
+const CAP64: u64 = OVERFLOW_CHUNK_CAPACITY as u64;
+/// Every 64th page id of the chain is remembered so a seek walks at most 63 hops.
+const STRIDE: u64 = 64;
+/// Upper bound for one `read_range` call (the caller chunks big reads, e.g. 64 KB frames).
+pub const MAX_READ_RANGE_BYTES: usize = 16 * 1024 * 1024;
+
+#[derive(Clone, Copy)]
+struct Cursor {
+    idx: u64,
+    pid: PageId,
+    next: PageId,
+}
+
+fn corrupt(msg: String) -> Error {
+    Error::PageCorrupted(msg)
+}
+
+fn to_io_read(e: Error) -> io::Error {
+    match e {
+        Error::PageCorrupted(m) => io::Error::new(io::ErrorKind::InvalidData, m),
+        other => io::Error::other(other.to_string()),
+    }
+}
+
+/// Streaming reader over an overflow chain written by `BlobWriter` (or the old chain
+/// writer: same page layout). No chain length limit; memory is one page plus a small
+/// sparse index. Sequential reads from offset 0 verify the end-to-end CRC32C at EOF.
+pub struct BlobReader {
+    bpm: Arc<BufferPoolManager>,
+    desc: OverflowDescriptorV2,
+    pos: u64,
+    cur: Option<Cursor>,
+    stride: Vec<PageId>,
+    crc: Crc32cHasher,
+    crc_pos: u64,
+    crc_valid: bool,
+}
+
+impl BlobReader {
+    pub fn open(bpm: Arc<BufferPoolManager>, desc: OverflowDescriptorV2) -> Result<Self> {
+        if desc.total_len == 0 {
+            if desc.head_page_id != 0 {
+                return Err(corrupt("empty blob with a head page".to_string()));
+            }
+        } else if desc.head_page_id == 0 || desc.head_page_id > u64::from(u32::MAX) {
+            return Err(corrupt(format!(
+                "invalid blob head page {}",
+                desc.head_page_id
+            )));
+        }
+        let stride = if desc.total_len > 0 {
+            vec![desc.head_page_id as PageId]
+        } else {
+            Vec::new()
+        };
+        Ok(Self {
+            bpm,
+            desc,
+            pos: 0,
+            cur: None,
+            stride,
+            crc: Crc32cHasher::new(),
+            crc_pos: 0,
+            crc_valid: true,
+        })
+    }
+
+    pub fn len(&self) -> u64 {
+        self.desc.total_len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.desc.total_len == 0
+    }
+
+    pub fn position(&self) -> u64 {
+        self.pos
+    }
+
+    /// HTTP-style range read. `len` is clamped to the blob end; `offset > len()` is an error.
+    pub fn read_range(&mut self, offset: u64, len: usize) -> Result<Vec<u8>> {
+        if len > MAX_READ_RANGE_BYTES {
+            return Err(Error::Io(format!(
+                "range read of {len} bytes exceeds {MAX_READ_RANGE_BYTES}"
+            )));
+        }
+        let total = self.desc.total_len;
+        if offset > total {
+            return Err(Error::Io("range offset beyond blob end".to_string()));
+        }
+        let n = (len as u64).min(total - offset) as usize;
+        self.set_pos(offset);
+        let mut buf = vec![0u8; n];
+        let got = self.read_inner(&mut buf)?;
+        buf.truncate(got);
+        Ok(buf)
+    }
+
+    /// Stream the whole blob once (64 KB buffer) and check every page plus the CRC32C.
+    pub fn verify(&mut self) -> Result<()> {
+        self.set_pos(0);
+        let mut buf = vec![0u8; 64 * 1024];
+        loop {
+            if self.read_inner(&mut buf)? == 0 {
+                break;
+            }
+        }
+        if self.crc_valid {
+            // only reachable if nothing was ever read (empty blob handled in read_inner)
+            return Err(corrupt("blob CRC32C was not checked".to_string()));
+        }
+        Ok(())
+    }
+
+    fn page_count(&self) -> u64 {
+        self.desc.total_len.div_ceil(CAP64)
+    }
+
+    fn expected_len(&self, idx: u64) -> usize {
+        (self.desc.total_len - idx * CAP64).min(CAP64) as usize
+    }
+
+    fn set_pos(&mut self, new: u64) {
+        if new == 0 {
+            self.crc = Crc32cHasher::new();
+            self.crc_pos = 0;
+            self.crc_valid = true;
+        } else if new != self.crc_pos {
+            self.crc_valid = false;
+        }
+        self.pos = new;
+    }
+
+    fn note_stride(&mut self, idx: u64, pid: PageId) {
+        if pid != 0 && idx % STRIDE == 0 && (idx / STRIDE) as usize == self.stride.len() {
+            self.stride.push(pid);
+        }
+    }
+
+    /// Load chain page `idx`, validate it, run `f` on its payload, return `f`'s result and `next`.
+    fn load<R>(&self, pid: PageId, idx: u64, f: impl FnOnce(&[u8]) -> R) -> Result<(R, PageId)> {
+        let want = self.expected_len(idx);
+        let last = idx + 1 == self.page_count();
+        self.bpm.with_page(pid, |page| {
+            if page.page_type() != PAGE_TYPE_OVERFLOW || (page.flags() & PAGE_FLAG_FREE) != 0 {
+                return Err(corrupt(format!("blob page {pid} is not an overflow page")));
+            }
+            let body = &page.data[PAGE_HEADER_SIZE..];
+            if body[0] != NODE_KIND_OVERFLOW {
+                return Err(corrupt(format!("blob page {pid} has a wrong node kind")));
+            }
+            let len = u16::from_le_bytes(body[2..4].try_into().unwrap()) as usize;
+            if len != want {
+                return Err(corrupt(format!(
+                    "blob page {pid} (index {idx}) holds {len} bytes, expected {want}"
+                )));
+            }
+            let next = u32::from_le_bytes(body[4..8].try_into().unwrap());
+            if last != (next == 0) {
+                return Err(corrupt(format!(
+                    "blob page {pid} (index {idx}) has a wrong next pointer"
+                )));
+            }
+            Ok((f(&body[BODY_HEADER_LEN..BODY_HEADER_LEN + len]), next))
+        })
+    }
+
+    fn locate(&mut self, idx: u64) -> Result<PageId> {
+        if let Some(c) = self.cur {
+            if c.idx == idx {
+                return Ok(c.pid);
+            }
+            if c.idx + 1 == idx {
+                return Ok(c.next);
+            }
+        }
+        let k = ((idx / STRIDE) as usize).min(self.stride.len() - 1);
+        let mut i = k as u64 * STRIDE;
+        let mut pid = self.stride[k];
+        if let Some(c) = self.cur
+            && c.idx <= idx
+            && c.idx >= i
+        {
+            i = c.idx;
+            pid = c.pid;
+        }
+        while i < idx {
+            let ((), next) = self.load(pid, i, |_| ())?;
+            i += 1;
+            pid = next;
+            self.note_stride(i, pid);
+        }
+        Ok(pid)
+    }
+
+    fn read_inner(&mut self, out: &mut [u8]) -> Result<usize> {
+        let total = self.desc.total_len;
+        let start = self.pos;
+        let mut done = 0usize;
+        while done < out.len() && self.pos < total {
+            let idx = self.pos / CAP64;
+            let off = (self.pos % CAP64) as usize;
+            let pid = self.locate(idx)?;
+            let take = (out.len() - done).min(self.expected_len(idx) - off);
+            let dst = &mut out[done..done + take];
+            let ((), next) = self.load(pid, idx, |chunk| {
+                dst.copy_from_slice(&chunk[off..off + take]);
+            })?;
+            self.cur = Some(Cursor { idx, pid, next });
+            self.note_stride(idx + 1, next);
+            done += take;
+            self.pos += take as u64;
+        }
+        if done > 0 {
+            if self.crc_valid && self.crc_pos == start {
+                self.crc.update(&out[..done]);
+                self.crc_pos += done as u64;
+            } else {
+                self.crc_valid = false;
+            }
+        }
+        if self.pos == total && self.crc_valid && self.crc_pos == total {
+            let h = std::mem::take(&mut self.crc);
+            self.crc_valid = false;
+            if h.finalize() != self.desc.payload_crc32c {
+                return Err(corrupt("blob CRC32C mismatch".to_string()));
+            }
+        }
+        Ok(done)
+    }
+}
+
+impl Read for BlobReader {
+    fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+        self.read_inner(out).map_err(to_io_read)
+    }
+}
+
+impl Seek for BlobReader {
+    fn seek(&mut self, from: SeekFrom) -> io::Result<u64> {
+        let total = i128::from(self.desc.total_len);
+        let new = match from {
+            SeekFrom::Start(n) => i128::from(n),
+            SeekFrom::End(d) => total + i128::from(d),
+            SeekFrom::Current(d) => i128::from(self.pos) + i128::from(d),
+        };
+        if new < 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "seek before the start of the blob",
+            ));
+        }
+        let new = u64::try_from(new)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "seek position too large"))?;
+        self.set_pos(new);
+        Ok(new)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -366,6 +625,199 @@ mod tests {
         let (got, n) = walk(&bpm, fin.descriptor.head_page_id);
         assert_eq!(n, fin.pages.len());
         assert_eq!(got, payload);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+#[cfg(test)]
+mod reader_tests {
+    use super::*;
+    use crate::crc32c;
+    use crate::disk::DiskManager;
+    use crate::page::PAGE_TYPE_RAW;
+
+    fn env(name: &str, pool: usize) -> (std::path::PathBuf, Arc<BufferPoolManager>) {
+        let dir = std::env::temp_dir().join(format!("mitrdb_rd_{}_{}", name, std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let disk = Arc::new(DiskManager::open_or_create(dir.join("t.db")).unwrap());
+        let bpm = Arc::new(BufferPoolManager::new(disk, pool));
+        // page 0 is reserved in a real database (0 = end of chain)
+        let (p0, _) = bpm.new_page(PAGE_TYPE_RAW).unwrap();
+        bpm.unpin_page(p0, true).unwrap();
+        assert_eq!(p0, 0);
+        (dir, bpm)
+    }
+
+    fn pattern(n: usize, seed: u64) -> Vec<u8> {
+        let mut x = seed | 1;
+        (0..n)
+            .map(|_| {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                (x >> 24) as u8
+            })
+            .collect()
+    }
+
+    fn make(bpm: &Arc<BufferPoolManager>, payload: &[u8]) -> BlobFinished {
+        let mut w = BlobWriter::new(bpm.clone(), None, 1, INVALID_LSN, u64::MAX);
+        for c in payload.chunks(64 * 1024) {
+            w.write_all(c).unwrap();
+        }
+        w.finish().unwrap()
+    }
+
+    #[test]
+    fn sequential_read_roundtrip_verifies_crc() {
+        let (dir, bpm) = env("seq", 32);
+        let payload = pattern(1_000_000, 21);
+        let fin = make(&bpm, &payload);
+        let mut r = BlobReader::open(bpm.clone(), fin.descriptor).unwrap();
+        assert_eq!(r.len(), 1_000_000);
+        let mut got = Vec::new();
+        let mut buf = [0u8; 1000];
+        loop {
+            let n = r.read(&mut buf).unwrap();
+            if n == 0 {
+                break;
+            }
+            got.extend_from_slice(&buf[..n]);
+        }
+        assert!(got == payload, "payload mismatch");
+        assert_eq!(fin.descriptor.payload_crc32c, crc32c::checksum(&got));
+        r.verify().unwrap();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn random_range_reads_match_payload() {
+        let (dir, bpm) = env("range", 32);
+        let payload = pattern(2 * 1024 * 1024, 33);
+        let fin = make(&bpm, &payload);
+        let mut r = BlobReader::open(bpm.clone(), fin.descriptor).unwrap();
+        let mut x = 0x9E37_79B9_7F4A_7C15u64;
+        for _ in 0..200 {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            let off = (x % payload.len() as u64) as usize;
+            let len = ((x >> 32) % 70_000) as usize + 1;
+            let want = &payload[off..(off + len).min(payload.len())];
+            let got = r.read_range(off as u64, len).unwrap();
+            assert!(got == want, "range {off}+{len}");
+        }
+        // page boundaries
+        for k in 1..6usize {
+            let off = k * OVERFLOW_CHUNK_CAPACITY;
+            let got = r.read_range(off as u64 - 3, 10).unwrap();
+            assert_eq!(got, &payload[off - 3..off + 7]);
+        }
+        // clamped at the end, empty at the end, error beyond it, size cap
+        let tail = r.read_range(payload.len() as u64 - 5, 100).unwrap();
+        assert_eq!(tail, &payload[payload.len() - 5..]);
+        assert!(r.read_range(payload.len() as u64, 10).unwrap().is_empty());
+        assert!(r.read_range(payload.len() as u64 + 1, 10).is_err());
+        assert!(r.read_range(0, MAX_READ_RANGE_BYTES + 1).is_err());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn seek_variants() {
+        let (dir, bpm) = env("seek", 32);
+        let payload = pattern(50_000, 9);
+        let fin = make(&bpm, &payload);
+        let mut r = BlobReader::open(bpm.clone(), fin.descriptor).unwrap();
+        let mut b = [0u8; 32];
+        assert_eq!(r.seek(SeekFrom::End(-10)).unwrap(), 49_990);
+        assert_eq!(r.read(&mut b).unwrap(), 10);
+        assert_eq!(&b[..10], &payload[49_990..]);
+        assert_eq!(r.read(&mut b).unwrap(), 0);
+        r.seek(SeekFrom::Start(5)).unwrap();
+        assert_eq!(r.seek(SeekFrom::Current(10)).unwrap(), 15);
+        assert_eq!(r.read(&mut b[..4]).unwrap(), 4);
+        assert_eq!(&b[..4], &payload[15..19]);
+        assert!(r.seek(SeekFrom::Current(-100)).is_err());
+        assert_eq!(r.position(), 19);
+        r.seek(SeekFrom::Start(1_000_000)).unwrap();
+        assert_eq!(r.read(&mut b).unwrap(), 0);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn deep_seek_builds_stride_index() {
+        let (dir, bpm) = env("deep", 32);
+        let payload = pattern(3 * 1024 * 1024, 77); // ~776 pages
+        let fin = make(&bpm, &payload);
+        let mut r = BlobReader::open(bpm.clone(), fin.descriptor).unwrap();
+        let far = payload.len() as u64 - 5_000;
+        let got = r.read_range(far, 4_000).unwrap();
+        assert!(got == payload[far as usize..far as usize + 4_000]);
+        assert!(r.stride.len() >= 12, "stride entries: {}", r.stride.len());
+        let got = r.read_range(1_000, 4_000).unwrap();
+        assert!(got == payload[1_000..5_000]);
+        let mid = 1_700_000u64;
+        let got = r.read_range(mid, 9_000).unwrap();
+        assert!(got == payload[mid as usize..mid as usize + 9_000]);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn flipped_payload_byte_fails_crc_but_other_ranges_read() {
+        let (dir, bpm) = env("crc", 32);
+        let payload = pattern(5 * OVERFLOW_CHUNK_CAPACITY, 4);
+        let fin = make(&bpm, &payload);
+        bpm.update_page_data(fin.pages[2], |p| {
+            p.data[PAGE_HEADER_SIZE + BODY_HEADER_LEN + 100] ^= 0xFF;
+            Ok(())
+        })
+        .unwrap();
+        let mut r = BlobReader::open(bpm.clone(), fin.descriptor).unwrap();
+        let e = r.verify().unwrap_err();
+        assert!(e.to_string().contains("CRC32C"), "{e}");
+        assert_eq!(r.read_range(0, 1000).unwrap(), &payload[..1000]);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn wrong_chunk_len_is_detected() {
+        let (dir, bpm) = env("len", 32);
+        let payload = pattern(3 * OVERFLOW_CHUNK_CAPACITY, 6);
+        let fin = make(&bpm, &payload);
+        bpm.update_page_data(fin.pages[1], |p| {
+            p.data[PAGE_HEADER_SIZE + 2..PAGE_HEADER_SIZE + 4].copy_from_slice(&7u16.to_le_bytes());
+            Ok(())
+        })
+        .unwrap();
+        let mut r = BlobReader::open(bpm.clone(), fin.descriptor).unwrap();
+        assert!(r.read_range(OVERFLOW_CHUNK_CAPACITY as u64, 10).is_err());
+        let mut buf = vec![0u8; payload.len()];
+        let e = r.seek(SeekFrom::Start(0)).and_then(|_| r.read_exact(&mut buf));
+        assert_eq!(e.unwrap_err().kind(), io::ErrorKind::InvalidData);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn empty_blob_and_bad_descriptors() {
+        let (dir, bpm) = env("empty", 8);
+        let empty = OverflowDescriptorV2 {
+            head_page_id: 0,
+            total_len: 0,
+            payload_crc32c: 0,
+        };
+        let mut r = BlobReader::open(bpm.clone(), empty).unwrap();
+        assert!(r.is_empty());
+        let mut b = [0u8; 8];
+        assert_eq!(r.read(&mut b).unwrap(), 0);
+        r.verify().unwrap();
+        let bad = |head, total| OverflowDescriptorV2 {
+            head_page_id: head,
+            total_len: total,
+            payload_crc32c: 0,
+        };
+        assert!(BlobReader::open(bpm.clone(), bad(0, 10)).is_err());
+        assert!(BlobReader::open(bpm.clone(), bad(5, 0)).is_err());
+        assert!(BlobReader::open(bpm.clone(), bad(u64::MAX, 10)).is_err());
         let _ = std::fs::remove_dir_all(dir);
     }
 }
