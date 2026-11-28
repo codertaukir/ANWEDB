@@ -2017,8 +2017,8 @@ impl QueryEngine {
             if compat {
                 let sc = &schema.columns[first_sort_col].name;
                 let pk_desc = if sort_keys.len() == 2 { sort_keys[1].1 } else { false };
-                if let Some(bf) = &bound_filter {
-                    if let Some((im2, r)) = Self::composite_prefix_range(&schema, &indexes, &bf.predicate, 1) {
+                if let Some(bf) = &bound_filter
+                    && let Some((im2, r)) = Self::composite_prefix_range(&schema, &indexes, &bf.predicate, 1) {
                         let parts: Vec<&str> = im2.column_name.split(',').collect();
                         if parts.len() >= 2 && parts[1] == sc {
                             let ordered_ranges = {
@@ -2048,7 +2048,6 @@ impl QueryEngine {
                             return PhysicalPlan::IndexOrderedScan { schema, index: im2, ranges: ordered_ranges, descending, pk_descending: pk_desc, filter: Some(bf.clone()), projection, limit, offset };
                         }
                     }
-                }
             }
         }
         // Check if an existing secondary B+Tree index can directly satisfy ORDER BY
