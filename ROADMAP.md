@@ -144,7 +144,7 @@ Base: local main d7f096d + uncommitted (overflow cap 256 KB, chain hop limit 128
 
 ### Phase C: Probe pehle, fix baad mein (doc ke "already there" claims verify karo)
 - [x] C1. Pattern 3/4: [DONE probe+fix C1 d527b85, C1b-1 62d588c, C1b-2 0c1b89c; t10 6ms vs t100k 2.7s] `WHERE conv = ? AND created_at > ? ORDER BY created_at LIMIT N` composite `(conv, created_at)` par: plan kya hai (IndexRangeScan / sort?) + N=100k latency. Doc M5/S4
-- [ ] C2. Pending fetch: [NOTE DESC probe f418c5e C1 ka extension tha, roadmap C2 nahi] `WHERE device = ? AND state = 'pending' ORDER BY created_at LIMIT N` composite `(device, state, created_at)`
+- [x] C2. Pending fetch: [NOTE DESC probe f418c5e C1 ka extension tha, roadmap C2 nahi] `WHERE device = ? AND state = 'pending' ORDER BY created_at LIMIT N` composite `(device, state, created_at)` — probe f13ce5a + fix 6777d34, IndexOrderedScan, t10=6423 t1000=38424 t100k=2917730
 - [ ] C3. Multi-session concurrent DML (Tokio-style: 1 session per request, 8-32 threads) exact counts + no deadlock. Doc M2/M9. Note: default session ek mutex hai
 - [ ] C4. `sync()` boot cost 70+ tables (idempotent re-run, O(n) ya O(n^2)). Doc M10
 - [ ] C5. Unique + NULL: bahut saare NULL allowed (`unique_null.rs` hai, composite unique par bhi). Doc M3
